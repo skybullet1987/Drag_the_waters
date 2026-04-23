@@ -1,8 +1,13 @@
-# region imports
-from AlgorithmImports import *
-import json
+import argparse
 from datetime import datetime, timedelta
-# endregion
+
+try:
+    from AlgorithmImports import *  # type: ignore
+except Exception:  # pragma: no cover - local CLI/testing mode
+    class PythonData:  # minimal stub for CLI/test environments
+        pass
+
+from kraken_client import fetch_24h_volume
 
 class FearGreedData(PythonData):
     """
@@ -57,3 +62,53 @@ class FearGreedData(PythonData):
             
         except Exception:
             return None
+
+
+# High-fee/high-churn symbols observed to underperform in recent backtests.
+MEME_BLOCKLIST = {"TRUMPUSD", "MELANIAUSD", "FWOGUSD", "XCNUSD", "GIGAUSD", "TURBOUSD", "FTMUSD"}
+
+
+def select_top_universe(client, *, top_n=10, min_volume_usd=50_000_000, quote="USD", exclude_meme=True, meme_blocklist=None):
+    quote = str(quote).upper()
+    meme_blocklist = MEME_BLOCKLIST if meme_blocklist is None else {str(x).upper() for x in meme_blocklist}
+    volume_map = client.fetch_24h_volume()
+    pairs = []
+    for pair, volume_usd in volume_map.items():
+        pair_u = str(pair).replace("/", "").upper()
+        if not pair_u.endswith(quote):
+            continue
+        if float(volume_usd) < float(min_volume_usd):
+            continue
+        if exclude_meme and pair_u in meme_blocklist:
+            continue
+        pairs.append((pair_u, float(volume_usd)))
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in pairs[: int(top_n)]]
+
+
+class _KrakenClientAdapter:
+    @staticmethod
+    def fetch_24h_volume():
+        return fetch_24h_volume()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Select top Kraken USD universe by 24h volume.")
+    parser.add_argument("--top", type=int, default=10)
+    parser.add_argument("--min-volume", type=float, default=50_000_000)
+    parser.add_argument("--quote", type=str, default="USD")
+    parser.add_argument("--include-meme", action="store_true")
+    args = parser.parse_args()
+    symbols = select_top_universe(
+        _KrakenClientAdapter(),
+        top_n=args.top,
+        min_volume_usd=args.min_volume,
+        quote=args.quote,
+        exclude_meme=not args.include_meme,
+    )
+    for symbol in symbols:
+        print(symbol)
+
+
+if __name__ == "__main__":
+    main()
