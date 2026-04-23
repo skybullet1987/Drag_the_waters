@@ -43,3 +43,8 @@ def test_svm_allows_entry_blocks_on_low_edge():
     algo = DummyAlgo(enabled=True, forecast=101.0)
     assert svm_allows_entry(algo, "BTCUSD", 1) is False
     assert algo._last_skip_reason.startswith("svm_block long")
+
+
+def test_svm_allows_entry_allows_high_edge():
+    algo = DummyAlgo(enabled=True, forecast=104.0)
+    assert svm_allows_entry(algo, "BTCUSD", 1) is True
