@@ -1,0 +1,30 @@
+pairs:
+  - XBT/USD
+  - ETH/USD
+  - SOL/USD
+interval: 60
+wavelet:
+  wavelet: db4
+  level: 3
+  window: 256
+svm:
+  C: 1.0
+  gamma: scale
+  neutral_threshold: 0.55
+walk_forward:
+  mode: expanding
+  min_train_size: 500
+  train_window: 2000
+  retrain_every: 24
+  drop_flat: true
+retrain_cadence_bars: 24
+fees:
+  taker: 0.0026
+  maker: 0.0016
+k_threshold: 2.0
+label_horizon: 1
+risk_per_trade: 0.02
+max_daily_turnover: 3.0
+min_holding_period_bars: 3
+min_volume_usd: 1000000
+assumed_slippage: 0.0015
