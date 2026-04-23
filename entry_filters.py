@@ -13,9 +13,13 @@ from svm_wavelet import (
     causal_wavelet_features,
 )
 
+DEFAULT_HISTORY = 256
+WAVELET_LEVEL = 2
+MIN_BARS_REQUIRED = 64
+
 
 class BarHistory:
-    def __init__(self, maxlen=256):
+    def __init__(self, maxlen=DEFAULT_HISTORY):
         self.maxlen = int(maxlen)
         self._buffers = defaultdict(lambda: deque(maxlen=self.maxlen))
 
@@ -40,7 +44,7 @@ def _normalize_pair(symbol):
 
 
 class SvmWaveletEntryFilter:
-    def __init__(self, model_dir="./artifacts", confidence=0.55, history_size=256):
+    def __init__(self, model_dir="./artifacts", confidence=0.55, history_size=DEFAULT_HISTORY):
         self.confidence = float(confidence)
         self.registry = ModelRegistry(root=model_dir)
         self.history = BarHistory(maxlen=history_size)
@@ -103,13 +107,13 @@ class SvmWaveletEntryFilter:
             return False, {"reason": "no_model", "proba": 0.0}
 
         bars = self.history.frame(symbol)
-        if len(bars) < 64:
+        if len(bars) < MIN_BARS_REQUIRED:
             return False, {"reason": "insufficient_history", "proba": 0.0}
 
         frame = bars.copy()
         for col in ("open", "high", "low", "close", "volume"):
             frame[col] = pd.to_numeric(frame.get(col), errors="coerce")
-        wave = causal_wavelet_features(frame["close"], window=min(256, len(frame)), level=2)
+        wave = causal_wavelet_features(frame["close"], window=min(DEFAULT_HISTORY, len(frame)), level=WAVELET_LEVEL)
         feats = pd.concat([wave, build_ta_features(frame)], axis=1).dropna()
         if feats.empty:
             return False, {"reason": "no_features", "proba": 0.0}

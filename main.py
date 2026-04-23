@@ -1115,11 +1115,12 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
             if not intraday_volume_ok(self, sym, val):
                 continue
             if self._entry_filter is not None:
-                ok, meta = self._entry_filter.allows(sym.Value, "long", fee_bps=self.expected_round_trip_fees * 5000.0, slippage_bps=self.fee_slippage_buffer * 10000.0)
+                ok, meta = self._entry_filter.allows(sym.Value, "long", fee_bps=self.expected_round_trip_fees*5e3, slippage_bps=self.fee_slippage_buffer*1e4)
                 if not ok:
                     if meta.get("reason") == "no_model":
                         self.Debug(f"no_model symbol={sym.Value}")
-                    self.Debug(f"entry_filter_rejected symbol={sym.Value} reason={meta.get('reason')} proba={meta.get('proba',0):.3f}")
+                    else:
+                        self.Debug(f"entry_filter_rejected symbol={sym.Value} reason={meta.get('reason')} proba={meta.get('proba',0):.3f}")
                     continue
 
             try:

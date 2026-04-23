@@ -1,10 +1,12 @@
 import time
 from dataclasses import dataclass
+import logging
 
 import pandas as pd
 import requests
 
 KRAKEN_BASE_URL = "https://api.kraken.com"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -123,5 +125,8 @@ def fetch_24h_volume(session=None, rate_limiter=None):
             volume_24h = float(ticker["v"][1])
         except Exception:
             continue
-        out[_canonical_pair_name(raw_pair)] = max(0.0, last * volume_24h)
+        volume_usd = last * volume_24h
+        if volume_usd < 0:
+            logger.warning("Negative Kraken volume_usd for pair %s clamped to zero", raw_pair)
+        out[_canonical_pair_name(raw_pair)] = max(0.0, volume_usd)
     return out

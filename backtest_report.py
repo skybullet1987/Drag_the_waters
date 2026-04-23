@@ -5,6 +5,7 @@ import pandas as pd
 
 
 ENTRY_PREFIX = "entry"
+EPSILON = 1e-12
 
 
 def _is_entry_tag(tag):
@@ -16,6 +17,12 @@ def _fee_bps_for_row(row, fee_bps, maker_bps):
     if "post" in tag or "maker" in tag:
         return maker_bps
     return fee_bps
+
+
+def _calculate_gross_pnl(entry_price, exit_price, qty, lot_side):
+    if lot_side > 0:
+        return (exit_price - entry_price) * qty
+    return (entry_price - exit_price) * qty
 
 
 def load_orders(path):
@@ -61,7 +68,7 @@ def analyze_orders(df, *, starting_equity=5000.0, fee_bps=26.0, maker_bps=16.0):
         side = 1 if qty > 0 else -1
         lot_queue = open_lots.setdefault(symbol, deque())
         notional = float(abs(row.abs_value))
-        per_unit_fee = float(row.fee) / max(abs(qty), 1e-12)
+        per_unit_fee = float(row.fee) / max(abs(qty), EPSILON)
         is_entry = _is_entry_tag(row.Tag)
         if is_entry:
             lot_queue.append(
@@ -77,17 +84,17 @@ def analyze_orders(df, *, starting_equity=5000.0, fee_bps=26.0, maker_bps=16.0):
             continue
 
         remaining = abs(qty)
-        while remaining > 1e-12 and lot_queue:
+        while remaining > EPSILON and lot_queue:
             lot = lot_queue[0]
             if lot["side"] != -side:
                 break
             matched = min(remaining, lot["qty"])
             entry_price = float(lot["price"])
             exit_price = float(row.Price)
-            gross = (exit_price - entry_price) * matched if lot["side"] > 0 else (entry_price - exit_price) * matched
+            gross = _calculate_gross_pnl(entry_price, exit_price, matched, lot["side"])
             fee = matched * (lot["fee_per_unit"] + per_unit_fee)
             net = gross - fee
-            base_notional = max(abs(entry_price * matched), 1e-12)
+            base_notional = max(abs(entry_price * matched), EPSILON)
             trades.append(
                 {
                     "symbol": symbol,
@@ -105,7 +112,7 @@ def analyze_orders(df, *, starting_equity=5000.0, fee_bps=26.0, maker_bps=16.0):
             )
             lot["qty"] -= matched
             remaining -= matched
-            if lot["qty"] <= 1e-12:
+            if lot["qty"] <= EPSILON:
                 lot_queue.popleft()
 
     trades_df = pd.DataFrame(trades)
@@ -130,7 +137,7 @@ def analyze_orders(df, *, starting_equity=5000.0, fee_bps=26.0, maker_bps=16.0):
     expectancy = win_rate * avg_win - (1.0 - win_rate) * avg_loss
     required_wr = avg_loss / (avg_win + avg_loss) if (avg_win + avg_loss) > 0 else 0.0
     edge_gap = win_rate - required_wr
-    turnover = float(filled["abs_value"].sum() / max(starting_equity, 1e-12))
+    turnover = float(filled["abs_value"].sum() / max(starting_equity, EPSILON))
     min_t, max_t = filled["Time"].min(), filled["Time"].max()
     days = max(((max_t - min_t).total_seconds() / 86400.0), 0.0) + 1.0 if pd.notna(min_t) and pd.notna(max_t) else 1.0
     trades_per_day = float(len(trades_df) / days)
@@ -147,7 +154,7 @@ def analyze_orders(df, *, starting_equity=5000.0, fee_bps=26.0, maker_bps=16.0):
         ("Required win rate to break even", required_wr),
         ("Edge gap", edge_gap),
         ("Total fees $", total_fees),
-        ("Fees as % of starting equity", total_fees / max(starting_equity, 1e-12)),
+        ("Fees as % of starting equity", total_fees / max(starting_equity, EPSILON)),
         ("Turnover", turnover),
         ("Trades/day", trades_per_day),
     ]

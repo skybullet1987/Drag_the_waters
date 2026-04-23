@@ -64,11 +64,13 @@ class FearGreedData(PythonData):
             return None
 
 
+# High-fee/high-churn symbols observed to underperform in recent backtests.
 MEME_BLOCKLIST = {"TRUMPUSD", "MELANIAUSD", "FWOGUSD", "XCNUSD", "GIGAUSD", "TURBOUSD", "FTMUSD"}
 
 
-def select_top_universe(client, *, top_n=10, min_volume_usd=50_000_000, quote="USD", exclude_meme=True):
+def select_top_universe(client, *, top_n=10, min_volume_usd=50_000_000, quote="USD", exclude_meme=True, meme_blocklist=None):
     quote = str(quote).upper()
+    meme_blocklist = MEME_BLOCKLIST if meme_blocklist is None else {str(x).upper() for x in meme_blocklist}
     volume_map = client.fetch_24h_volume()
     pairs = []
     for pair, volume_usd in volume_map.items():
@@ -77,7 +79,7 @@ def select_top_universe(client, *, top_n=10, min_volume_usd=50_000_000, quote="U
             continue
         if float(volume_usd) < float(min_volume_usd):
             continue
-        if exclude_meme and pair_u in MEME_BLOCKLIST:
+        if exclude_meme and pair_u in meme_blocklist:
             continue
         pairs.append((pair_u, float(volume_usd)))
     pairs.sort(key=lambda x: x[1], reverse=True)
