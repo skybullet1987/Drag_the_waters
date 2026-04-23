@@ -1,7 +1,8 @@
 import time
 from dataclasses import dataclass
-import requests
+
 import pandas as pd
+import requests
 
 KRAKEN_BASE_URL = "https://api.kraken.com"
 
@@ -83,7 +84,6 @@ def get_usd_pairs(min_volume_usd=1_000_000, session=None, rate_limiter=None):
         wsname = pair_data.get("wsname")
         if not wsname or not wsname.endswith("/USD"):
             continue
-        # Exclude Kraken dark/derivative-style instruments marked with `.d` suffix in wsname.
         if ".d" in wsname:
             continue
 
