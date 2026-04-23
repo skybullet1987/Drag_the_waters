@@ -3,12 +3,17 @@ from execution import *
 from realistic_slippage import RealisticCryptoSlippage
 from events import on_order_event
 from scoring import MicroScalpEngine
-from entry_filters import build_default_filter
+from svm_wavelet_qc import SvmWaveletForecaster, svm_allows_entry
 from collections import deque
 import numpy as np
 from QuantConnect.Orders.Fees import FeeModel, OrderFee
 from QuantConnect.Securities import CashAmount
 # endregion
+
+SYMBOL_BLACKLIST = frozenset(set(globals().get("SYMBOL_BLACKLIST", frozenset())) | {
+    "TRUMPUSD", "MELANIAUSD", "FWOGUSD", "XCNUSD", "GIGAUSD",
+    "TURBOUSD", "FTMUSD", "JUPUSD", "ONDOUSD",
+})
 
 
 class KrakenTieredFeeModel(FeeModel):
@@ -75,9 +80,6 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.SetBrokerageModel(BrokerageName.Kraken, AccountType.Cash)
 
         self.entry_threshold = 0.40
-        self.entry_filter_mode = str(self.GetParameter("entry_filter") or "none").lower()
-        self.svm_confidence = float(self.GetParameter("svm_confidence") or 0.55)
-        self._entry_filter = build_default_filter(model_dir="./artifacts", confidence=self.svm_confidence) if self.entry_filter_mode == "svm_wavelet" else None
         self.high_conviction_threshold = 0.50
         self.quick_take_profit = self._get_param("quick_take_profit", 0.100)   # was 0.150
         self.tight_stop_loss   = self._get_param("tight_stop_loss",   0.050)   # was 0.035
@@ -92,7 +94,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.stale_position_hours       = self._get_param("stale_position_hours",       10.0)  # was 6.0
 
         self.atr_trail_mult      = 3.5
-        self.min_trail_hold_minutes = 30
+        self.min_trail_hold_minutes = 90
 
         self.position_size_pct  = 0.90
         self.max_positions      = 3
@@ -116,7 +118,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.spread_median_window   = 12
         self.spread_widen_mult      = 2.0    # Tighter: 2x median (was 2.5x)
         self.min_dollar_volume_usd  = 50000  # $50K min (was $20K)
-        self.min_volume_usd         = 25000  # $25K min (was $10K)
+        self.min_volume_usd         = 5_000_000  # $5M min
 
         self.skip_hours_utc         = []
         self.max_daily_trades       = 24000
@@ -128,7 +130,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
 
         self.expected_round_trip_fees = 0.0060
         self.fee_slippage_buffer      = 0.002
-        self.min_expected_profit_pct  = 0.012
+        self.min_expected_profit_pct  = 0.020
         self.adx_min_period           = 10
 
         self.stale_order_timeout_seconds      = 30
@@ -180,7 +182,8 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self._breakeven_stops       = {}
         self._partial_sell_symbols  = set()
         self._choppy_regime_entries = {}
-        self.partial_tp_threshold   = 0.045
+        # Partial TP disabled — caps winners at ~0.6R while losers run full 1R, guaranteeing avg_win < avg_loss.
+        self.partial_tp_threshold   = float("inf")
         self.stagnation_minutes     = 360
         self.stagnation_pnl_threshold = 0.003
         self.rsi_peaked_overbought = {}
@@ -239,7 +242,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.symbol_penalty_threshold = 3    # consecutive losses to trigger penalty
         self.symbol_penalty_size_mult = 0.50 # halve position size on penalized symbols
 
-        self.max_universe_size = 150  # Focus on top 30 liquid assets (was 75)
+        self.max_universe_size = 25
 
         self.kraken_status = "unknown"
         self._last_skip_reason = None
@@ -277,6 +280,14 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.Settings.InsightScore = False
 
         self._scoring_engine = MicroScalpEngine(self)
+        self._svm_forecaster = SvmWaveletForecaster(refit_every_bars=60, sample_size=10)
+        self._svm_filter_enabled = True
+        try:
+            param = self.GetParameter("svm_filter_enabled")
+            if param is not None and param != "":
+                self._svm_filter_enabled = bool(int(param))
+        except Exception:
+            pass
 
         if self.LiveMode:
             cleanup_object_store(self)
@@ -303,6 +314,10 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
 
     def _record_exit_pnl(self, symbol, entry_price, exit_price, exit_tag="Unknown"):
         return record_exit_pnl(self, symbol, entry_price, exit_price, exit_tag=exit_tag)
+
+    def _svm_allows_entry(self, symbol, side):
+        """side: +1 for long, -1 for short. Returns True if filter passes or is disabled."""
+        return svm_allows_entry(self, symbol, side)
 
     def ResetDailyCounters(self):
         self.daily_trade_count = 0
@@ -369,6 +384,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
     def _initialize_symbol(self, symbol):
         self.crypto_data[symbol] = {
             'prices': deque(maxlen=self.lookback),
+            'svm_prices': deque(maxlen=SvmWaveletForecaster.LOOKBACK),
             'returns': deque(maxlen=self.lookback),
             'volume': deque(maxlen=self.lookback),
             'volume_ma': deque(maxlen=self.medium_period),
@@ -513,6 +529,7 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         low = float(bar.Low)
         volume = float(bar.Volume)
         crypto['prices'].append(price)
+        crypto['svm_prices'].append(price)
         crypto['highs'].append(high)
         crypto['lows'].append(low)
         if crypto['last_price'] > 0:
@@ -587,8 +604,6 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         sp = get_spread_pct(self, symbol)
         if sp is not None:
             crypto['spreads'].append(sp)
-        if self._entry_filter is not None:
-            self._entry_filter.update(symbol.Value, {"open": float(bar.Open), "high": float(bar.High), "low": float(bar.Low), "close": float(bar.Close), "volume": float(bar.Volume)})
         if quote_bar is not None:
             try:
                 bid_sz = float(quote_bar.LastBidSize) if quote_bar.LastBidSize else 0.0
@@ -1030,6 +1045,8 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
                 if recent_dv < dv_threshold:
                     reject_dollar_volume += 1
                     continue
+            if not self._svm_allows_entry(sym, 1):
+                continue
 
             vol = self._annualized_vol(crypto)
             size = self._calculate_position_size(net_score, threshold_now, vol)
@@ -1114,15 +1131,6 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
 
             if not intraday_volume_ok(self, sym, val):
                 continue
-            if self._entry_filter is not None:
-                ok, meta = self._entry_filter.allows(sym.Value, "long", fee_bps=self.expected_round_trip_fees*5e3, slippage_bps=self.fee_slippage_buffer*1e4)
-                if not ok:
-                    if meta.get("reason") == "no_model":
-                        self.Debug(f"no_model symbol={sym.Value}")
-                    else:
-                        self.Debug(f"entry_filter_rejected symbol={sym.Value} reason={meta.get('reason')} proba={meta.get('proba',0):.3f}")
-                    continue
-
             try:
                 ticket = place_limit_or_market(self, sym, qty, timeout_seconds=30, tag="Entry")
                 if ticket is not None:
@@ -1263,7 +1271,6 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
                 and pnl >= self.partial_tp_threshold):
             if partial_smart_sell(self, symbol, 0.50, "Partial TP"):
                 self._partial_tp_taken[symbol] = True
-                self._breakeven_stops[symbol] = entry * 1.005
                 self.Debug(f"PARTIAL TP: {symbol.Value} | PnL:{pnl:+.2%} | SL→entry+0.5%")
                 return  # Don't trigger full exit this bar
 
