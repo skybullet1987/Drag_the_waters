@@ -39,11 +39,7 @@ def on_order_event(algo, event):
             filled_qty = abs(event.FillQuantity)
             fill_pct = filled_qty / intended_qty if intended_qty > 0 else 0
             if fill_pct < 0.20:
-                algo.Debug(f"⚠️ INSUFFICIENT FILL: {symbol.Value} | Filled {fill_pct:.1%} | Canceling")
-                try:
-                    algo.Transactions.CancelOrder(event.OrderId)
-                except Exception as e:
-                    algo.Debug(f"Error canceling: {e}")
+                algo.Debug(f"Partial fill {fill_pct:.0%} on {symbol.Value} — letting it ride to stale-order timeout")
             if event.Direction == OrderDirection.Buy:
                 if symbol not in algo.entry_prices:
                     algo.entry_prices[symbol] = event.FillPrice
