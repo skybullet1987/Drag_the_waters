@@ -37,7 +37,7 @@ class PaperAlgo:
         self.orders = []
 
     def MarketOrder(self, symbol, quantity, tag="Paper"):
-        self.orders.append({"time": datetime.now(timezone.utc), "symbol": symbol, "qty": quantity, "tag": tag})
+        self.orders.append({"time": datetime.now(timezone.utc), "symbol": symbol, "quantity": quantity, "tag": tag})
         print(f"ORDER {symbol}: qty={quantity:.6f} tag={tag}")
 
 
@@ -54,7 +54,7 @@ def main():
 
     cfg = _load_config(args.config)
     pairs = cfg.get("pairs", ["XBT/USD", "ETH/USD", "SOL/USD"])
-    interval = int(cfg.get("interval", 60))
+    interval_minutes = int(cfg.get("interval", 60))  # Kraken OHLC interval is in minutes
 
     fee_taker = float(cfg.get("fees", {}).get("taker", 0.0026))
     round_trip_cost = float(cfg.get("round_trip_cost", 2 * fee_taker))
@@ -85,7 +85,7 @@ def main():
 
     while True:
         for pair in pairs:
-            bars = fetch_ohlcv(pair=pair, interval=interval, session=None, rate_limiter=limiter)
+            bars = fetch_ohlcv(pair=pair, interval=interval_minutes, session=None, rate_limiter=limiter)
             if bars.empty:
                 continue
             last = bars.iloc[-1]
@@ -112,7 +112,7 @@ def main():
                 algo.MarketOrder(pair, qty, tag="Paper fallback")
             positions[pair] = target
 
-        time.sleep(max(interval, 1) * 60)
+        time.sleep(max(interval_minutes, 1) * 60)
 
 
 if __name__ == "__main__":

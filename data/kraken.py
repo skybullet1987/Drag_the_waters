@@ -28,10 +28,14 @@ class TokenBucket:
             time.sleep(wait_s)
 
 
+DEFAULT_RATE_LIMITER = TokenBucket(rate_per_sec=1.0, capacity=1.0)
+
+
 def _public_get(endpoint, params=None, session=None, rate_limiter=None, timeout=20):
     session = session or requests.Session()
-    if rate_limiter is not None:
-        rate_limiter.acquire()
+    limiter = rate_limiter or DEFAULT_RATE_LIMITER
+    if limiter is not None:
+        limiter.acquire()
     url = f"{KRAKEN_BASE_URL}{endpoint}"
     response = session.get(url, params=params or {}, timeout=timeout)
     response.raise_for_status()
@@ -71,7 +75,7 @@ def get_ticker(pair, session=None, rate_limiter=None):
 
 def get_usd_pairs(min_volume_usd=1_000_000, session=None, rate_limiter=None):
     session = session or requests.Session()
-    rate_limiter = rate_limiter or TokenBucket(rate_per_sec=1.0, capacity=1.0)
+    rate_limiter = rate_limiter or DEFAULT_RATE_LIMITER
     result = _public_get("/0/public/AssetPairs", session=session, rate_limiter=rate_limiter)
 
     usd_pairs = []
@@ -79,6 +83,7 @@ def get_usd_pairs(min_volume_usd=1_000_000, session=None, rate_limiter=None):
         wsname = pair_data.get("wsname")
         if not wsname or not wsname.endswith("/USD"):
             continue
+        # Exclude Kraken dark/derivative-style instruments marked with `.d` suffix in wsname.
         if ".d" in wsname:
             continue
 

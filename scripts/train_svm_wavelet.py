@@ -7,7 +7,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
@@ -18,6 +17,9 @@ from features.wavelets import causal_wavelet_features
 from features.ta import build_ta_features
 from models.svm_signal import SvmSignalModel, make_cost_aware_labels, WalkForwardConfig
 from models.registry import ModelRegistry
+
+
+EPSILON = 1e-12
 
 
 def _load_config(path):
@@ -50,9 +52,12 @@ def main():
     assumed_slippage = float(cfg.get("assumed_slippage", 0.0015))
 
     limiter = TokenBucket(rate_per_sec=1.0, capacity=1.0)
-    ohlcv = fetch_ohlcv(args.pair, interval=interval, session=None, rate_limiter=limiter)
+    try:
+        ohlcv = fetch_ohlcv(args.pair, interval=interval, session=None, rate_limiter=limiter)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch Kraken OHLCV for {args.pair}: {exc}") from exc
     if ohlcv.empty:
-        raise RuntimeError(f"No OHLCV data for {args.pair}")
+        raise RuntimeError(f"No OHLCV data returned for {args.pair}")
 
     wave = causal_wavelet_features(
         ohlcv["close"],
@@ -109,8 +114,9 @@ def main():
     cost_per_trade = round_trip_cost + assumed_slippage
     net = gross - (y_pred.abs() * cost_per_trade)
 
+    # Kraken trades 24/7; compute bars/year from interval minutes for Sharpe annualization.
     bars_per_year = int((24 * 365 * 60) / interval)
-    sharpe = float(np.sqrt(bars_per_year) * net.mean() / (net.std() + 1e-12))
+    sharpe = float(np.sqrt(bars_per_year) * net.mean() / (net.std() + EPSILON))
     turnover = float(y_pred.diff().abs().fillna(0).sum())
 
     print("=== Cost-Adjusted PnL Summary ===")

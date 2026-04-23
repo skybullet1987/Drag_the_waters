@@ -8,11 +8,16 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 
+LONG_SIGNAL = 1
+SHORT_SIGNAL = -1
+NEUTRAL_SIGNAL = 0
+
+
 def _safe_round_trip_cost(default=0.0052):
     try:
         from execution import ESTIMATED_ROUND_TRIP_FEE  # type: ignore
         return float(ESTIMATED_ROUND_TRIP_FEE)
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
         return float(default)
 
 
@@ -22,9 +27,9 @@ def make_cost_aware_labels(close, horizon=1, k=2.0, round_trip_cost=None):
     fwd_ret = close.shift(-horizon) / close - 1.0
     upper = k * round_trip_cost
     lower = -k * round_trip_cost
-    y = pd.Series(0, index=close.index, dtype=int)
-    y[fwd_ret > upper] = 1
-    y[fwd_ret < lower] = -1
+    y = pd.Series(NEUTRAL_SIGNAL, index=close.index, dtype=int)
+    y[fwd_ret > upper] = LONG_SIGNAL
+    y[fwd_ret < lower] = SHORT_SIGNAL
     return y
 
 
@@ -75,9 +80,9 @@ class SvmSignalModel:
         probs = self.pipeline.predict_proba(X_df)
         classes = list(self.pipeline.named_steps["svc"].classes_)
         out = pd.DataFrame(index=X_df.index)
-        out["prob_up"] = probs[:, classes.index(1)] if 1 in classes else 0.0
-        out["prob_down"] = probs[:, classes.index(-1)] if -1 in classes else 0.0
-        out["prob_flat"] = probs[:, classes.index(0)] if 0 in classes else 0.0
+        out["prob_up"] = probs[:, classes.index(LONG_SIGNAL)] if LONG_SIGNAL in classes else 0.0
+        out["prob_down"] = probs[:, classes.index(SHORT_SIGNAL)] if SHORT_SIGNAL in classes else 0.0
+        out["prob_flat"] = probs[:, classes.index(NEUTRAL_SIGNAL)] if NEUTRAL_SIGNAL in classes else 0.0
         return out
 
     def predict(self, X):
@@ -86,8 +91,8 @@ class SvmSignalModel:
         edge = (prob["prob_up"] - prob["prob_down"]).abs()
         signal = np.where(
             confidence >= self.neutral_threshold,
-            np.where(prob["prob_up"] >= prob["prob_down"], 1, -1),
-            0,
+            np.where(prob["prob_up"] >= prob["prob_down"], LONG_SIGNAL, SHORT_SIGNAL),
+            NEUTRAL_SIGNAL,
         )
         return pd.DataFrame(
             {

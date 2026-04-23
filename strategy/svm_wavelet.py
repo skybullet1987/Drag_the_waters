@@ -1,11 +1,15 @@
 from collections import deque, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+import warnings
+from datetime import datetime, timezone
 from types import SimpleNamespace
 import pandas as pd
 
 from features.ta import build_ta_features
 from features.wavelets import causal_wavelet_features
+
+
+INITIAL_LAST_CHANGE_BAR = float("-inf")  # sentinel: no prior position change
 
 
 @dataclass
@@ -23,10 +27,14 @@ class SvmWaveletStrategy:
     def __init__(self, model, config=None, slippage_model=None, circuit_breaker=None):
         self.model = model
         cfg = config or {}
-        self.config = StrategyConfig(**{k: v for k, v in cfg.items() if hasattr(StrategyConfig, k)})
+        known = StrategyConfig.__dataclass_fields__
+        unknown_keys = sorted(set(cfg.keys()) - set(known.keys()))
+        if unknown_keys:
+            warnings.warn(f"Unknown strategy config keys ignored: {unknown_keys}")
+        self.config = StrategyConfig(**{k: v for k, v in cfg.items() if k in known})
         self._bars = deque(maxlen=max(self.config.window * 2, 512))
         self._last_position = 0
-        self._last_change_bar = -10**9
+        self._last_change_bar = INITIAL_LAST_CHANGE_BAR
         self._bar_count = 0
         self._daily_turnover = defaultdict(float)
         self.slippage_model = slippage_model
@@ -80,7 +88,7 @@ class SvmWaveletStrategy:
         self._bar_count += 1
         self._bars.append(bar)
 
-        now = context.get("timestamp") or bar.get("timestamp") or datetime.utcnow()
+        now = context.get("timestamp") or bar.get("timestamp") or datetime.now(timezone.utc)
         day_key = pd.Timestamp(now).date().isoformat()
 
         if self._breaker_tripped(context):
