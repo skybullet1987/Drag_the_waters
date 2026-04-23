@@ -14,13 +14,13 @@ Differences vs the QC notebook:
 ### Train
 
 ```bash
-python scripts/train_svm_wavelet.py --config configs/svm_wavelet_kraken.yaml --pair XBT/USD
+python svm_wavelet_cli.py train --config configs/svm_wavelet_kraken.yaml --pair XBT/USD
 ```
 
 ### Run (paper/live loop scaffold)
 
 ```bash
-python scripts/run_svm_wavelet.py --config configs/svm_wavelet_kraken.yaml --paper
+python svm_wavelet_cli.py run --config configs/svm_wavelet_kraken.yaml --paper
 ```
 
 > Disclaimer: research code only, not financial advice.
