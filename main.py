@@ -3,6 +3,7 @@ from execution import *
 from realistic_slippage import RealisticCryptoSlippage
 from events import on_order_event
 from scoring import MicroScalpEngine
+from entry_filters import build_default_filter
 from collections import deque
 import numpy as np
 from QuantConnect.Orders.Fees import FeeModel, OrderFee
@@ -74,6 +75,9 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         self.SetBrokerageModel(BrokerageName.Kraken, AccountType.Cash)
 
         self.entry_threshold = 0.40
+        self.entry_filter_mode = str(self.GetParameter("entry_filter") or "none").lower()
+        self.svm_confidence = float(self.GetParameter("svm_confidence") or 0.55)
+        self._entry_filter = build_default_filter(model_dir="./artifacts", confidence=self.svm_confidence) if self.entry_filter_mode == "svm_wavelet" else None
         self.high_conviction_threshold = 0.50
         self.quick_take_profit = self._get_param("quick_take_profit", 0.100)   # was 0.150
         self.tight_stop_loss   = self._get_param("tight_stop_loss",   0.050)   # was 0.035
@@ -583,6 +587,8 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
         sp = get_spread_pct(self, symbol)
         if sp is not None:
             crypto['spreads'].append(sp)
+        if self._entry_filter is not None:
+            self._entry_filter.update(symbol.Value, {"open": float(bar.Open), "high": float(bar.High), "low": float(bar.Low), "close": float(bar.Close), "volume": float(bar.Volume)})
         if quote_bar is not None:
             try:
                 bid_sz = float(quote_bar.LastBidSize) if quote_bar.LastBidSize else 0.0
@@ -1108,6 +1114,13 @@ class SimplifiedCryptoStrategy(QCAlgorithm):
 
             if not intraday_volume_ok(self, sym, val):
                 continue
+            if self._entry_filter is not None:
+                ok, meta = self._entry_filter.allows(sym.Value, "long", fee_bps=self.expected_round_trip_fees * 5000.0, slippage_bps=self.fee_slippage_buffer * 10000.0)
+                if not ok:
+                    if meta.get("reason") == "no_model":
+                        self.Debug(f"no_model symbol={sym.Value}")
+                    self.Debug(f"entry_filter_rejected symbol={sym.Value} reason={meta.get('reason')} proba={meta.get('proba',0):.3f}")
+                    continue
 
             try:
                 ticket = place_limit_or_market(self, sym, qty, timeout_seconds=30, tag="Entry")

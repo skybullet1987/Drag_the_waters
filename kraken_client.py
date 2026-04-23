@@ -100,3 +100,28 @@ def get_usd_pairs(min_volume_usd=1_000_000, session=None, rate_limiter=None):
 
     usd_pairs.sort(key=lambda x: x[1], reverse=True)
     return [name for name, _ in usd_pairs]
+
+
+def _canonical_pair_name(raw_pair):
+    pair = str(raw_pair).replace("/", "").replace("-", "").upper()
+    if pair.endswith("USD"):
+        base = pair[:-3]
+        if base.endswith("Z"):
+            base = base[:-1]
+        if len(base) > 3 and base[0] in {"X", "Z"}:
+            base = base[1:]
+        return f"{base}USD"
+    return pair
+
+
+def fetch_24h_volume(session=None, rate_limiter=None):
+    result = _public_get("/0/public/Ticker", session=session, rate_limiter=rate_limiter)
+    out = {}
+    for raw_pair, ticker in result.items():
+        try:
+            last = float(ticker["c"][0])
+            volume_24h = float(ticker["v"][1])
+        except Exception:
+            continue
+        out[_canonical_pair_name(raw_pair)] = max(0.0, last * volume_24h)
+    return out
