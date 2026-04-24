@@ -22,7 +22,7 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
     def initialize(self):
         self.set_start_date(2025, 1, 1)
         self.set_end_date(2026, 4, 1)
-        self.set_cash(5000)
+        self.set_cash(50000)
         self.set_brokerage_model(BrokerageName.KRAKEN, AccountType.CASH)
         self.settings.minimum_order_margin_portfolio_percentage = 0
 
@@ -31,7 +31,8 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
         self._weight_threshold = float(self.get_parameter("weight_threshold") or 0.005)
         self._max_universe_size = int(self.get_parameter("max_universe_size") or 10)
         self._refit_every_bars = int(self.get_parameter("refit_every_bars") or 7)
-        self._max_per_asset_weight = float(self.get_parameter("max_per_asset_weight") or 0.10)
+        self._max_per_asset_weight = float(self.get_parameter("max_per_asset_weight") or 0.05)
+        self._min_order_notional_usd = float(self.get_parameter("min_order_notional_usd") or 50.0)
 
         # ---- Universe ----
         self.universe_settings.resolution = Resolution.MINUTE
@@ -137,17 +138,28 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
         #    (treat negative forecast as "exit / stay flat").
         target_weights = {s: max(w, 0.0) for s, w in target_weights.items()}
 
-        # 4) Submit market orders via QC's native set_holdings.
+        # 4) Filter out targets whose dollar value would be below the
+        #    exchange minimum notional, then submit atomically.
+        portfolio_value = float(self.portfolio.total_portfolio_value)
+        targets = []
         for symbol, weight in target_weights.items():
-            try:
-                self.set_holdings(symbol, weight, tag="SVMWavelet")
-            except Exception as e:
-                self.debug(f"set_holdings failed for {symbol.Value}: {e}")
-        # Liquidate anything not in the target set that we still hold.
+            target_value = float(weight) * portfolio_value
+            if weight > 0 and target_value < self._min_order_notional_usd:
+                # Too small to fund cleanly on Kraken — skip.
+                continue
+            targets.append(PortfolioTarget(symbol, weight))
+
+        # Anything we currently hold that is NOT in the target set: exit.
+        target_symbols = {t.symbol for t in targets}
         for kvp in self.portfolio:
             symbol = kvp.key
-            if symbol not in target_weights and kvp.value.invested:
-                try:
-                    self.liquidate(symbol, tag="SVMWavelet exit")
-                except Exception as e:
-                    self.debug(f"liquidate failed for {symbol.Value}: {e}")
+            if kvp.value.invested and symbol not in target_symbols:
+                targets.append(PortfolioTarget(symbol, 0.0))
+
+        if targets:
+            # Atomic reconciliation — QC nets the buys/sells against
+            # available cash so per-symbol calls don't race each other.
+            try:
+                self.set_holdings(targets, tag="SVMWavelet")
+            except Exception as e:
+                self.debug(f"set_holdings(list) failed: {e}")
