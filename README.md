@@ -1,7 +1,24 @@
-# Drag the Waters — Top-Coin Rotation on Kraken
+# Drag the Waters — Execution-First Kraken Top-Coin Rotation
 
-A compact QuantConnect algorithm that rotates into the best-scoring Kraken USD
-coin every 15 minutes, with rule-based take-profit / stop-loss / timeout exits.
+A single-file QuantConnect algorithm that rotates into the best-scoring Kraken
+USD coin every 15 minutes.  **This version is execution-first**: it fixes
+invalid-order and state-drift bugs before reintroducing ML logic.
+
+## Why this version exists
+
+Earlier backtests produced many `ENTRY` orders with `Price = 0` and
+`Status = Invalid`, and exit logic attempted to liquidate quantities larger
+than what was actually held.  The root causes were:
+
+1. Position state was set optimistically — immediately after calling
+   `set_holdings`, before any fill arrived.
+2. Exit quantities were derived from a target allocation rather than the
+   real portfolio holding.
+3. There was no order-event callback to drive state transitions.
+4. Stale internal state was never reconciled against actual holdings.
+
+This version fixes all four issues and acts as a stable execution template
+before ML scoring is layered back in.
 
 ## Files
 
@@ -40,9 +57,11 @@ The composite score is mapped to **[0, 1]**.  Entry requires:
 
 ### Position management
 
+- **Sizing**: explicit `qty = (ALLOCATION × portfolio_value) / price` —
+  no blind reliance on `set_holdings`.
 - **Allocation**: 80 % of portfolio per trade, one open position at a time.
-- **Take-profit**: +1.2 % from entry.
-- **Stop-loss**: −0.7 % from entry.
+- **Take-profit**: +1.2 % from confirmed fill price.
+- **Stop-loss**: −0.7 % from confirmed fill price.
 - **Time-stop**: close after 2 hours if neither TP nor SL triggered.
 
 ### Risk controls
@@ -50,6 +69,16 @@ The composite score is mapped to **[0, 1]**.  Entry requires:
 - **Cooldown**: 15 minutes after any exit before a new entry is allowed.
 - **Daily SL cap**: after 2 stop-losses in one calendar day, no new entries
   until the next day.
+
+## Execution correctness
+
+| Fix | How it works |
+|---|---|
+| Fill-driven activation | `_pos_sym` / `_entry_px` are set only inside `on_order_event` on `FILLED` status |
+| Actual-qty exits | `_check_exit` reads `portfolio[sym].quantity` before placing the sell order |
+| Pre-trade validation | `_try_enter` checks `price > 0`, available cash, and computed `qty > 0` before sending any order |
+| Duplicate-exit guard | `_exiting` flag is set when an exit order is in flight; `_check_exit` skips while it is True |
+| State reconciliation | `_reconcile()` runs every tick; clears `_pos_sym` when portfolio qty has gone to zero |
 
 ## Parameters
 
@@ -77,12 +106,13 @@ All constants can be overridden via the QC parameter panel without editing code:
 
 - **Single file**: all logic — scoring, entry, exit, risk controls — lives in
   `main.py`.  No helper modules are needed.
-- **Rule-based scoring**: the composite score is an interpretable blend of
-  momentum, RSI, and volume rather than a black-box ML model.  This makes it
-  easy to tune and extend.
+- **Execution-first**: the priority of this version is clean, valid orders and
+  accurate state tracking.  The scoring heuristic is intentionally simple so
+  that execution problems are easy to isolate in backtest logs.
 - **QC-first**: the algorithm uses only standard QuantConnect APIs
-  (`add_crypto`, `consolidate`, `set_holdings`, `liquidate`, `schedule`) so it
-  deploys without any external dependencies beyond `numpy`.
-- **Upgrade path**: replace `_score()` with an ensemble of trained classifiers
-  (logistic regression, gradient boosting, random forest) once a labelled
-  dataset and walk-forward validation have been built in QC Research.
+  (`add_crypto`, `consolidate`, `market_order`, `schedule`) so it deploys
+  without any external dependencies beyond `numpy`.
+- **Upgrade path**: once execution is confirmed clean, replace `_score()` with
+  an ensemble of trained classifiers (logistic regression, gradient boosting,
+  random forest) built in QC Research.
+

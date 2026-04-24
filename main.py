@@ -5,14 +5,26 @@ from collections import deque
 # endregion
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Kraken Top-Coin Rotation — 15-minute bars, single-position
+# Drag the Waters — Execution-First Kraken Top-Coin Rotation
+#
+# This version prioritises correct order handling and fill-driven state
+# management over model sophistication.  All position state is updated
+# ONLY in on_order_event after confirmed fills, eliminating the
+# "Price=0 / Invalid order / state-drift" bugs seen in earlier backtests.
+#
+# Key fixes vs prior version:
+#   1. Position is NOT marked active until the ENTRY fill is confirmed.
+#   2. Exits use actual portfolio quantity, not an assumed target size.
+#   3. Pre-trade validation rejects orders when price or buying power is bad.
+#   4. on_order_event drives all state transitions.
+#   5. _reconcile() clears stale internal state when holdings diverge.
 #
 # Universe    : 10 fixed Kraken USD pairs
 # Cadence     : score all coins every 15 minutes
-# Selection   : enter the top coin when its score >= SCORE_MIN and it
-#               leads the runner-up by at least SCORE_GAP
-# Sizing      : ALLOCATION fraction of portfolio, one position at a time
-# Exits       : take-profit (+1.2 %), stop-loss (−0.7 %), or 2-hour timeout
+# Selection   : enter the top coin when score >= SCORE_MIN and it leads
+#               the runner-up by at least SCORE_GAP
+# Sizing      : explicit qty = (ALLOCATION × portfolio_value) / price
+# Exits       : take-profit (+1.2 %), stop-loss (−0.7 %), 2-hour timeout
 # Risk guards : post-exit cooldown; daily stop-loss cap
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -30,20 +42,17 @@ SCORE_GAP     = 0.04    # required score lead of #1 coin over #2 coin
 ALLOCATION    = 0.80    # fraction of portfolio per trade
 MAX_DAILY_SL  = 2       # halt new entries for the day after this many SL hits
 COOLDOWN_MINS = 15      # minutes to wait after any exit before re-entering
+CASH_BUFFER   = 0.99   # keep 1 % cash headroom for fees/rounding at entry
+QTY_PRECISION = 6      # decimal places for lot-size flooring (Kraken min lots)
 
 
 class KrakenTopCoinAlgorithm(QCAlgorithm):
     """
-    Single-file QuantConnect strategy: top-coin rotation on Kraken.
+    Execution-first single-file QuantConnect strategy for Kraken spot.
 
-    Every 15 minutes a composite score (momentum + RSI + volume spike) is
-    computed for each of the 10 fixed Kraken USD coins.  If the top coin
-    scores at or above SCORE_MIN and its lead over second place meets
-    SCORE_GAP, a long position sized at ALLOCATION × portfolio is opened.
-
-    All exits are rule-based: take-profit (+1.2 %), stop-loss (−0.7 %),
-    or a 2-hour time-stop.  Risk controls: COOLDOWN_MINS cooldown after
-    every exit; no new entries once MAX_DAILY_SL stop-losses occur in a day.
+    State transitions are driven exclusively by on_order_event fills.
+    This prevents invalid orders (Price=0) and internal state drift from
+    assuming fills that have not yet occurred.
     """
 
     # ── Initialisation ────────────────────────────────────────────────────────
@@ -64,7 +73,6 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         self._alloc   = float(self.get_parameter("allocation")    or ALLOCATION)
         self._max_sl  = int(self.get_parameter("max_daily_sl")    or MAX_DAILY_SL)
         self._cd_mins = int(self.get_parameter("cooldown_mins")   or COOLDOWN_MINS)
-
         # Register securities and per-symbol 15-minute history
         self._symbols = []
         self._state   = {}   # symbol -> {"closes": deque, "volumes": deque}
@@ -82,17 +90,18 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
                 lambda bar, s=sym: self._on_15m(s, bar),
             )
 
-        # Open-position state
-        self._pos_sym    = None    # currently held symbol (or None)
-        self._entry_px   = 0.0    # fill price of current position
-        self._entry_time = None   # datetime of entry
-        self._exit_time  = None   # datetime of most recent exit
-        self._daily_sl   = 0      # stop-loss hits today
+        # ── Position state — updated ONLY via on_order_event ──────────────────
+        self._pos_sym     = None   # confirmed open position symbol
+        self._entry_px    = 0.0    # confirmed entry fill price
+        self._entry_time  = None   # confirmed entry fill time
+        self._pending_sym = None   # symbol of in-flight entry order
+        self._pending_oid = None   # order ID of in-flight entry order
+        self._exiting     = False  # True while an exit order is in flight
+        self._exit_time   = None   # time of most recent completed exit
+        self._daily_sl    = 0      # stop-loss hits today
 
-        # Warm up enough 15-min history before the first scoring pass
         self.set_warm_up(timedelta(days=5))
 
-        # Reset daily SL counter at midnight
         self.schedule.on(
             self.date_rules.every_day(),
             self.time_rules.at(0, 0),
@@ -113,14 +122,18 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if self.is_warming_up:
             return
 
-        # Exit check — runs on every incoming minute bar for finer precision
-        if self._pos_sym is not None and self._pos_sym in data.bars:
-            self._check_exit(float(data.bars[self._pos_sym].close))
+        # Reconcile internal state against actual holdings on every tick
+        self._reconcile()
+
+        # Exit check — minute-level precision; skip while an exit is in flight
+        if self._pos_sym is not None and not self._exiting:
+            if self._pos_sym in data.bars:
+                self._check_exit(float(data.bars[self._pos_sym].close))
 
         # Entry logic — fire only at 15-minute bar boundaries
         if self.time.minute % 15 != 0:
             return
-        if self._pos_sym is not None:
+        if self._pos_sym is not None or self._pending_sym is not None:
             return
         if self._exit_time is not None and (
             self.time - self._exit_time < timedelta(minutes=self._cd_mins)
@@ -131,38 +144,137 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
 
         self._try_enter()
 
+    # ── Order-event state machine ──────────────────────────────────────────────
+
+    def on_order_event(self, order_event):
+        oid   = order_event.order_id
+        order = self.transactions.get_order_by_id(oid)
+        if order is None:
+            return
+        sym = order.symbol
+        tag = order.tag or ""
+
+        if order_event.status == OrderStatus.FILLED:
+            if tag == "ENTRY" and sym == self._pending_sym:
+                # Entry fill confirmed — now mark the position active
+                self._pos_sym     = sym
+                self._entry_px    = float(order_event.fill_price)
+                self._entry_time  = self.time
+                self._pending_sym = None
+                self._pending_oid = None
+                self.debug(
+                    f"FILL ENTRY {sym.value}  px={self._entry_px:.4f}"
+                    f"  qty={order_event.fill_quantity:.6f}"
+                )
+
+            elif tag.startswith("EXIT") and sym == self._pos_sym:
+                # Exit fill confirmed — clear position state
+                ret = (
+                    (order_event.fill_price - self._entry_px) / self._entry_px
+                    if self._entry_px else 0.0
+                )
+                self.debug(
+                    f"FILL EXIT {sym.value}  px={order_event.fill_price:.4f}"
+                    f"  ret={ret:.3%}  tag={tag}"
+                )
+                self._pos_sym    = None
+                self._entry_px   = 0.0
+                self._entry_time = None
+                self._exiting    = False
+                self._exit_time  = self.time
+
+        elif order_event.status in (OrderStatus.INVALID, OrderStatus.CANCELED):
+            if tag == "ENTRY" and sym == self._pending_sym:
+                self.debug(
+                    f"ENTRY order {oid} for {sym.value} — status={order_event.status},"
+                    f" clearing pending"
+                )
+                self._pending_sym = None
+                self._pending_oid = None
+
+            elif tag.startswith("EXIT") and sym == self._pos_sym:
+                # Exit order failed; allow _check_exit to retry next bar
+                self.debug(
+                    f"EXIT order {oid} for {sym.value} — status={order_event.status},"
+                    f" will retry"
+                )
+                self._exiting = False
+
+    # ── Reconciliation ────────────────────────────────────────────────────────
+
+    def _reconcile(self):
+        """
+        Compare internal tracking state against actual portfolio holdings.
+        If they diverge, clear the stale internal state so the next scoring
+        pass starts from a clean slate.
+        """
+        if self._pos_sym is not None:
+            qty = self.portfolio[self._pos_sym].quantity
+            if qty <= 0:
+                self.debug(
+                    f"RECONCILE: tracking {self._pos_sym.value} but qty={qty:.6f}"
+                    f" — clearing stale state"
+                )
+                self._pos_sym    = None
+                self._entry_px   = 0.0
+                self._entry_time = None
+                self._exiting    = False
+
+        # Safety net: if a pending entry order has already settled (should have
+        # been caught by on_order_event), clean it up here
+        if self._pending_oid is not None:
+            order = self.transactions.get_order_by_id(self._pending_oid)
+            if order is not None and order.status in (
+                OrderStatus.FILLED, OrderStatus.INVALID, OrderStatus.CANCELED
+            ):
+                if order.status != OrderStatus.FILLED:
+                    self._pending_sym = None
+                    self._pending_oid = None
+
     # ── Exit logic ────────────────────────────────────────────────────────────
 
     def _check_exit(self, price):
-        """Evaluate TP / SL / timeout for the current open position."""
+        """Evaluate TP / SL / timeout; submit a market sell for actual qty."""
         ret     = (price - self._entry_px) / self._entry_px
         elapsed = (self.time - self._entry_time).total_seconds() / 3600.0
 
         reason = None
         if ret >= self._tp:
-            reason = "TP"
+            reason = "EXIT_TP"
         elif ret <= -self._sl:
-            reason = "SL"
+            reason = "EXIT_SL"
         elif elapsed >= self._toh:
-            reason = "TIMEOUT"
+            reason = "EXIT_TIMEOUT"
 
-        if reason:
-            self.liquidate(self._pos_sym, tag=reason)
+        if not reason:
+            return
+
+        # Use the actual portfolio quantity — never an assumed target size
+        qty = self.portfolio[self._pos_sym].quantity
+        if qty > 0:
+            self._exiting = True   # suppress duplicate exit attempts
+            self.market_order(self._pos_sym, -qty, tag=reason)
             self.debug(
-                f"Exit  {self._pos_sym.value}  ret={ret:.3%}  "
-                f"held={elapsed:.2f}h  [{reason}]"
+                f"EXIT order {self._pos_sym.value}  reason={reason}"
+                f"  qty={qty:.6f}  ret={ret:.3%}"
             )
-            if reason == "SL":
+            if reason == "EXIT_SL":
                 self._daily_sl += 1
-            self._exit_time  = self.time
+        else:
+            # Portfolio already flat; state was stale — clean it up
+            self.debug(
+                f"EXIT {self._pos_sym.value}: portfolio qty=0,"
+                f" clearing stale state"
+            )
             self._pos_sym    = None
             self._entry_px   = 0.0
             self._entry_time = None
+            self._exit_time  = self.time
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
     def _try_enter(self):
-        """Score all coins and open a position in the top-ranked one."""
+        """Score all coins; if a clear winner emerges, place a buy order."""
         scores = {}
         for sym in self._symbols:
             sc = self._score(sym)
@@ -172,20 +284,42 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if not scores:
             return
 
-        ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        ranked      = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
         top_sym, top_sc = ranked[0]
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
         if top_sc < self._s_min or (top_sc - second_sc) < self._s_gap:
             return
 
-        self.set_holdings(top_sym, self._alloc, tag="ENTRY")
-        self._pos_sym    = top_sym
-        self._entry_px   = float(self.securities[top_sym].price)
-        self._entry_time = self.time
+        # ── Pre-trade validation ───────────────────────────────────────────────
+        price = float(self.securities[top_sym].price)
+        if price <= 0:
+            self.debug(f"ENTRY skip {top_sym.value}: price={price} invalid")
+            return
+
+        portfolio_value = self.portfolio.total_portfolio_value
+        target_value    = portfolio_value * self._alloc
+        cash            = self.portfolio.cash
+        if target_value > cash * CASH_BUFFER:
+            self.debug(
+                f"ENTRY skip {top_sym.value}: insufficient cash"
+                f" (need {target_value:.2f}, have {cash:.2f})"
+            )
+            return
+
+        # Explicit quantity — floor to QTY_PRECISION d.p. to avoid fractional-lot errors
+        _factor = 10 ** QTY_PRECISION
+        qty = float(int(target_value / price * _factor) / _factor)
+        if qty <= 0:
+            self.debug(f"ENTRY skip {top_sym.value}: computed qty={qty:.8f}")
+            return
+
+        order = self.market_order(top_sym, qty, tag="ENTRY")
+        self._pending_sym = top_sym
+        self._pending_oid = order.order_id
         self.debug(
-            f"Enter {top_sym.value}  score={top_sc:.3f}  "
-            f"price={self._entry_px:.4f}"
+            f"ENTRY order {top_sym.value}  score={top_sc:.3f}"
+            f"  price={price:.4f}  qty={qty:.6f}"
         )
 
     # ── Scoring ───────────────────────────────────────────────────────────────
@@ -211,8 +345,7 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
 
         c = list(closes)   # index 0 = oldest, index -1 = most recent
 
-        # 1) Momentum: return over the last 4 intervals (4 × 15 min ≈ 1 h).
-        #    c[-5] is the close 4 bar-periods before the current close c[-1].
+        # 1) Momentum: return over the last 4 intervals (4 × 15 min ≈ 1 h)
         mom   = (c[-1] - c[-5]) / c[-5]
         mom_n = max(min(mom / 0.01, 1.0), -1.0)
 
