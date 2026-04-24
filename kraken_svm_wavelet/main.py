@@ -30,7 +30,7 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
         # ---- Parameters ----
         self._period = int(self.get_parameter("period") or 152)
         self._weight_threshold = float(self.get_parameter("weight_threshold") or 0.005)
-        self._max_universe_size = int(self.get_parameter("max_universe_size") or 50)
+        self._max_universe_size = int(self.get_parameter("max_universe_size") or 10)
         self._refit_every_bars = int(self.get_parameter("refit_every_bars") or 7)
         self._max_per_asset_weight = float(self.get_parameter("max_per_asset_weight") or 0.10)
 

@@ -24,7 +24,7 @@ The forecasting model (`svmwavelet.py`) is **unchanged** from the textbook imple
 |---|---|---|
 | `period` | 152 | Rolling window length (days) for wavelet decomposition |
 | `weight_threshold` | 0.005 | Minimum predicted return (0.5%) to open a position |
-| `max_universe_size` | 50 | Maximum number of Kraken USD pairs to trade |
+| `max_universe_size` | 10 (set to 50 for full top-Kraken run) | Maximum number of Kraken USD pairs to trade |
 | `refit_every_bars` | 7 | Refit SVMWavelet every N daily bars (1 = full textbook fidelity) |
 | `max_per_asset_weight` | 0.10 | Maximum portfolio weight per asset (10%) |
 
