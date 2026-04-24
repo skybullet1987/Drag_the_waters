@@ -1,54 +1,24 @@
-# Drag the Waters
+# Drag the Waters — SVM + Wavelet Crypto Trading on Kraken
 
-## SVM + Wavelet Kraken strategy
+This repository contains a QuantConnect algorithm that trades the top Kraken USD cryptocurrency pairs using a Support Vector Machine + Discrete Wavelet Transform forecasting model.
 
-This repository now includes an SVM + wavelet crypto strategy module inspired by QuantConnect's
-"FX SVM Wavelet Forecasting" example:
-https://github.com/QuantConnect/HandsOnAITradingBook/tree/master/06%20Applied%20Machine%20Learning/05%20FX%20SVM%20Wavelet%20Forecasting
+## Strategy
 
-Differences vs the QC notebook:
-- Causal wavelet features only (strict trailing window, no future leakage)
-- Cost-aware labels (thresholded by round-trip trading cost)
-- Kraken spot data + realistic fee/slippage-aware gating
+The algorithm is located in [`kraken_svm_wavelet/`](./kraken_svm_wavelet/). It:
 
-### Train
+- Selects the top 50 Kraken USD pairs by 24-hour dollar volume.
+- Forecasts next-day price using SVM regression on wavelet-decomposed price series.
+- Executes trades using limit orders (maker-fee preference) on a daily schedule.
 
-```bash
-python svm_wavelet_cli.py train --config configs/svm_wavelet_kraken.yaml --pair XBT/USD
-```
+See [`kraken_svm_wavelet/README.md`](./kraken_svm_wavelet/README.md) for full documentation, parameters, and deployment instructions.
 
-### Run (paper/live loop scaffold)
+## Quick Start
 
-```bash
-python svm_wavelet_cli.py run --config configs/svm_wavelet_kraken.yaml --paper
-```
+1. Create a new [QuantConnect](https://www.quantconnect.com/) project.
+2. Copy all files from `kraken_svm_wavelet/` into the project root.
+3. Set the algorithm class to `KrakenSvmWaveletAlgorithm`.
+4. Run a backtest. Use `max_universe_size=10` for a fast first run.
 
-> Disclaimer: research code only, not financial advice.
+## History
 
-## Improving an existing strategy
-
-### 1) Diagnose an orders CSV quickly
-
-```bash
-python backtest_report.py "Alert Blue Seahorse_orders.csv" --starting-equity 5000
-```
-
-Key diagnostics include required break-even win rate:
-`required_wr = avg_loss / (avg_win + avg_loss)`, edge gap, fee load as % of equity, and exit-tag PnL breakdown.
-
-### 2) Enable SVM+Wavelet as an entry filter
-
-Use algorithm parameters:
-- `entry_filter=svm_wavelet`
-- `svm_confidence=0.55`
-
-When enabled, entries are only allowed when model direction/confidence/edge pass cost gating (`2 × (fees + slippage)`).
-
-### 3) Refresh the Kraken universe by volume
-
-```bash
-python alt-data.py --top 10 --min-volume 50000000
-```
-
-This keeps only high-volume USD pairs, applies a minimum-volume floor, and excludes known high-fee meme symbols by default.
-If fee-as-%-of-equity is elevated, reduce turnover and prefer post-only/maker flow where possible.
+This repository previously contained a sophisticated rule-based algorithm with partial take-profits, ATR stops, Fear & Greed filtering, and SVM entry gates. That algorithm was retired after underperforming the simpler ML-only approach in backtests (−21% vs. +6.6% over the same period). The SVM+Wavelet barebones strategy now serves as the primary approach.
