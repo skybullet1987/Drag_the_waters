@@ -13,7 +13,7 @@ The forecasting model (`svmwavelet.py`) is **unchanged** from the textbook imple
 | Feature | Textbook | This Algorithm |
 |---|---|---|
 | Universe | Single FX pair | Top 50 Kraken USD pairs by volume |
-| Execution | `SetHoldings` (market) | Limit orders at bid/ask (maker preference) |
+| Execution | `SetHoldings` (market) | `set_holdings` (market orders, taker fees) — limit-order execution will be revisited as a separate experiment once the multi-asset signal is validated |
 | Model refit | Every bar | Cached, every `refit_every_bars` bars (default: 7 = weekly) |
 | Position cap | None | `max_per_asset_weight` (default: 10%) |
 | Short selling | Allowed | Disabled (Kraken cash account) |
