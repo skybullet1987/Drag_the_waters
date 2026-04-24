@@ -1,6 +1,6 @@
 # Kraken SVM + Wavelet Algorithm
 
-Multi-asset SVM + Wavelet daily forecaster for the top 50 Kraken USD pairs.
+Multi-asset SVM + Wavelet daily forecaster for the top 10 Kraken USD pairs.
 
 ## Overview
 
@@ -12,10 +12,10 @@ The forecasting model (`svmwavelet.py`) is **unchanged** from the textbook imple
 
 | Feature | Textbook | This Algorithm |
 |---|---|---|
-| Universe | Single FX pair | Top 50 Kraken USD pairs by volume |
-| Execution | `SetHoldings` (market) | `set_holdings` (market orders, taker fees) — limit-order execution will be revisited as a separate experiment once the multi-asset signal is validated |
+| Universe | Single FX pair | Top 10 Kraken USD pairs by volume |
+| Execution | `SetHoldings` (market) | `set_holdings` (atomic list form, market orders, taker fees) — limit-order execution will be revisited as a separate experiment once the multi-asset signal is validated |
 | Model refit | Every bar | Cached, every `refit_every_bars` bars (default: 7 = weekly) |
-| Position cap | None | `max_per_asset_weight` (default: 10%) |
+| Position cap | None | `max_per_asset_weight` (default: 5%) |
 | Short selling | Allowed | Disabled (Kraken cash account) |
 
 ## Parameters
@@ -26,7 +26,18 @@ The forecasting model (`svmwavelet.py`) is **unchanged** from the textbook imple
 | `weight_threshold` | 0.005 | Minimum predicted return (0.5%) to open a position |
 | `max_universe_size` | 10 (set to 50 for full top-Kraken run) | Maximum number of Kraken USD pairs to trade |
 | `refit_every_bars` | 7 | Refit SVMWavelet every N daily bars (1 = full textbook fidelity) |
-| `max_per_asset_weight` | 0.10 | Maximum portfolio weight per asset (10%) |
+| `max_per_asset_weight` | 0.05 | Maximum portfolio weight per asset (5%) |
+| `min_order_notional_usd` | 50.0 | Minimum dollar value for a buy target; targets below this are skipped to avoid Kraken minimum-order-size rejections |
+
+## Why $50,000 Starting Capital
+
+The default starting capital is **$50,000**. Here's the math:
+
+- $50,000 × 5% per-asset cap = **~$2,500 per position** (across up to 10 assets)
+
+Kraken enforces minimum order sizes for major pairs (typically $10–$25 per order, but the notional must comfortably clear fees and rounding). At $5,000 with a 10-asset portfolio and a 5% cap, each position would be ~$25 — right at or below the minimum, causing `NotSupported` minimum-order-size rejections. At $50,000 each position is ~$2,500, comfortably above Kraken's minimums for all major pairs.
+
+**If you want to run the single-asset BTC variant** you can override with `set_cash(5000)` and `max_universe_size=1` — a single $5,000 position clears Kraken's minimum easily.
 
 ## How to Deploy on QuantConnect
 
