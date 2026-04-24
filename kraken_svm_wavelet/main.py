@@ -4,7 +4,6 @@ import numpy as np
 
 from svmwavelet import SVMWavelet
 from universe import select_top_kraken_usd
-from execution import set_holdings_limit, cancel_stale_orders
 # endregion
 
 
@@ -14,7 +13,7 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
 
     Architecture is a direct generalization of the QC HandsOnAITradingBook
     'FX SVM Wavelet Forecasting' sample to a top-N crypto universe with:
-      - Limit-order execution (maker-fee preference).
+      - Native set_holdings execution (market orders).
       - Cached SVMWavelet refit every `refit_every_bars` daily bars
         (default 7 = weekly; set to 1 for full textbook fidelity).
       - Equal-weight cap per asset to bound concentration.
@@ -45,16 +44,11 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
         self._symbol_state = {}  # symbol -> dict(window, last_forecast, bars_since_refit)
 
         # ---- Schedule ----
-        # Daily forecast + rebalance; cancel stale limits every 6 hours.
+        # Daily forecast + rebalance.
         self.schedule.on(
             self.date_rules.every_day(),
             self.time_rules.at(0, 5),
             self._daily_rebalance
-        )
-        self.schedule.on(
-            self.date_rules.every_day(),
-            self.time_rules.every(timedelta(hours=6)),
-            lambda: cancel_stale_orders(self, max_age_hours=24)
         )
 
     def on_securities_changed(self, changes):
@@ -143,11 +137,17 @@ class KrakenSvmWaveletAlgorithm(QCAlgorithm):
         #    (treat negative forecast as "exit / stay flat").
         target_weights = {s: max(w, 0.0) for s, w in target_weights.items()}
 
-        # 4) Submit limit orders.
+        # 4) Submit market orders via QC's native set_holdings.
         for symbol, weight in target_weights.items():
-            set_holdings_limit(self, symbol, weight, tag="SVMWavelet")
+            try:
+                self.set_holdings(symbol, weight, tag="SVMWavelet")
+            except Exception as e:
+                self.debug(f"set_holdings failed for {symbol.Value}: {e}")
         # Liquidate anything not in the target set that we still hold.
         for kvp in self.portfolio:
             symbol = kvp.key
             if symbol not in target_weights and kvp.value.invested:
-                set_holdings_limit(self, symbol, 0.0, tag="SVMWavelet exit")
+                try:
+                    self.liquidate(symbol, tag="SVMWavelet exit")
+                except Exception as e:
+                    self.debug(f"liquidate failed for {symbol.Value}: {e}")
