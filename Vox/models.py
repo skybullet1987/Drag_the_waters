@@ -225,7 +225,7 @@ def _make_estimators(logger=None):
         RandomForestClassifier(
             n_estimators=200, max_depth=5, n_jobs=1, random_state=42
         ),
-        method="isotonic", cv=3,
+        method="isotonic", cv=2,
     )
 
     if _LGBM_AVAILABLE:
@@ -247,13 +247,13 @@ def _make_estimators(logger=None):
         )
         lgbm_name = "lgbm_gb_fallback"
 
-    lgbm = CalibratedClassifierCV(_base_lgbm, method="isotonic", cv=3)
+    lgbm = CalibratedClassifierCV(_base_lgbm, method="isotonic", cv=2)
 
     et = CalibratedClassifierCV(
         ExtraTreesClassifier(
             n_estimators=200, max_depth=5, n_jobs=1, random_state=42
         ),
-        method="isotonic", cv=3,
+        method="isotonic", cv=2,
     )
 
     gnb = GaussianNB()
@@ -427,18 +427,21 @@ def build_training_data(
         if n < min_len:
             continue
 
-        for i in range(17, n - timeout_bars):
+        WINDOW     = 17                   # build_features needs the last 17 bars
+        BTC_WINDOW = max(WINDOW, 5)       # btc_closes only needs last 5
+
+        for i in range(WINDOW, n - timeout_bars):
             feat = build_features(
-                closes     = closes[:i + 1],
-                volumes    = volumes[:i + 1],
-                btc_closes = btc_closes[:i + 1] if btc_closes else [],
+                closes     = closes[i - WINDOW + 1 : i + 1],
+                volumes    = volumes[i - WINDOW + 1 : i + 1],
+                btc_closes = (btc_closes[i - BTC_WINDOW + 1 : i + 1] if btc_closes else []),
                 hour       = 0,   # hour unknown from deque; neutral value
             )
             if feat is None:
                 continue
 
             label = triple_barrier_label(
-                prices       = closes[i:],
+                prices       = closes[i : i + timeout_bars + 1],
                 tp           = tp,
                 sl           = sl,
                 timeout_bars = timeout_bars,
@@ -492,14 +495,14 @@ def walk_forward_train(ensemble, X, y):
 
         try:
             ensemble.fit(X_tr, y_tr)
-            preds = [
-                1 if ensemble.predict_with_confidence(
-                    X_te[j:j + 1]
-                )["mean_proba"] >= 0.5 else 0
-                for j in range(len(X_te))
-            ]
-            acc = float(np.mean(np.array(preds) == y_te))
-            fold_scores.append(acc)
+            try:
+                proba = ensemble._model.predict_proba(X_te)[:, 1]
+                preds = (proba >= 0.5).astype(int)
+                acc   = float(np.mean(preds == y_te))
+                fold_scores.append(acc)
+            except Exception as exc:
+                if hasattr(ensemble, "_logger") and ensemble._logger:
+                    ensemble._logger(f"[training] CV scoring failed fold={fold}: {exc}")
         except Exception as exc:
             if hasattr(ensemble, "_logger") and ensemble._logger:
                 ensemble._logger(

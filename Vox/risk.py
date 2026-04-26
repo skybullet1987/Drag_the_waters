@@ -93,10 +93,9 @@ class RegimeFilter:
         if latest < sma20:
             return False
 
-        if len(closes) >= self._SLOPE_PERIOD:
-            window = np.asarray(closes[-self._SLOPE_PERIOD:], dtype=float)
-            x      = np.arange(self._SLOPE_PERIOD, dtype=float)
-            slope  = float(np.polyfit(x, window, 1)[0])
+        if len(closes) >= self._SLOPE_PERIOD and self._SLOPE_PERIOD > 1:
+            window = closes[-self._SLOPE_PERIOD:]
+            slope  = (window[-1] - window[0]) / (self._SLOPE_PERIOD - 1)
             if slope < 0.0:
                 return False
 
