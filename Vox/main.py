@@ -114,14 +114,17 @@ class VoxAlgorithm(QCAlgorithm):
             self.securities[sym].set_slippage_model(ConstantSlippageModel(0.001))
 
         # ── Per-symbol state deques ───────────────────────────────────────────
-        _dq = lambda n: deque(maxlen=n)
+        # Bars per day at the chosen resolution × WARMUP_DAYS × 1.2 safety margin.
+        _bars_per_day = int(24 * 60 / RESOLUTION_MINUTES)
+        _state_max    = int(WARMUP_DAYS * _bars_per_day * 1.2)   # ~31k for 90d @ 5m
+        _dq = lambda n=_state_max: deque(maxlen=n)
         self._state = {}
         for sym in self._symbols:
             self._state[sym] = {
-                "closes":  _dq(200),
-                "highs":   _dq(200),
-                "lows":    _dq(200),
-                "volumes": _dq(200),
+                "closes":  _dq(),
+                "highs":   _dq(),
+                "lows":    _dq(),
+                "volumes": _dq(),
             }
 
         # ── 5-minute consolidators ────────────────────────────────────────────
@@ -187,6 +190,18 @@ class VoxAlgorithm(QCAlgorithm):
             self.time_rules.at(0, 5),
             self._retrain,
         )
+
+    # ── 5-minute bar handler ──────────────────────────────────────────────────
+
+    def on_warmup_finished(self):
+        """QC calls this once when warmup completes. Train immediately so the
+        strategy is ready to trade rather than waiting for the next scheduled
+        weekly retrain."""
+        self.log("[vox] Warmup finished — running initial train.")
+        try:
+            self._retrain()
+        except Exception as exc:
+            self.log(f"[vox] Initial train failed: {exc}")
 
     # ── 5-minute bar handler ──────────────────────────────────────────────────
 
@@ -424,6 +439,11 @@ class VoxAlgorithm(QCAlgorithm):
         scores    = {}
         conf_data = {}
 
+        btc_closes = (
+            list(self._state[self._btc_sym]["closes"])
+            if self._btc_sym else []
+        )
+
         for sym in self._symbols:
             st = self._state.get(sym)
             if st is None:
@@ -431,10 +451,6 @@ class VoxAlgorithm(QCAlgorithm):
 
             closes  = list(st["closes"])
             volumes = list(st["volumes"])
-            btc_closes = (
-                list(self._state[self._btc_sym]["closes"])
-                if self._btc_sym else []
-            )
 
             feat = build_features(
                 closes     = closes,
@@ -589,6 +605,7 @@ class VoxAlgorithm(QCAlgorithm):
     def _retrain(self):
         """Weekly retrain on all accumulated history.  Saves model to ObjectStore."""
         self.log("[vox] Starting scheduled retrain …")
+        self._hydrate_state_from_history(WARMUP_DAYS)
         timeout_bars = int(self._toh * 60 / DECISION_INTERVAL_MIN)
 
         X, y = build_training_data(
@@ -619,3 +636,48 @@ class VoxAlgorithm(QCAlgorithm):
     def _reset_daily(self):
         """Reset daily counters at midnight UTC."""
         self._risk.reset_daily()
+
+    # ── History hydration ─────────────────────────────────────────────────────
+
+    def _hydrate_state_from_history(self, days):
+        """Fetch `days` of consolidated bars per symbol via self.history() and
+        populate the state deques. Used by _retrain to guarantee a full
+        training window regardless of consolidator timing."""
+        bars_needed = int(days * 24 * 60 / RESOLUTION_MINUTES)
+        for sym in self._symbols:
+            try:
+                hist = self.history(
+                    sym,
+                    bars_needed,
+                    Resolution.MINUTE,
+                )
+                if hist is None or hist.empty:
+                    continue
+                # If MultiIndex (symbol, time), select this symbol.
+                if hasattr(hist.index, "levels") and len(hist.index.levels) > 1:
+                    df = hist.loc[sym] if sym in hist.index.get_level_values(0) else hist
+                else:
+                    df = hist
+                # Resample 1-min bars to RESOLUTION_MINUTES (open not stored in state).
+                df = df.resample(f"{RESOLUTION_MINUTES}min").agg({
+                    "high": "max", "low": "min",
+                    "close": "last", "volume": "sum",
+                }).dropna()
+                st = self._state[sym]
+                st["closes"].clear(); st["highs"].clear()
+                st["lows"].clear();   st["volumes"].clear()
+                for _, row in df.iterrows():
+                    st["closes"].append(float(row["close"]))
+                    st["highs"].append(float(row["high"]))
+                    st["lows"].append(float(row["low"]))
+                    st["volumes"].append(float(row["volume"]))
+            except Exception as exc:
+                self.log(f"[vox] history hydrate failed for {sym.value}: {exc}")
+
+    # ── End of algorithm ──────────────────────────────────────────────────────
+
+    def on_end_of_algorithm(self):
+        try:
+            self._persistence.flush_trade_log()
+        except Exception as exc:
+            self.log(f"[vox] Failed to flush trade log on shutdown: {exc}")

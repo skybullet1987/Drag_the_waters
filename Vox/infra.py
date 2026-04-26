@@ -244,14 +244,17 @@ class PersistenceManager:
     def __init__(
         self,
         algorithm,
-        model_key = "vox/model.pkl",
-        log_key   = "vox/trade_log.jsonl",
-        kill_key  = "vox/kill_switch",
+        model_key  = "vox/model.pkl",
+        log_key    = "vox/trade_log.jsonl",
+        kill_key   = "vox/kill_switch",
+        flush_every = 50,
     ):
-        self._algo      = algorithm
-        self._model_key = model_key
-        self._log_key   = log_key
-        self._kill_key  = kill_key
+        self._algo        = algorithm
+        self._model_key   = model_key
+        self._log_key     = log_key
+        self._kill_key    = kill_key
+        self._flush_every = flush_every
+        self._buffer      = []   # list[str] of pre-serialised JSON lines
 
     # ── Model serialisation ───────────────────────────────────────────────────
 
@@ -303,21 +306,29 @@ class PersistenceManager:
 
     def log_trade(self, entry_dict):
         """
-        Append *entry_dict* as a JSON line to the trade log in ObjectStore.
-
-        The log is append-only: each call reads the existing content, appends
-        one line, and writes the result back.
+        Buffer *entry_dict* as a JSON line and flush to ObjectStore when the
+        buffer reaches *flush_every* entries.
         """
+        try:
+            self._buffer.append(json.dumps(entry_dict, default=str))
+            if len(self._buffer) >= self._flush_every:
+                self.flush_trade_log()
+        except Exception as exc:
+            self._algo.log(f"[persistence] log_trade buffer failed: {exc}")
+
+    def flush_trade_log(self):
+        """Write all buffered trade lines to the ObjectStore and clear the buffer."""
+        if not self._buffer:
+            return
         try:
             existing = ""
             if self._algo.object_store.contains_key(self._log_key):
                 existing = self._algo.object_store.read(self._log_key)
-            new_line = json.dumps(entry_dict, default=str)
-            self._algo.object_store.save(
-                self._log_key, existing + new_line + "\n"
-            )
+            payload = existing + "\n".join(self._buffer) + "\n"
+            self._algo.object_store.save(self._log_key, payload)
+            self._buffer.clear()
         except Exception as exc:
-            self._algo.log(f"[persistence] log_trade failed: {exc}")
+            self._algo.log(f"[persistence] flush_trade_log failed: {exc}")
 
     # ── Kill switch ───────────────────────────────────────────────────────────
 
