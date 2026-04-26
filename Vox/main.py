@@ -490,15 +490,33 @@ class VoxAlgorithm(QCAlgorithm):
             self.debug(f"[vox] batch predict failed: {exc}")
             return
 
+        rej_disp  = 0
+        rej_agree = 0
+        rej_score = 0
+        max_p     = 0.0
+        min_disp  = float("inf")
+
         for (sym, _), conf in zip(candidates, confs):
-            if conf["std_proba"]  > self._max_disp:
+            mp = conf["mean_proba"]
+            sd = conf["std_proba"]
+            if mp > max_p:
+                max_p = mp
+            if sd < min_disp:
+                min_disp = sd
+            if sd > self._max_disp:
+                rej_disp += 1
                 continue
-            if conf["n_agree"]    < self._min_agr:
+            if conf["n_agree"] < self._min_agr:
+                rej_agree += 1
                 continue
-            if conf["mean_proba"] < self._s_min:
+            if mp < self._s_min:
+                rej_score += 1
                 continue
-            scores[sym]    = conf["mean_proba"]
+            scores[sym]    = mp
             conf_data[sym] = conf
+
+        n_cand       = len(candidates)
+        min_disp_str = f"{min_disp:.3f}" if min_disp != float("inf") else "n/a"
 
         if scores:
             ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -506,10 +524,15 @@ class VoxAlgorithm(QCAlgorithm):
             second_sc = ranked[1][1] if len(ranked) > 1 else 0.0
             self.log(
                 f"[diag] candidates={len(scores)} top={top_sc:.3f} "
-                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f}"
+                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f} "
+                f"cand={n_cand} max_p={max_p:.3f} min_disp={min_disp_str}"
             )
         else:
-            self.log(f"[diag] candidates=0 (all blocked by per-symbol gates)")
+            self.log(
+                f"[diag] candidates=0 cand={n_cand} "
+                f"rej_disp={rej_disp} rej_agree={rej_agree} rej_score={rej_score} "
+                f"max_p={max_p:.3f} min_disp={min_disp_str}"
+            )
 
         if not scores:
             return
