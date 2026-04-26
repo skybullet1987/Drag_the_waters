@@ -207,6 +207,17 @@ class VoxEnsemble:
 
     # ── Properties ────────────────────────────────────────────────────────────
 
+    def load_state(self, saved):
+        """
+        Copy fitted state from a previously serialised VoxEnsemble.
+
+        Parameters
+        ----------
+        saved : VoxEnsemble — a deserialised ensemble loaded from ObjectStore.
+        """
+        self._model  = saved._model
+        self._fitted = saved._fitted
+
     @property
     def is_fitted(self):
         """True if the ensemble has been trained at least once."""

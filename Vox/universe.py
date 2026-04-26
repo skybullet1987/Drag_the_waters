@@ -10,10 +10,10 @@ from AlgorithmImports import *
 # ── Static universe ───────────────────────────────────────────────────────────
 
 KRAKEN_PAIRS = [
-    "BTCUSD", "ETHUSD", "SOLUSD",  "XRPUSD",  "DOGEUSD",
-    "ADAUSD", "AVAXUSD","LINKUSD", "DOTUSD",   "LTCUSD",
-    "TRXUSD", "BCHUSD", "MATICUSD","ATOMUSD",  "UNIUSD",
-    "AAVEUSD","ARBUSD", "OPUSD",   "INJUSD",   "NEARUSD",
+    "BTCUSD",  "ETHUSD",   "SOLUSD",   "XRPUSD",  "DOGEUSD",
+    "ADAUSD",  "AVAXUSD",  "LINKUSD",  "DOTUSD",  "LTCUSD",
+    "TRXUSD",  "BCHUSD",   "MATICUSD", "ATOMUSD", "UNIUSD",
+    "AAVEUSD", "ARBUSD",   "OPUSD",    "INJUSD",  "NEARUSD",
 ]
 
 

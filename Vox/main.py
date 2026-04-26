@@ -146,9 +146,8 @@ class VoxAlgorithm(QCAlgorithm):
         # Try to load a previously trained model
         saved = self._persistence.load_model()
         if saved is not None:
-            self._ensemble._model   = saved._model
-            self._ensemble._fitted  = saved._fitted
-            self._model_ready       = self._ensemble.is_fitted
+            self._ensemble.load_state(saved)
+            self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
 
         # ── Position state — updated ONLY via on_order_event ──────────────────

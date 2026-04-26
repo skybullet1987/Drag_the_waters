@@ -158,8 +158,11 @@ def walk_forward_train(ensemble, X, y):
             acc = float(np.mean(np.array(preds) == y_te))
             fold_scores.append(acc)
         except Exception as exc:
-            # Non-fatal: log and continue to next fold
-            pass
+            # Non-fatal: log failure and continue to next fold
+            if hasattr(ensemble, "_logger") and ensemble._logger:
+                ensemble._logger(
+                    f"[training] walk_forward_train fold={fold} failed: {exc}"
+                )
 
     if fold_scores:
         mean_acc = float(np.mean(fold_scores))

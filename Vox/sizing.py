@@ -29,6 +29,8 @@ def kelly_fraction(p, tp, sl, kelly_frac=0.25, max_alloc=0.80):
     float
         Recommended allocation as a fraction of portfolio value, in [0, max_alloc].
     """
+    if sl <= 0:
+        return 0.0
     b      = tp / sl
     f_full = (p * (b + 1) - 1) / b
     return max(0.0, min(f_full * kelly_frac, max_alloc))
