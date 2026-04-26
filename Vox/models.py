@@ -353,6 +353,19 @@ class VoxEnsemble:
         self._model  = saved._model
         self._fitted = saved._fitted
 
+    def set_logger(self, logger):
+        """Attach (or replace) the logger callable. Not persisted."""
+        self._logger = logger
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_logger"] = None     # CLR MethodBinding is not picklable
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._logger = None         # caller can reattach via set_logger()
+
     @property
     def is_fitted(self):
         """True if the ensemble has been trained at least once."""

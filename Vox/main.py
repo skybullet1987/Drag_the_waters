@@ -156,6 +156,8 @@ class VoxAlgorithm(QCAlgorithm):
         saved = self._persistence.load_model()
         if saved is not None:
             self._ensemble.load_state(saved)
+            if hasattr(self._ensemble, "set_logger"):
+                self._ensemble.set_logger(self.log)
             self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
 

@@ -258,11 +258,23 @@ class PersistenceManager:
     def save_model(self, model):
         """Pickle *model* and write the bytes to the ObjectStore."""
         try:
+            # Defensive: strip any non-picklable logger before serialisation.
+            if hasattr(model, "set_logger"):
+                try:
+                    model.set_logger(None)
+                except Exception as set_exc:
+                    self._algo.log(f"[persistence] set_logger(None) failed: {set_exc}")
             data = pickle.dumps(model)
             self._algo.object_store.save_bytes(self._model_key, data)
             self._algo.log(
                 f"[persistence] Model saved to ObjectStore key={self._model_key}"
             )
+            # Re-attach logger so subsequent in-memory use still logs.
+            if hasattr(model, "set_logger"):
+                try:
+                    model.set_logger(self._algo.log)
+                except Exception as set_exc:
+                    self._algo.log(f"[persistence] set_logger(log) failed: {set_exc}")
         except Exception as exc:
             self._algo.log(f"[persistence] save_model failed: {exc}")
 
