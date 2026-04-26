@@ -1,0 +1,500 @@
+# ── Vox Models ────────────────────────────────────────────────────────────────
+#
+# Consolidated module for feature engineering, triple-barrier labeling, the
+# voting-ensemble classifier, and the walk-forward training pipeline.
+# Previously split across features.py, labeling.py, ensemble.py, training.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    ExtraTreesClassifier,
+    GradientBoostingClassifier,
+    VotingClassifier,
+)
+from sklearn.naive_bayes import GaussianNB
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import TimeSeriesSplit
+
+# Optional LightGBM — fall back to GradientBoostingClassifier if not installed
+try:
+    from lightgbm import LGBMClassifier as _LGBMClassifier
+    _LGBM_AVAILABLE = True
+except ImportError:
+    _LGBMClassifier  = None
+    _LGBM_AVAILABLE  = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE ENGINEERING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_atr(highs, lows, closes, period=14):
+    """
+    Compute the Average True Range (Wilder's method) over *period* bars.
+
+    Parameters
+    ----------
+    highs  : array-like of float, length >= period + 1
+    lows   : array-like of float, length >= period + 1
+    closes : array-like of float, length >= period + 1  (index 0 = oldest)
+    period : int, default 14
+
+    Returns
+    -------
+    float
+        ATR value, or 0.0 when there is insufficient data.
+    """
+    h = np.asarray(highs,  dtype=float)
+    l = np.asarray(lows,   dtype=float)
+    c = np.asarray(closes, dtype=float)
+
+    if len(c) < period + 1:
+        return 0.0
+
+    tr = np.maximum(
+        h[1:] - l[1:],
+        np.maximum(
+            np.abs(h[1:] - c[:-1]),
+            np.abs(l[1:] - c[:-1]),
+        ),
+    )
+    atr = float(np.mean(tr[-period:]))
+    return atr
+
+
+def build_features(closes, volumes, btc_closes, hour):
+    """
+    Build the 10-element feature vector for one decision bar.
+
+    Parameters
+    ----------
+    closes     : array-like of float, length >= 17
+    volumes    : array-like of float, length >= 16
+    btc_closes : array-like of float, length >= 5
+    hour       : int, 0–23  (UTC hour of current bar)
+
+    Returns
+    -------
+    numpy.ndarray of shape (10,) or None when insufficient history.
+
+    Feature layout
+    --------------
+    0  ret_1     — 1-bar return
+    1  ret_4     — 4-bar return
+    2  ret_8     — 8-bar return
+    3  ret_16    — 16-bar return
+    4  rsi_14    — RSI(14) normalised to [0, 1]
+    5  atr_n     — ATR(14) / close[-1]
+    6  vol_r     — volume ratio: current / 15-bar mean
+    7  btc_rel   — 4-bar symbol return minus 4-bar BTC return
+    8  hour_of_day — hour normalised to [0, 1]
+    9  (reserved — zero-padded for future use)
+    """
+    c  = np.asarray(closes,    dtype=float)
+    v  = np.asarray(volumes,   dtype=float)
+    bc = np.asarray(btc_closes, dtype=float)
+
+    if len(c) < 17 or len(v) < 16 or len(bc) < 5:
+        return None
+
+    last = c[-1]
+    if last == 0.0:
+        return None
+
+    # ── Returns at multiple horizons ──────────────────────────────────────────
+    def _ret(n):
+        return (c[-1] - c[-1 - n]) / c[-1 - n] if c[-1 - n] != 0 else 0.0
+
+    ret_1  = _ret(1)
+    ret_4  = _ret(4)
+    ret_8  = _ret(8)
+    ret_16 = _ret(16)
+
+    # ── RSI(14) — simple (non-smoothed) ───────────────────────────────────────
+    deltas = np.diff(c[-15:])
+    gains  = float(np.sum(deltas[deltas > 0]))
+    losses = float(np.sum(-deltas[deltas < 0]))
+    avg_g  = gains  / 14.0
+    avg_l  = losses / 14.0
+    rsi    = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+
+    # ── ATR(14) normalised by close ───────────────────────────────────────────
+    if len(c) >= 16:
+        tr_proxy = np.abs(np.diff(c[-15:]))
+        atr_val  = float(np.mean(tr_proxy))
+    else:
+        atr_val = 0.0
+    atr_n = atr_val / last if last != 0 else 0.0
+
+    # ── Volume ratio ──────────────────────────────────────────────────────────
+    prior_avg = float(np.mean(v[-16:-1]))
+    vol_r     = (v[-1] / prior_avg) if prior_avg > 0 else 1.0
+
+    # ── BTC-relative return (4-bar) ───────────────────────────────────────────
+    btc_ret_4 = (bc[-1] - bc[-5]) / bc[-5] if len(bc) >= 5 and bc[-5] != 0 else 0.0
+    btc_rel   = ret_4 - btc_ret_4
+
+    return np.array([
+        ret_1,
+        ret_4,
+        ret_8,
+        ret_16,
+        rsi / 100.0,          # normalise to [0, 1]
+        atr_n,
+        vol_r,
+        btc_rel,
+        float(hour) / 23.0,   # normalise to [0, 1]
+        0.0,                   # reserved
+    ], dtype=float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRIPLE-BARRIER LABELING
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ALIGNMENT CONSTRAINT
+# ────────────────────
+# The tp, sl, and timeout_bars values used here at training time MUST exactly
+# match the TP, SL, and TIMEOUT_HOURS / DECISION_INTERVAL_MIN values used in
+# live/backtest execution.  Misalignment causes the model to optimise for a
+# target it never sees in production.
+
+def triple_barrier_label(prices, tp, sl, timeout_bars):
+    """
+    Assign a binary label to a trade starting at ``prices[0]``.
+
+    Barriers:
+      - Upper: entry × (1 + tp)        → label = 1 (win)
+      - Lower: entry × (1 − sl)        → label = 0 (loss)
+      - Vertical: bar index == timeout  → label = 0 (timeout)
+
+    Parameters
+    ----------
+    prices       : array-like of float — price series from entry bar onward.
+    tp           : float — take-profit fraction  (e.g. 0.020 for +2 %).
+    sl           : float — stop-loss fraction    (e.g. 0.012 for −1.2 %).
+    timeout_bars : int   — maximum bars to hold.
+
+    Returns
+    -------
+    int  — 1 if TP hit first; 0 otherwise.
+    """
+    prices = np.asarray(prices, dtype=float)
+    if len(prices) < 2:
+        return 0
+
+    entry = prices[0]
+    if entry == 0.0:
+        return 0
+
+    upper = entry * (1.0 + tp)
+    lower = entry * (1.0 - sl)
+
+    limit = min(len(prices) - 1, timeout_bars)
+    for i in range(1, limit + 1):
+        px = prices[i]
+        if px >= upper:
+            return 1
+        if px <= lower:
+            return 0
+
+    return 0   # vertical barrier reached
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOTING ENSEMBLE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_estimators(logger=None):
+    """
+    Build the list of (name, estimator) tuples for the VotingClassifier.
+
+    Tree-based models are wrapped in CalibratedClassifierCV to obtain reliable
+    probability estimates.  Logistic regression and GaussianNB are inherently
+    probabilistic.
+    """
+    def _warn(msg):
+        if logger:
+            logger(msg)
+
+    lr = LogisticRegression(max_iter=1000, C=1.0)
+
+    rf = CalibratedClassifierCV(
+        RandomForestClassifier(
+            n_estimators=200, max_depth=5, n_jobs=1, random_state=42
+        ),
+        method="isotonic", cv=3,
+    )
+
+    if _LGBM_AVAILABLE:
+        _base_lgbm = _LGBMClassifier(
+            n_estimators=200, learning_rate=0.05, max_depth=4, num_leaves=15,
+            min_child_samples=20, reg_alpha=0.1, reg_lambda=0.1,
+            subsample=0.8, colsample_bytree=0.8,
+            deterministic=True, force_row_wise=True,
+            n_jobs=1, verbose=-1, random_state=42,
+        )
+        lgbm_name = "lgbm"
+    else:
+        _warn(
+            "[ensemble] LightGBM not available; "
+            "falling back to GradientBoostingClassifier"
+        )
+        _base_lgbm = GradientBoostingClassifier(
+            n_estimators=200, learning_rate=0.05, max_depth=4, random_state=42
+        )
+        lgbm_name = "lgbm_gb_fallback"
+
+    lgbm = CalibratedClassifierCV(_base_lgbm, method="isotonic", cv=3)
+
+    et = CalibratedClassifierCV(
+        ExtraTreesClassifier(
+            n_estimators=200, max_depth=5, n_jobs=1, random_state=42
+        ),
+        method="isotonic", cv=3,
+    )
+
+    gnb = GaussianNB()
+
+    return [
+        ("lr",       lr),
+        ("rf",       rf),
+        (lgbm_name,  lgbm),
+        ("et",       et),
+        ("gnb",      gnb),
+    ]
+
+
+class VoxEnsemble:
+    """
+    Heterogeneous soft-voting ensemble classifier for the Vox strategy.
+
+    Models
+    ------
+    - **LogisticRegression** — linear baseline, fast and interpretable.
+    - **RandomForestClassifier** — bagged trees, handles non-linearity.
+    - **LGBMClassifier** (GradientBoostingClassifier fallback) — boosted
+      trees, high signal-to-noise on tabular data.
+    - **ExtraTreesClassifier** — extremely randomised trees, decorrelated
+      from RF, adds diversity.
+    - **GaussianNB** — probabilistic baseline, calibrated out-of-the-box.
+
+    All tree models are wrapped in CalibratedClassifierCV(method="isotonic")
+    to ensure well-calibrated predict_proba outputs.
+    """
+
+    def __init__(self, logger=None):
+        self._logger     = logger
+        self._estimators = _make_estimators(logger)
+        self._model      = VotingClassifier(
+            estimators=self._estimators, voting="soft"
+        )
+        self._fitted = False
+
+    # ── Training ──────────────────────────────────────────────────────────────
+
+    def fit(self, X, y):
+        """Fit the ensemble on training data (X, y)."""
+        self._model.fit(X, y)
+        self._fitted = True
+
+    # ── Inference ─────────────────────────────────────────────────────────────
+
+    def predict_with_confidence(self, X):
+        """
+        Return per-model and aggregate probability estimates for *X*.
+
+        Parameters
+        ----------
+        X : array-like of shape (1, n_features)
+
+        Returns
+        -------
+        dict
+            ``mean_proba``  — float in [0, 1]: average P(class=1).
+            ``std_proba``   — float: standard deviation across models.
+            ``n_agree``     — int: models with P(class=1) >= 0.5.
+            ``per_model``   — dict[str, float]: model_name -> P(class=1).
+
+        Raises
+        ------
+        RuntimeError  if called before fit().
+        """
+        if not self._fitted:
+            raise RuntimeError("VoxEnsemble.fit() must be called before inference.")
+
+        X_arr  = np.atleast_2d(X)
+        probas = {}
+        for name, est in self._model.named_estimators_.items():
+            try:
+                p = float(est.predict_proba(X_arr)[0, 1])
+            except Exception:
+                p = 0.5
+            probas[name] = p
+
+        vals    = list(probas.values())
+        mean_p  = float(np.mean(vals))
+        std_p   = float(np.std(vals))
+        n_agree = int(sum(1 for p in vals if p >= 0.5))
+
+        return {
+            "mean_proba": mean_p,
+            "std_proba":  std_p,
+            "n_agree":    n_agree,
+            "per_model":  probas,
+        }
+
+    # ── State management ──────────────────────────────────────────────────────
+
+    def load_state(self, saved):
+        """Copy fitted state from a previously serialised VoxEnsemble."""
+        self._model  = saved._model
+        self._fitted = saved._fitted
+
+    @property
+    def is_fitted(self):
+        """True if the ensemble has been trained at least once."""
+        return self._fitted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRAINING PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_training_data(
+    algorithm,
+    symbols,
+    state_dict,
+    tp,
+    sl,
+    timeout_bars,
+    decision_interval_min,
+):
+    """
+    Construct a labelled feature matrix from per-symbol state history.
+
+    Parameters
+    ----------
+    algorithm             : QCAlgorithm — used for logging.
+    symbols               : list[Symbol]
+    state_dict            : dict[Symbol, dict]
+        Per-symbol deques keyed by "closes", "highs", "lows", "volumes".
+    tp                    : float — take-profit fraction (must match execution).
+    sl                    : float — stop-loss fraction  (must match execution).
+    timeout_bars          : int   — max bars per label  (must match execution).
+    decision_interval_min : int   — bar cadence in minutes (for logging).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray] or (None, None)
+        (X, y) arrays of shape (n_samples, n_features) and (n_samples,).
+    """
+    btc_sym = next(
+        (s for s in symbols if s.value.upper().startswith("BTC")), None
+    )
+
+    X_rows, y_rows = [], []
+
+    for sym in symbols:
+        st = state_dict.get(sym)
+        if st is None:
+            continue
+
+        closes  = list(st.get("closes",  []))
+        volumes = list(st.get("volumes", []))
+        btc_closes = (
+            list(state_dict[btc_sym].get("closes", []))
+            if btc_sym and btc_sym in state_dict else []
+        )
+
+        n = len(closes)
+        min_len = 17 + timeout_bars
+        if n < min_len:
+            continue
+
+        for i in range(17, n - timeout_bars):
+            feat = build_features(
+                closes     = closes[:i + 1],
+                volumes    = volumes[:i + 1],
+                btc_closes = btc_closes[:i + 1] if btc_closes else [],
+                hour       = 0,   # hour unknown from deque; neutral value
+            )
+            if feat is None:
+                continue
+
+            label = triple_barrier_label(
+                prices       = closes[i:],
+                tp           = tp,
+                sl           = sl,
+                timeout_bars = timeout_bars,
+            )
+            X_rows.append(feat)
+            y_rows.append(label)
+
+    if not X_rows:
+        algorithm.log("[training] build_training_data: no usable rows")
+        return None, None
+
+    X = np.array(X_rows, dtype=float)
+    y = np.array(y_rows, dtype=int)
+    algorithm.log(
+        f"[training] Dataset: {X.shape[0]} samples, "
+        f"{X.shape[1]} features, "
+        f"positive_rate={float(y.mean()):.3f}"
+    )
+    return X, y
+
+
+def walk_forward_train(ensemble, X, y):
+    """
+    Fit *ensemble* using time-series walk-forward cross-validation, then
+    refit on the full dataset and return the fitted ensemble.
+
+    CV scores are computed to help detect overfitting but do not gate the
+    final fit — the model is always retrained on all available data.
+
+    Parameters
+    ----------
+    ensemble : VoxEnsemble
+    X        : np.ndarray of shape (n_samples, n_features)
+    y        : np.ndarray of shape (n_samples,)
+
+    Returns
+    -------
+    VoxEnsemble — fitted on the full dataset.
+    """
+    np.random.seed(42)
+
+    tscv = TimeSeriesSplit(n_splits=5)
+    fold_scores = []
+
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+        X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = y[train_idx], y[test_idx]
+
+        if len(np.unique(y_tr)) < 2:
+            continue
+
+        try:
+            ensemble.fit(X_tr, y_tr)
+            preds = [
+                1 if ensemble.predict_with_confidence(
+                    X_te[j:j + 1]
+                )["mean_proba"] >= 0.5 else 0
+                for j in range(len(X_te))
+            ]
+            acc = float(np.mean(np.array(preds) == y_te))
+            fold_scores.append(acc)
+        except Exception as exc:
+            if hasattr(ensemble, "_logger") and ensemble._logger:
+                ensemble._logger(
+                    f"[training] walk_forward_train fold={fold} failed: {exc}"
+                )
+
+    # Final fit on the full dataset
+    if len(np.unique(y)) >= 2:
+        ensemble.fit(X, y)
+
+    return ensemble

@@ -27,7 +27,7 @@ compared independently — Vox does **not** modify `main.py`.
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Feature Builder         │
-                                  │  (features.py)           │
+                                  │  (models.py)           │
                                   │  ret×4, RSI, ATR, vol,   │
                                   │  BTC-rel, hour           │
                                   └──────────┬───────────────┘
@@ -35,7 +35,7 @@ compared independently — Vox does **not** modify `main.py`.
                                              ▼
                                   ┌──────────────────────────┐
                                   │  VoxEnsemble             │
-                                  │  (ensemble.py)           │
+                                  │  (models.py)           │
                                   │  Soft vote of 5 models   │
                                   └──────────┬───────────────┘
                                              │  mean_proba, std_proba,
@@ -50,14 +50,14 @@ compared independently — Vox does **not** modify `main.py`.
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Regime Gate             │
-                                  │  (regime.py)             │
+                                  │  (risk.py)             │
                                   │  4h BTC SMA(20) + slope  │
                                   └──────────┬───────────────┘
                                              │
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Kelly Sizer             │
-                                  │  (sizing.py)             │
+                                  │  (risk.py)             │
                                   │  Fractional-Kelly or     │
                                   │  flat allocation         │
                                   └──────────┬───────────────┘
@@ -126,15 +126,15 @@ barrier within `timeout_bars` steps; **0** otherwise.
 > the classifier to optimise for outcomes that differ from what is traded, which
 > will degrade out-of-sample performance.
 
-The default values are defined once in `config.py` and imported by both
-`labeling.py` and `main.py` to enforce this constraint.
+The default values are defined once at the top of `main.py` and imported by
+both `models.py` and `main.py` to enforce this constraint.
 
 ---
 
 ## Parameters and Defaults
 
-All parameters are defined in `config.py` and can be overridden at runtime via
-the QuantConnect parameter panel.
+All parameters are defined at the top of `main.py` as module-level constants
+and can be overridden at runtime via the QuantConnect parameter panel.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -184,7 +184,7 @@ For live trading you can switch to a dynamic top-20 by volume:
 self._symbols = add_universe(self)
 
 # With:
-from universe import fetch_kraken_top20_usd
+from infra import fetch_kraken_top20_usd
 live_pairs = fetch_kraken_top20_usd(self)
 self._symbols = []
 for ticker in live_pairs:
@@ -224,18 +224,10 @@ be managed (exits still fire); only new entries are blocked.
 
 | File | Purpose |
 |------|---------|
-| `config.py` | All tunable constants |
-| `universe.py` | Static 20-pair list + `add_universe()` helper |
-| `features.py` | Feature vector builder + ATR helper |
-| `labeling.py` | Triple-barrier label generator |
-| `ensemble.py` | `VoxEnsemble` class (5-model soft vote) |
-| `sizing.py` | Kelly fraction + `compute_qty` |
-| `regime.py` | `RegimeFilter` (4h BTC SMA + slope) |
-| `risk.py` | `RiskManager` (cooldown, daily SL, drawdown CB) |
-| `execution.py` | `OrderHelper` (lot-size) + `PartialFillTracker` |
-| `persistence.py` | `PersistenceManager` (ObjectStore) |
-| `training.py` | `build_training_data` + `walk_forward_train` |
-| `main.py` | `VoxAlgorithm` — QCAlgorithm entry point |
+| `main.py` | `VoxAlgorithm` — QCAlgorithm entry point + all strategy constants |
+| `models.py` | Feature engineering, triple-barrier labeling, `VoxEnsemble`, training pipeline |
+| `risk.py` | `RegimeFilter` (4h BTC gate), Kelly sizing, `RiskManager` (cooldowns, drawdown CB) |
+| `infra.py` | Universe list + `add_universe()`, `OrderHelper`, `PartialFillTracker`, `PersistenceManager` |
 
 ---
 

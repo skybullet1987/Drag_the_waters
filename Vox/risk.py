@@ -1,13 +1,185 @@
-# ── Vox Risk Manager ──────────────────────────────────────────────────────────
+# ── Vox Risk ──────────────────────────────────────────────────────────────────
 #
-# Centralises all pre-trade risk checks:
-#   • Per-coin cooldown after SL exits
-#   • Global cooldown after any exit
-#   • Daily stop-loss cap
-#   • Drawdown circuit-breaker
+# Consolidated module for all pre-trade guards:
+#   • RegimeFilter  — 4h BTC SMA(20) + slope gate
+#   • kelly_fraction / compute_qty — fractional-Kelly position sizing
+#   • RiskManager   — per-coin cooldown, daily SL cap, drawdown circuit-breaker
+# Previously split across regime.py, sizing.py, and risk.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
+import numpy as np
+from collections import deque
 from datetime import timedelta
+from AlgorithmImports import *
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REGIME FILTER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class RegimeFilter:
+    """
+    Bitcoin-based macro regime filter.
+
+    Logic
+    -----
+    The filter collects 4-hour BTC bars via a QC consolidator.  On each
+    decision call it evaluates two conditions:
+
+    1. **SMA gate** — the latest 4h close must be above the 20-bar SMA.
+    2. **Slope gate** — a linear slope over the last 5 bars must be positive.
+
+    If either condition fails the filter returns False (block alt longs).
+    BTC itself is always permitted regardless of regime.
+
+    Insufficient history (< 20 bars) is treated as "risk on".
+
+    Usage
+    -----
+    In ``initialize``::
+
+        self._regime = RegimeFilter()
+        self._regime.update_btc(self, self._btc_sym)
+
+    In entry logic::
+
+        if not self._regime.is_risk_on(self._btc_sym, sym=top_sym):
+            return
+    """
+
+    _SMA_PERIOD   = 20
+    _SLOPE_PERIOD = 5
+
+    def __init__(self):
+        self._closes = deque(maxlen=self._SMA_PERIOD + self._SLOPE_PERIOD)
+
+    def update_btc(self, algorithm, btc_sym):
+        """
+        Register a 4-hour consolidator on *btc_sym* that feeds this filter.
+        Call once from ``algorithm.initialize()``.
+        """
+        algorithm.consolidate(
+            btc_sym,
+            timedelta(hours=4),
+            self._on_4h_bar,
+        )
+
+    def _on_4h_bar(self, bar):
+        """Receive a closed 4-hour bar and append the close price."""
+        self._closes.append(float(bar.close))
+
+    def is_risk_on(self, btc_sym, sym=None):
+        """
+        Return True if the macro regime permits a long entry.
+
+        Parameters
+        ----------
+        btc_sym : Symbol — BTC symbol (exempt from the regime gate).
+        sym     : Symbol or None — symbol being evaluated.
+
+        Returns
+        -------
+        bool
+        """
+        if sym is not None and sym == btc_sym:
+            return True
+
+        closes = list(self._closes)
+        if len(closes) < self._SMA_PERIOD:
+            return True   # insufficient history → allow trading
+
+        sma20  = float(np.mean(closes[-self._SMA_PERIOD:]))
+        latest = closes[-1]
+        if latest < sma20:
+            return False
+
+        if len(closes) >= self._SLOPE_PERIOD:
+            window = np.asarray(closes[-self._SLOPE_PERIOD:], dtype=float)
+            x      = np.arange(self._SLOPE_PERIOD, dtype=float)
+            slope  = float(np.polyfit(x, window, 1)[0])
+            if slope < 0.0:
+                return False
+
+        return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POSITION SIZING  (fractional Kelly)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def kelly_fraction(p, tp, sl, kelly_frac=0.25, max_alloc=0.80):
+    """
+    Compute the fractional-Kelly allocation for a long trade.
+
+    Full-Kelly formula::
+
+        b       = tp / sl          (payoff ratio)
+        f_full  = (p × (b + 1) − 1) / b
+
+    The result is scaled by *kelly_frac* (quarter-Kelly) and clamped to
+    [0, max_alloc].
+
+    Parameters
+    ----------
+    p          : float — model probability P(win) in (0, 1).
+    tp         : float — take-profit fraction (e.g. 0.020).
+    sl         : float — stop-loss fraction   (e.g. 0.012).
+    kelly_frac : float — fractional-Kelly multiplier (default 0.25).
+    max_alloc  : float — hard ceiling on allocation  (default 0.80).
+
+    Returns
+    -------
+    float — allocation fraction in [0, max_alloc].
+    """
+    if sl <= 0:
+        return 0.0
+    b      = tp / sl
+    f_full = (p * (b + 1) - 1) / b
+    return max(0.0, min(f_full * kelly_frac, max_alloc))
+
+
+def compute_qty(
+    mean_proba,
+    tp,
+    sl,
+    price,
+    portfolio_value,
+    kelly_frac,
+    max_alloc,
+    cash_buffer,
+    use_kelly,
+    allocation,
+):
+    """
+    Compute the quantity (in coin units) to purchase.
+
+    Sizing logic
+    ────────────
+    1. If *use_kelly* is True, compute the Kelly allocation.
+       - If Kelly <= 0 (negative edge), fall back to flat *allocation*.
+    2. If *use_kelly* is False, use flat *allocation* directly.
+    3. Apply *cash_buffer* to leave headroom for fees.
+    4. Convert dollar value to coin units.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(qty, alloc_fraction)`` where qty is in coin units.
+    """
+    if use_kelly:
+        alloc = kelly_fraction(mean_proba, tp, sl, kelly_frac, max_alloc)
+        if alloc <= 0.0:
+            alloc = allocation
+    else:
+        alloc = allocation
+
+    dollar_value = portfolio_value * alloc * cash_buffer
+    qty          = dollar_value / price if price > 0 else 0.0
+    return qty, alloc
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RISK MANAGER
 
 
 class RiskManager:

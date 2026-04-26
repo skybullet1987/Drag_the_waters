@@ -5,24 +5,33 @@ import random
 from collections import deque
 from datetime import timedelta
 
-from config import (
-    TAKE_PROFIT, STOP_LOSS, TIMEOUT_HOURS, ATR_TP_MULT, ATR_SL_MULT,
-    SCORE_MIN, SCORE_GAP, MAX_DISPERSION, MIN_AGREE,
-    ALLOCATION, KELLY_FRAC, MAX_ALLOC, USE_KELLY,
-    MAX_DAILY_SL, COOLDOWN_MINS, SL_COOLDOWN_MINS, MAX_DD_PCT, CASH_BUFFER,
-    RESOLUTION_MINUTES, DECISION_INTERVAL_MIN, WARMUP_DAYS,
-)
-from universe   import add_universe, KRAKEN_PAIRS
-from features   import build_features, compute_atr
-from labeling   import triple_barrier_label
-from ensemble   import VoxEnsemble
-from sizing     import compute_qty
-from regime     import RegimeFilter
-from risk       import RiskManager
-from execution  import OrderHelper, PartialFillTracker
-from persistence import PersistenceManager
-from training   import build_training_data, walk_forward_train
+from infra   import add_universe, KRAKEN_PAIRS, OrderHelper, PartialFillTracker, PersistenceManager
+from models  import build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train
+from risk    import RegimeFilter, RiskManager, compute_qty
 # endregion
+
+# ── Strategy constants (all overridable via the QC parameter panel) ───────────
+TAKE_PROFIT          = 0.020   # +2.0 %  close long on gain
+STOP_LOSS            = 0.012   # −1.2 %  close long on loss
+TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
+ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
+ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
+SCORE_MIN            = 0.60    # minimum mean_proba to open a position
+SCORE_GAP            = 0.05    # required lead of top coin over runner-up
+MAX_DISPERSION       = 0.15    # max std_proba across models
+MIN_AGREE            = 4       # min models with proba >= 0.5
+ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
+KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
+MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
+USE_KELLY            = True    # set False to use flat ALLOCATION
+MAX_DAILY_SL         = 2       # halt new entries after this many SL hits per day
+COOLDOWN_MINS        = 15      # minutes to wait after any exit before re-entering
+SL_COOLDOWN_MINS     = 60      # per-coin cooldown specifically after an SL exit
+MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops > 8 %
+CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
+RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
+DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
+WARMUP_DAYS          = 90      # bars of history needed before trading
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vox — ML Ensemble Kraken Rotation Strategy
