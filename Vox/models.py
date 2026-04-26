@@ -25,6 +25,18 @@ except ImportError:
     _LGBMClassifier  = None
     _LGBM_AVAILABLE  = False
 
+# ── Module-level tuning constants ─────────────────────────────────────────────
+
+# Step size for the label-generation loop in build_training_data.
+# Using stride=3 reduces dataset size ~3× with minimal coverage loss
+# (entry decisions happen every 15 min; training every 5-min bar is oversampling).
+TRAIN_STRIDE = 3
+
+# When False, raw tree estimators are returned without CalibratedClassifierCV
+# wrapping. Roughly halves inference cost; useful during diagnostic / iteration
+# phases. Overridable at runtime via the use_calibration constructor argument.
+USE_CALIBRATION = True
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FEATURE ENGINEERING
@@ -207,30 +219,40 @@ def triple_barrier_label(prices, tp, sl, timeout_bars):
 # VOTING ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _make_estimators(logger=None):
+def _make_estimators(logger=None, use_calibration=True):
     """
     Build the list of (name, estimator) tuples for the VotingClassifier.
 
     Tree-based models are wrapped in CalibratedClassifierCV to obtain reliable
     probability estimates.  Logistic regression and GaussianNB are inherently
     probabilistic.
+
+    Parameters
+    ----------
+    logger          : callable or None — for diagnostic warnings.
+    use_calibration : bool — when False, return raw tree estimators without
+                      CalibratedClassifierCV wrapping (halves inference cost).
     """
     def _warn(msg):
         if logger:
             logger(msg)
 
+    def _maybe_calibrate(est):
+        if use_calibration:
+            return CalibratedClassifierCV(est, method="isotonic", cv=2)
+        return est
+
     lr = LogisticRegression(max_iter=1000, C=1.0)
 
-    rf = CalibratedClassifierCV(
+    rf = _maybe_calibrate(
         RandomForestClassifier(
-            n_estimators=200, max_depth=5, n_jobs=1, random_state=42
-        ),
-        method="isotonic", cv=2,
+            n_estimators=100, max_depth=5, n_jobs=1, random_state=42
+        )
     )
 
     if _LGBM_AVAILABLE:
         _base_lgbm = _LGBMClassifier(
-            n_estimators=200, learning_rate=0.05, max_depth=4, num_leaves=15,
+            n_estimators=100, learning_rate=0.05, max_depth=4, num_leaves=15,
             min_child_samples=20, reg_alpha=0.1, reg_lambda=0.1,
             subsample=0.8, colsample_bytree=0.8,
             deterministic=True, force_row_wise=True,
@@ -243,17 +265,16 @@ def _make_estimators(logger=None):
             "falling back to GradientBoostingClassifier"
         )
         _base_lgbm = GradientBoostingClassifier(
-            n_estimators=200, learning_rate=0.05, max_depth=4, random_state=42
+            n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42
         )
         lgbm_name = "lgbm_gb_fallback"
 
-    lgbm = CalibratedClassifierCV(_base_lgbm, method="isotonic", cv=2)
+    lgbm = _maybe_calibrate(_base_lgbm)
 
-    et = CalibratedClassifierCV(
+    et = _maybe_calibrate(
         ExtraTreesClassifier(
-            n_estimators=200, max_depth=5, n_jobs=1, random_state=42
-        ),
-        method="isotonic", cv=2,
+            n_estimators=100, max_depth=5, n_jobs=1, random_state=42
+        )
     )
 
     gnb = GaussianNB()
@@ -285,10 +306,11 @@ class VoxEnsemble:
     to ensure well-calibrated predict_proba outputs.
     """
 
-    def __init__(self, logger=None):
-        self._logger     = logger
-        self._estimators = _make_estimators(logger)
-        self._model      = VotingClassifier(
+    def __init__(self, logger=None, use_calibration=True):
+        self._logger          = logger
+        self._use_calibration = use_calibration
+        self._estimators      = _make_estimators(logger, use_calibration=use_calibration)
+        self._model           = VotingClassifier(
             estimators=self._estimators, voting="soft"
         )
         self._fitted = False
@@ -345,6 +367,42 @@ class VoxEnsemble:
             "n_agree":    n_agree,
             "per_model":  probas,
         }
+
+    def predict_with_confidence_batch(self, X):
+        """Vectorised version of predict_with_confidence over a batch.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_samples, n_features)
+
+        Returns
+        -------
+        list[dict]
+            One dict per row with keys: mean_proba, std_proba, n_agree, per_model.
+        """
+        if not self._fitted:
+            raise RuntimeError("VoxEnsemble.fit() must be called before inference.")
+        X = np.atleast_2d(X)
+        proba_per_model = {}
+        for name, est in self._model.named_estimators_.items():
+            try:
+                proba_per_model[name] = est.predict_proba(X)[:, 1].astype(float)
+            except Exception:
+                proba_per_model[name] = np.full(len(X), 0.5, dtype=float)
+        model_names = list(proba_per_model.keys())
+        arr    = np.stack([proba_per_model[m] for m in model_names], axis=1)  # (N, M)
+        means  = arr.mean(axis=1)
+        stds   = arr.std(axis=1)
+        agrees = (arr >= 0.5).sum(axis=1)
+        out = []
+        for i in range(len(X)):
+            out.append({
+                "mean_proba": float(means[i]),
+                "std_proba":  float(stds[i]),
+                "n_agree":    int(agrees[i]),
+                "per_model":  {m: float(proba_per_model[m][i]) for m in model_names},
+            })
+        return out
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -430,7 +488,7 @@ def build_training_data(
         WINDOW     = 17                   # build_features needs the last 17 bars
         BTC_WINDOW = max(WINDOW, 5)       # btc_closes only needs last 5
 
-        for i in range(WINDOW, n - timeout_bars):
+        for i in range(WINDOW, n - timeout_bars, TRAIN_STRIDE):
             feat = build_features(
                 closes     = closes[i - WINDOW + 1 : i + 1],
                 volumes    = volumes[i - WINDOW + 1 : i + 1],

@@ -16,10 +16,10 @@ STOP_LOSS            = 0.012   # −1.2 %  close long on loss
 TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.60    # minimum mean_proba to open a position
-SCORE_GAP            = 0.05    # required lead of top coin over runner-up
-MAX_DISPERSION       = 0.15    # max std_proba across models
-MIN_AGREE            = 4       # min models with proba >= 0.5
+SCORE_MIN            = 0.55    # minimum mean_proba to open a position
+SCORE_GAP            = 0.03    # required lead of top coin over runner-up
+MAX_DISPERSION       = 0.25    # max std_proba across models
+MIN_AGREE            = 3       # min models with proba >= 0.5
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
@@ -102,6 +102,8 @@ class VoxAlgorithm(QCAlgorithm):
         self._sl_cd    = int(self.get_parameter("sl_cooldown_mins")   or SL_COOLDOWN_MINS)
         self._max_dd   = float(self.get_parameter("max_dd_pct")       or MAX_DD_PCT)
         self._cb       = float(self.get_parameter("cash_buffer")      or CASH_BUFFER)
+        _uc_raw        = self.get_parameter("use_calibration")
+        self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -150,7 +152,7 @@ class VoxAlgorithm(QCAlgorithm):
         )
 
         # ── Ensemble + persistence ────────────────────────────────────────────
-        self._ensemble    = VoxEnsemble(logger=self.log)
+        self._ensemble    = VoxEnsemble(logger=self.log, use_calibration=self._use_calibration)
         self._persistence = PersistenceManager(self)
         self._fill_tracker= PartialFillTracker()
         self._model_ready = False
@@ -194,10 +196,12 @@ class VoxAlgorithm(QCAlgorithm):
     # ── 5-minute bar handler ──────────────────────────────────────────────────
 
     def on_warmup_finished(self):
-        """QC calls this once when warmup completes. Train immediately so the
-        strategy is ready to trade rather than waiting for the next scheduled
-        weekly retrain."""
-        self.log("[vox] Warmup finished — running initial train.")
+        """Hydrate full warmup window from history once, then run initial train."""
+        self.log("[vox] Warmup finished — hydrating history then initial train.")
+        try:
+            self._hydrate_state_from_history(WARMUP_DAYS)
+        except Exception as exc:
+            self.log(f"[vox] history hydrate failed: {exc}")
         try:
             self._retrain()
         except Exception as exc:
@@ -444,6 +448,7 @@ class VoxAlgorithm(QCAlgorithm):
             if self._btc_sym else []
         )
 
+        candidates = []   # list of (sym, feat)
         for sym in self._symbols:
             st = self._state.get(sym)
             if st is None:
@@ -461,26 +466,38 @@ class VoxAlgorithm(QCAlgorithm):
             if feat is None:
                 continue
 
-            try:
-                conf = self._ensemble.predict_with_confidence(feat.reshape(1, -1))
-            except Exception as exc:
-                self.debug(f"[vox] predict_with_confidence failed for {sym.value}: {exc}")
-                continue
+            candidates.append((sym, feat))
 
-            mean_p = conf["mean_proba"]
-            std_p  = conf["std_proba"]
-            n_agr  = conf["n_agree"]
+        if not candidates:
+            return
 
-            # Dispersion and agreement gates (per symbol, not just top)
-            if std_p > self._max_disp:
-                continue
-            if n_agr < self._min_agr:
-                continue
-            if mean_p < self._s_min:
-                continue
+        X_all = np.vstack([c[1] for c in candidates])
+        try:
+            confs = self._ensemble.predict_with_confidence_batch(X_all)
+        except Exception as exc:
+            self.debug(f"[vox] batch predict failed: {exc}")
+            return
 
-            scores[sym]    = mean_p
+        for (sym, _), conf in zip(candidates, confs):
+            if conf["std_proba"]  > self._max_disp:
+                continue
+            if conf["n_agree"]    < self._min_agr:
+                continue
+            if conf["mean_proba"] < self._s_min:
+                continue
+            scores[sym]    = conf["mean_proba"]
             conf_data[sym] = conf
+
+        if scores:
+            ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            top_sc    = ranked[0][1]
+            second_sc = ranked[1][1] if len(ranked) > 1 else 0.0
+            self.log(
+                f"[diag] candidates={len(scores)} top={top_sc:.3f} "
+                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f}"
+            )
+        else:
+            self.log(f"[diag] candidates=0 (all blocked by per-symbol gates)")
 
         if not scores:
             return
@@ -605,7 +622,6 @@ class VoxAlgorithm(QCAlgorithm):
     def _retrain(self):
         """Weekly retrain on all accumulated history.  Saves model to ObjectStore."""
         self.log("[vox] Starting scheduled retrain …")
-        self._hydrate_state_from_history(WARMUP_DAYS)
         timeout_bars = int(self._toh * 60 / DECISION_INTERVAL_MIN)
 
         X, y = build_training_data(
