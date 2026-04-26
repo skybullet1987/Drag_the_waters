@@ -32,6 +32,7 @@ CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
 RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
 DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
 WARMUP_DAYS          = 90      # bars of history needed before trading
+MAX_HISTORY_BARS     = 30000   # safety cap on history bars fetched per symbol (~104 days @ 5m)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vox — ML Ensemble Kraken Rotation Strategy
@@ -103,7 +104,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._max_dd   = float(self.get_parameter("max_dd_pct")       or MAX_DD_PCT)
         self._cb       = float(self.get_parameter("cash_buffer")      or CASH_BUFFER)
         _uc_raw        = self.get_parameter("use_calibration")
-        self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
+        self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else False
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -196,14 +197,25 @@ class VoxAlgorithm(QCAlgorithm):
     # ── 5-minute bar handler ──────────────────────────────────────────────────
 
     def on_warmup_finished(self):
-        """Hydrate full warmup window from history once, then run initial train."""
-        self.log("[vox] Warmup finished — hydrating history then initial train.")
+        """Schedule initial hydration + training off the time loop via self.train().
+        Synchronous heavy work in on_warmup_finished can exceed QC's 10-minute
+        Isolator watchdog and crash the algorithm."""
+        self.log("[vox] Warmup finished — scheduling initial train off-loop.")
+        self.train(self._initial_train)
+
+    def _initial_train(self):
+        """Off-loop initial training: hydrate history, then train."""
+        import time
+        t0 = time.time()
         try:
             self._hydrate_state_from_history(WARMUP_DAYS)
+            self.log(f"[vox] hydrate took {time.time()-t0:.1f}s")
         except Exception as exc:
             self.log(f"[vox] history hydrate failed: {exc}")
+        t1 = time.time()
         try:
             self._retrain()
+            self.log(f"[vox] initial _retrain took {time.time()-t1:.1f}s")
         except Exception as exc:
             self.log(f"[vox] Initial train failed: {exc}")
 
@@ -660,6 +672,7 @@ class VoxAlgorithm(QCAlgorithm):
         populate the state deques. Used by _retrain to guarantee a full
         training window regardless of consolidator timing."""
         bars_needed = int(days * 24 * 60 / RESOLUTION_MINUTES)
+        bars_needed = min(bars_needed, MAX_HISTORY_BARS)   # safety cap (~104 days @ 5m)
         for sym in self._symbols:
             try:
                 hist = self.history(
