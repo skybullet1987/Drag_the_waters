@@ -118,16 +118,12 @@ barrier within `timeout_bars` steps; **0** otherwise.
 
 ### Alignment Constraint
 
-> **Critical:** The `tp`, `sl`, and `timeout_bars` values used during labeling
-> at train time MUST match the `TAKE_PROFIT`, `STOP_LOSS`, and effective hold
-> duration used during live/backtest execution.
->
-> Misalignment (e.g. training with tp=0.020 but exiting at tp=0.012) causes
-> the classifier to optimise for outcomes that differ from what is traded, which
-> will degrade out-of-sample performance.
-
-The default values are defined once at the top of `main.py` and imported by
-both `models.py` and `main.py` to enforce this constraint.
+> **Note:** Training labels are now intentionally decoupled from execution
+> barriers.  The dedicated `LABEL_TP`, `LABEL_SL`, `LABEL_HORIZON_BARS`
+> constants (see below) govern what is labelled "1" at training time, while
+> `TAKE_PROFIT`, `STOP_LOSS`, and `TIMEOUT_HOURS` govern when positions are
+> closed at execution time.  Looser training barriers increase the positive
+> rate, improving model calibration without changing the live trading behaviour.
 
 ---
 
@@ -136,6 +132,8 @@ both `models.py` and `main.py` to enforce this constraint.
 All parameters are defined at the top of `main.py` as module-level constants
 and can be overridden at runtime via the QuantConnect parameter panel.
 
+### Execution parameters
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `take_profit` | `0.020` | Take-profit fraction (+2 %) |
@@ -143,10 +141,10 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `timeout_hours` | `3.0` | Max hold time in hours |
 | `atr_tp_mult` | `2.0` | ATR multiplier for dynamic TP |
 | `atr_sl_mult` | `1.2` | ATR multiplier for dynamic SL |
-| `score_min` | `0.60` | Minimum mean_proba to enter |
-| `score_gap` | `0.05` | Required probability gap to runner-up |
-| `max_dispersion` | `0.15` | Max std_proba across models |
-| `min_agree` | `4` | Min models with proba ≥ 0.5 |
+| `score_min` | `0.55` | Upper clamp on the effective score threshold |
+| `score_gap` | `0.01` | Required probability gap to runner-up |
+| `max_dispersion` | `0.25` | Max std_proba across models |
+| `min_agree` | `3` | Min models with proba ≥ agree_thr |
 | `allocation` | `0.50` | Flat allocation fallback fraction |
 | `kelly_frac` | `0.25` | Fractional-Kelly multiplier |
 | `max_alloc` | `0.80` | Hard ceiling on allocation |
@@ -156,6 +154,31 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `sl_cooldown_mins` | `60` | Per-coin SL cooldown (min) |
 | `max_dd_pct` | `0.08` | Drawdown circuit-breaker (8 %) |
 | `cash_buffer` | `0.99` | Cash headroom multiplier |
+
+### Label / training parameters
+
+| Constant / Parameter | Default | Description |
+|----------------------|---------|-------------|
+| `SCORE_MIN_FLOOR` | `0.15` | Floor for the base-rate-aware effective score threshold at runtime |
+| `LABEL_TP` / `label_tp` | `0.012` | Take-profit fraction for training labels (+1.2 %) |
+| `LABEL_SL` / `label_sl` | `0.010` | Stop-loss fraction for training labels (−1.0 %) |
+| `LABEL_HORIZON_BARS` / `label_horizon_bars` | `72` | Timeout bars for training labels (≈6h at 5-min bars) |
+
+`LABEL_*` constants are defined in `models.py` and re-imported by `main.py`.
+The looser barriers increase the positive rate from ~1–5 % to a more balanced
+range, improving ensemble calibration without changing live execution behaviour.
+
+### Base-rate-aware confidence gate
+
+At each decision tick the strategy derives two effective thresholds from the
+most recent training `positive_rate` (`pr`):
+
+| Threshold | Formula | Notes |
+|-----------|---------|-------|
+| `agree_thr` | `clip(2 × pr, 0.15, 0.55)` | Replaces the hard-coded `0.5` in the model agreement count |
+| `score_min_eff` | `clip(max(SCORE_MIN_FLOOR, 3 × pr), SCORE_MIN_FLOOR, SCORE_MIN)` | Replaces the raw `SCORE_MIN` in the mean_proba gate |
+
+Both values are logged every decision tick in the `[diag]` line.
 
 ---
 

@@ -46,6 +46,16 @@ VOX_ENABLE_CV = False
 # Number of CV folds used when VOX_ENABLE_CV is True.
 CV_SPLITS = 3
 
+# ── Label-specific triple-barrier parameters ──────────────────────────────────
+#
+# These govern what gets labelled "1" during training and are intentionally
+# decoupled from the live-execution TAKE_PROFIT / STOP_LOSS / TIMEOUT_HOURS.
+# Looser barriers here increase the positive rate, improving model calibration.
+# Overridable at runtime via QC parameters: label_tp, label_sl, label_horizon_bars.
+LABEL_TP           = 0.012   # take-profit fraction for training labels  (+1.2 %)
+LABEL_SL           = 0.010   # stop-loss fraction for training labels    (−1.0 %)
+LABEL_HORIZON_BARS = 72      # max bars to hold at train time (≈6h at 5-min bars)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FEATURE ENGINEERING
@@ -251,11 +261,12 @@ def _make_estimators(logger=None, use_calibration=True):
             return CalibratedClassifierCV(est, method="isotonic", cv=2)
         return est
 
-    lr = LogisticRegression(max_iter=1000, C=1.0)
+    lr = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
 
     rf = _maybe_calibrate(
         RandomForestClassifier(
-            n_estimators=100, max_depth=5, n_jobs=1, random_state=42
+            n_estimators=100, max_depth=5, n_jobs=1, random_state=42,
+            class_weight="balanced",
         )
     )
 
@@ -266,6 +277,7 @@ def _make_estimators(logger=None, use_calibration=True):
             subsample=0.8, colsample_bytree=0.8,
             deterministic=True, force_row_wise=True,
             n_jobs=1, verbose=-1, random_state=42,
+            class_weight="balanced",
         )
         lgbm_name = "lgbm"
     else:
@@ -282,11 +294,12 @@ def _make_estimators(logger=None, use_calibration=True):
 
     et = _maybe_calibrate(
         ExtraTreesClassifier(
-            n_estimators=100, max_depth=5, n_jobs=1, random_state=42
+            n_estimators=100, max_depth=5, n_jobs=1, random_state=42,
+            class_weight="balanced",
         )
     )
 
-    gnb = GaussianNB()
+    gnb = GaussianNB(priors=None)
 
     return [
         ("lr",       lr),
@@ -322,16 +335,43 @@ class VoxEnsemble:
         self._model           = VotingClassifier(
             estimators=self._estimators, voting="soft"
         )
-        self._fitted = False
+        self._fitted        = False
+        self._positive_rate = 0.0   # updated on every fit(); persisted via pickle
 
     # ── Training ──────────────────────────────────────────────────────────────
 
     def fit(self, X, y):
         """Fit the ensemble on training data (X, y)."""
+        # Record positive rate before fitting so it's available immediately.
+        if len(y) > 0:
+            self._positive_rate = float(np.mean(y == 1))
+
         self._model.fit(X, y)
+
+        # GaussianNB does not support class_weight; re-fit it with per-sample
+        # weights derived from class frequencies so it isn't dominated by the
+        # majority class (positive_rate ≈ 1–5 % produces extreme imbalance).
+        if "gnb" in self._model.named_estimators_:
+            classes, counts = np.unique(y, return_counts=True)
+            sw = np.ones(len(y), dtype=float)
+            if len(classes) == 2:
+                n = float(len(y))
+                for cls, cnt in zip(classes, counts):
+                    sw[y == cls] = n / (2.0 * float(cnt))
+            self._model.named_estimators_["gnb"].fit(X, y, sample_weight=sw)
+
         self._fitted = True
 
     # ── Inference ─────────────────────────────────────────────────────────────
+
+    def _agree_threshold(self):
+        """Base-rate-aware per-model probability threshold for agreement counting.
+
+        With a positive_rate of ~1–5 % the calibrated models rarely exceed 0.5,
+        so a hard 0.5 gate would reject everything.  This scales the threshold
+        proportionally to the positive rate and clips to [0.15, 0.55].
+        """
+        return float(np.clip(2.0 * self._positive_rate, 0.15, 0.55))
 
     def predict_with_confidence(self, X):
         """
@@ -368,7 +408,7 @@ class VoxEnsemble:
         vals    = list(probas.values())
         mean_p  = float(np.mean(vals))
         std_p   = float(np.std(vals))
-        n_agree = int(sum(1 for p in vals if p >= 0.5))
+        n_agree = int(sum(1 for p in vals if p >= self._agree_threshold()))
 
         return {
             "mean_proba": mean_p,
@@ -402,7 +442,8 @@ class VoxEnsemble:
         arr    = np.stack([proba_per_model[m] for m in model_names], axis=1)  # (N, M)
         means  = arr.mean(axis=1)
         stds   = arr.std(axis=1)
-        agrees = (arr >= 0.5).sum(axis=1)
+        agree_thr = self._agree_threshold()
+        agrees = (arr >= agree_thr).sum(axis=1)
         out = []
         for i in range(len(X)):
             out.append({
@@ -417,8 +458,9 @@ class VoxEnsemble:
 
     def load_state(self, saved):
         """Copy fitted state from a previously serialised VoxEnsemble."""
-        self._model  = saved._model
-        self._fitted = saved._fitted
+        self._model         = saved._model
+        self._fitted        = saved._fitted
+        self._positive_rate = getattr(saved, "_positive_rate", 0.0)
 
     def set_logger(self, logger):
         """Attach (or replace) the logger callable. Not persisted."""
@@ -451,6 +493,9 @@ def build_training_data(
     sl,
     timeout_bars,
     decision_interval_min,
+    label_tp=None,
+    label_sl=None,
+    label_horizon_bars=None,
 ):
     """
     Construct a labelled feature matrix from per-symbol state history.
@@ -461,16 +506,24 @@ def build_training_data(
     symbols               : list[Symbol]
     state_dict            : dict[Symbol, dict]
         Per-symbol deques keyed by "closes", "highs", "lows", "volumes".
-    tp                    : float — take-profit fraction (must match execution).
-    sl                    : float — stop-loss fraction  (must match execution).
-    timeout_bars          : int   — max bars per label  (must match execution).
+    tp                    : float — execution take-profit (not used for labeling).
+    sl                    : float — execution stop-loss  (not used for labeling).
+    timeout_bars          : int   — execution timeout bars (kept for backward compat).
     decision_interval_min : int   — bar cadence in minutes (for logging).
+    label_tp              : float or None — TP fraction for labels; defaults to LABEL_TP.
+    label_sl              : float or None — SL fraction for labels; defaults to LABEL_SL.
+    label_horizon_bars    : int   or None — timeout bars for labels; defaults to LABEL_HORIZON_BARS.
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray] or (None, None)
         (X, y) arrays of shape (n_samples, n_features) and (n_samples,).
     """
+    # Use dedicated label params so training targets are decoupled from execution.
+    _label_tp      = label_tp           if label_tp           is not None else LABEL_TP
+    _label_sl      = label_sl           if label_sl           is not None else LABEL_SL
+    _label_horizon = label_horizon_bars if label_horizon_bars is not None else LABEL_HORIZON_BARS
+
     btc_sym = next(
         (s for s in symbols if s.value.upper().startswith("BTC")), None
     )
@@ -490,14 +543,14 @@ def build_training_data(
         )
 
         n = len(closes)
-        min_len = 17 + timeout_bars
+        min_len = 17 + _label_horizon
         if n < min_len:
             continue
 
         WINDOW     = 17                   # build_features needs the last 17 bars
         BTC_WINDOW = max(WINDOW, 5)       # btc_closes only needs last 5
 
-        for i in range(WINDOW, n - timeout_bars, TRAIN_STRIDE):
+        for i in range(WINDOW, n - _label_horizon, TRAIN_STRIDE):
             feat = build_features(
                 closes     = closes[i - WINDOW + 1 : i + 1],
                 volumes    = volumes[i - WINDOW + 1 : i + 1],
@@ -508,10 +561,10 @@ def build_training_data(
                 continue
 
             label = triple_barrier_label(
-                prices       = closes[i : i + timeout_bars + 1],
-                tp           = tp,
-                sl           = sl,
-                timeout_bars = timeout_bars,
+                prices       = closes[i : i + _label_horizon + 1],
+                tp           = _label_tp,
+                sl           = _label_sl,
+                timeout_bars = _label_horizon,
             )
             X_rows.append(feat)
             y_rows.append(label)
