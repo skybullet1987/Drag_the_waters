@@ -37,6 +37,15 @@ TRAIN_STRIDE = 3
 # phases. Overridable at runtime via the use_calibration constructor argument.
 USE_CALIBRATION = True
 
+# Hard cap on training rows; keeps fit time bounded regardless of history length.
+MAX_TRAIN_SAMPLES = 20000
+
+# Set True for research-mode walk-forward CV scoring (adds ~5× training cost).
+VOX_ENABLE_CV = False
+
+# Number of CV folds used when VOX_ENABLE_CV is True.
+CV_SPLITS = 3
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FEATURE ENGINEERING
@@ -511,6 +520,15 @@ def build_training_data(
         algorithm.log("[training] build_training_data: no usable rows")
         return None, None
 
+    if len(X_rows) > MAX_TRAIN_SAMPLES:
+        rng = np.random.default_rng(42)
+        idx = np.sort(rng.choice(len(X_rows), MAX_TRAIN_SAMPLES, replace=False))
+        X_rows = np.array(X_rows, dtype=float)[idx]
+        y_rows = np.array(y_rows, dtype=int)[idx]
+        algorithm.log(
+            f"[training] Subsampled to {MAX_TRAIN_SAMPLES} rows (from larger pool)."
+        )
+
     X = np.array(X_rows, dtype=float)
     y = np.array(y_rows, dtype=int)
     algorithm.log(
@@ -522,53 +540,37 @@ def build_training_data(
 
 
 def walk_forward_train(ensemble, X, y):
-    """
-    Fit *ensemble* using time-series walk-forward cross-validation, then
-    refit on the full dataset and return the fitted ensemble.
+    """Fit *ensemble* on the full dataset.
 
-    CV scores are computed to help detect overfitting but do not gate the
-    final fit — the model is always retrained on all available data.
-
-    Parameters
-    ----------
-    ensemble : VoxEnsemble
-    X        : np.ndarray of shape (n_samples, n_features)
-    y        : np.ndarray of shape (n_samples,)
-
-    Returns
-    -------
-    VoxEnsemble — fitted on the full dataset.
+    NOTE: the prior walk-forward CV scoring loop was removed because it
+    multiplied training cost by ~5× and was diagnostic-only. To re-enable
+    CV scoring during research, set VOX_ENABLE_CV=True at module level.
     """
     np.random.seed(42)
 
-    tscv = TimeSeriesSplit(n_splits=5)
-    fold_scores = []
-
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        X_tr, X_te = X[train_idx], X[test_idx]
-        y_tr, y_te = y[train_idx], y[test_idx]
-
-        if len(np.unique(y_tr)) < 2:
-            continue
-
+    if VOX_ENABLE_CV:
         try:
-            ensemble.fit(X_tr, y_tr)
-            try:
+            tscv = TimeSeriesSplit(n_splits=CV_SPLITS)
+            fold_scores = []
+            for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+                X_tr, X_te = X[train_idx], X[test_idx]
+                y_tr, y_te = y[train_idx], y[test_idx]
+                if len(np.unique(y_tr)) < 2:
+                    continue
+                ensemble.fit(X_tr, y_tr)
                 proba = ensemble._model.predict_proba(X_te)[:, 1]
                 preds = (proba >= 0.5).astype(int)
-                acc   = float(np.mean(preds == y_te))
-                fold_scores.append(acc)
-            except Exception as exc:
-                if hasattr(ensemble, "_logger") and ensemble._logger:
-                    ensemble._logger(f"[training] CV scoring failed fold={fold}: {exc}")
+                fold_scores.append(float(np.mean(preds == y_te)))
+            if fold_scores and hasattr(ensemble, "_logger") and ensemble._logger:
+                ensemble._logger(
+                    f"[training] CV scores: "
+                    f"{[round(s, 3) for s in fold_scores]} "
+                    f"mean={float(np.mean(fold_scores)):.3f}"
+                )
         except Exception as exc:
             if hasattr(ensemble, "_logger") and ensemble._logger:
-                ensemble._logger(
-                    f"[training] walk_forward_train fold={fold} failed: {exc}"
-                )
+                ensemble._logger(f"[training] CV scoring failed: {exc}")
 
-    # Final fit on the full dataset
     if len(np.unique(y)) >= 2:
         ensemble.fit(X, y)
-
     return ensemble
