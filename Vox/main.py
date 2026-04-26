@@ -6,7 +6,10 @@ from collections import deque
 from datetime import timedelta
 
 from infra   import add_universe, KRAKEN_PAIRS, OrderHelper, PartialFillTracker, PersistenceManager
-from models  import build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train
+from models  import (
+    build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train,
+    LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS,
+)
 from risk    import RegimeFilter, RiskManager, compute_qty
 # endregion
 
@@ -16,10 +19,11 @@ STOP_LOSS            = 0.012   # −1.2 %  close long on loss
 TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.55    # minimum mean_proba to open a position
-SCORE_GAP            = 0.03    # required lead of top coin over runner-up
+SCORE_MIN            = 0.55    # minimum mean_proba to open a position (upper clamp)
+SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
+SCORE_GAP            = 0.01    # required lead of top coin over runner-up (compressed prob surface)
 MAX_DISPERSION       = 0.25    # max std_proba across models
-MIN_AGREE            = 3       # min models with proba >= 0.5
+MIN_AGREE            = 3       # min models with proba >= agree_thr
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
@@ -90,6 +94,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._atr_tp   = float(self.get_parameter("atr_tp_mult")      or ATR_TP_MULT)
         self._atr_sl   = float(self.get_parameter("atr_sl_mult")      or ATR_SL_MULT)
         self._s_min    = float(self.get_parameter("score_min")        or SCORE_MIN)
+        self._s_min_floor = SCORE_MIN_FLOOR
         self._s_gap    = float(self.get_parameter("score_gap")        or SCORE_GAP)
         self._max_disp = float(self.get_parameter("max_dispersion")   or MAX_DISPERSION)
         self._min_agr  = int(self.get_parameter("min_agree")          or MIN_AGREE)
@@ -105,6 +110,9 @@ class VoxAlgorithm(QCAlgorithm):
         self._cb       = float(self.get_parameter("cash_buffer")      or CASH_BUFFER)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else False
+        self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
+        self._label_sl      = float(self.get_parameter("label_sl")           or LABEL_SL)
+        self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -496,6 +504,13 @@ class VoxAlgorithm(QCAlgorithm):
         max_p     = 0.0
         min_disp  = float("inf")
 
+        # Base-rate-aware effective thresholds (computed once per tick)
+        pr            = self._ensemble._positive_rate
+        score_min_eff = float(np.clip(
+            max(self._s_min_floor, 3.0 * pr), self._s_min_floor, self._s_min
+        ))
+        agree_thr     = self._ensemble._agree_threshold()
+
         for (sym, _), conf in zip(candidates, confs):
             mp = conf["mean_proba"]
             sd = conf["std_proba"]
@@ -509,7 +524,7 @@ class VoxAlgorithm(QCAlgorithm):
             if conf["n_agree"] < self._min_agr:
                 rej_agree += 1
                 continue
-            if mp < self._s_min:
+            if mp < score_min_eff:
                 rej_score += 1
                 continue
             scores[sym]    = mp
@@ -525,13 +540,17 @@ class VoxAlgorithm(QCAlgorithm):
             self.log(
                 f"[diag] candidates={len(scores)} top={top_sc:.3f} "
                 f"second={second_sc:.3f} gap={top_sc-second_sc:.3f} "
-                f"cand={n_cand} max_p={max_p:.3f} min_disp={min_disp_str}"
+                f"cand={n_cand} max_p={max_p:.3f} min_disp={min_disp_str} "
+                f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
+                f"positive_rate={pr:.3f}"
             )
         else:
             self.log(
                 f"[diag] candidates=0 cand={n_cand} "
                 f"rej_disp={rej_disp} rej_agree={rej_agree} rej_score={rej_score} "
-                f"max_p={max_p:.3f} min_disp={min_disp_str}"
+                f"max_p={max_p:.3f} min_disp={min_disp_str} "
+                f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
+                f"positive_rate={pr:.3f}"
             )
 
         if not scores:
@@ -667,6 +686,9 @@ class VoxAlgorithm(QCAlgorithm):
             sl                    = self._sl,
             timeout_bars          = timeout_bars,
             decision_interval_min = DECISION_INTERVAL_MIN,
+            label_tp              = self._label_tp,
+            label_sl              = self._label_sl,
+            label_horizon_bars    = self._label_horizon,
         )
         if X is None or len(X) < 50:
             self.log("[vox] Retrain skipped: insufficient training data.")
