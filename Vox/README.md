@@ -273,6 +273,99 @@ be managed (exits still fire); only new entries are blocked.
 
 ---
 
+## Synchronous Market-Order State-Machine Caveat
+
+> **Critical implementation note for QuantConnect/LEAN backtests.**
+
+In QuantConnect's default backtest environment, `market_order()` uses
+`ImmediateFillModel`, which resolves the fill *synchronously* — meaning
+`on_order_event()` fires **inside** the `market_order()` call, before it
+returns.
+
+This creates a subtle race condition in the entry state machine:
+
+```
+# WRONG — _pending_sym is None when on_order_event fires:
+order             = self.market_order(sym, qty, tag="ENTRY")   # ← fills here
+self._pending_sym = sym     # ← too late; on_order_event already checked this
+
+# RIGHT — _pending_sym is set before market_order() is called:
+self._pending_sym = sym
+order             = self.market_order(sym, qty, tag="ENTRY")   # ← fires correctly
+self._pending_oid = order.order_id   # order_id only available after the call
+```
+
+The same issue affects `_check_exit()`: if `market_order()` fills synchronously,
+`on_order_event` may clear `self._pos_sym` before `_check_exit()` continues,
+causing `AttributeError: 'NoneType' object has no attribute 'value'` on the
+logging line that references `self._pos_sym.value`.
+
+**Fixes applied:**
+
+1. `_try_enter()` — `_pending_sym`, `_tp_dyn`, and `_sl_dyn` are set **before**
+   `market_order()`.  Only `_pending_oid` is assigned after (it requires the
+   returned order ticket).
+
+2. `_check_exit()` — Local immutable copies (`sym`, `entry_px`, `entry_time`)
+   are captured at the top of the function.  All subsequent code — including
+   portfolio lookup, logging, and `market_order()` — uses these locals instead
+   of `self._pos_sym`.  Logging happens **before** `market_order()`.
+
+3. `_reconcile()` — Safety net upgraded to recover from a missed synchronous
+   fill: if the pending order is `FILLED` and `_pos_sym` is still `None`, and
+   the portfolio actually holds the coin, position state is reconstructed.
+   When stale position state is cleared, `_exit_time` is updated and
+   `_risk.record_exit()` is called so cooldown accounting is not bypassed.
+
+4. `on_data()` — Fallback exit path added: when the held symbol has no bar on
+   the current tick (illiquid pair) but the timeout has elapsed, `_check_exit()`
+   is called with `self.securities[sym].price` as the price input.
+
+---
+
+## Soft-Voting Ensemble Design
+
+The `VoxEnsemble` (in `models.py`) implements a **heterogeneous soft-voting**
+ensemble rather than hard majority voting.  Soft voting averages the
+`predict_proba` output of each model and is more robust to class imbalance and
+miscalibrated individual models.
+
+### Why soft voting?
+
+With positive rates of 1–5 % (typical for triple-barrier labeling on short
+time horizons), hard majority voting nearly always produces the majority class.
+Averaging probabilities lets a confident minority of models pull the mean above
+the adaptive threshold even when most models output sub-0.5 probabilities.
+
+### Confidence metrics used
+
+| Metric | How computed | Used for |
+|--------|-------------|----------|
+| `mean_proba` | Average P(class=1) across all models | Primary entry gate (`score_min_eff`) |
+| `std_proba` | Std-dev of per-model probabilities | Dispersion gate: high std → uncertain → skip |
+| `n_agree` | Count of models with P ≥ `agree_thr` | Agreement gate: require ≥ `min_agree` |
+
+The adaptive thresholds are:
+
+| Threshold | Formula | Purpose |
+|-----------|---------|---------|
+| `agree_thr` | `clip(2 × positive_rate, 0.15, 0.55)` | Scales the "agreeing" bar proportionally to class frequency |
+| `score_min_eff` | `clip(max(SCORE_MIN_FLOOR, 3 × positive_rate), SCORE_MIN_FLOOR, SCORE_MIN)` | Avoids rejecting every signal when positive_rate is very low |
+
+### Calibration
+
+Tree-based models (RF, LGBM/GB, ET) are wrapped in
+`CalibratedClassifierCV(method="isotonic", cv=2)` to convert raw scores into
+reliable probability estimates.  LogisticRegression and GaussianNB are
+well-calibrated out-of-the-box.  Calibration can be disabled via the
+`use_calibration=False` parameter for faster iteration.
+
+GaussianNB is re-fit with class-frequency-derived sample weights after the
+main ensemble fit to prevent the majority-class imbalance from dominating its
+naive likelihood.
+
+---
+
 ## Future Work
 
 - **Meta-labeling** — Train a secondary binary classifier on the primary

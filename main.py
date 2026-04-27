@@ -129,6 +129,14 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if self._pos_sym is not None and not self._exiting:
             if self._pos_sym in data.bars:
                 self._check_exit(float(data.bars[self._pos_sym].close))
+            elif self._entry_time is not None:
+                # No bar this tick — still check the timeout so the position
+                # is bounded even for illiquid symbols with sparse bars.
+                elapsed = (self.time - self._entry_time).total_seconds() / 3600.0
+                if elapsed >= self._toh:
+                    fallback_px = float(self.securities[self._pos_sym].price)
+                    if fallback_px > 0:
+                        self._check_exit(fallback_px)
 
         # Entry logic — fire only at 15-minute bar boundaries
         if self.time.minute % 15 != 0:
@@ -211,23 +219,45 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if self._pos_sym is not None:
             qty = self.portfolio[self._pos_sym].quantity
             if qty <= 0:
+                sym = self._pos_sym   # capture before clearing
                 self.debug(
-                    f"RECONCILE: tracking {self._pos_sym.value} but qty={qty:.6f}"
+                    f"RECONCILE: tracking {sym.value} but qty={qty:.6f}"
                     f" — clearing stale state"
                 )
                 self._pos_sym    = None
                 self._entry_px   = 0.0
                 self._entry_time = None
                 self._exiting    = False
+                self._exit_time  = self.time
 
         # Safety net: if a pending entry order has already settled (should have
-        # been caught by on_order_event), clean it up here
+        # been caught by on_order_event), clean it up here.
+        # Handles the synchronous fill race where on_order_event fires inside
+        # market_order() before _pending_sym was set, causing the fill to be
+        # ignored.  Reconstruct minimal position state when FILLED.
         if self._pending_oid is not None:
             order = self.transactions.get_order_by_id(self._pending_oid)
             if order is not None and order.status in (
                 OrderStatus.FILLED, OrderStatus.INVALID, OrderStatus.CANCELED
             ):
-                if order.status != OrderStatus.FILLED:
+                if order.status == OrderStatus.FILLED:
+                    # Recover from a missed synchronous fill.
+                    if self._pos_sym is None and self._pending_sym is not None:
+                        held_qty = self.portfolio[self._pending_sym].quantity
+                        if held_qty > 0:
+                            self._pos_sym    = self._pending_sym
+                            self._entry_px   = float(
+                                self.securities[self._pending_sym].price
+                            )
+                            self._entry_time = self.time
+                            self.debug(
+                                f"RECONCILE: recovered missed ENTRY fill for"
+                                f" {self._pending_sym.value}"
+                                f"  approx_px={self._entry_px:.4f}"
+                            )
+                    self._pending_sym = None
+                    self._pending_oid = None
+                else:   # INVALID or CANCELED
                     self._pending_sym = None
                     self._pending_oid = None
 
@@ -235,8 +265,19 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
 
     def _check_exit(self, price):
         """Evaluate TP / SL / timeout; submit a market sell for actual qty."""
-        ret     = (price - self._entry_px) / self._entry_px
-        elapsed = (self.time - self._entry_time).total_seconds() / 3600.0
+        # Capture local references BEFORE placing any order.
+        # market_order() can fill synchronously in QuantConnect/LEAN and
+        # on_order_event may clear self._pos_sym before this function returns,
+        # causing a NoneType error if we read self._pos_sym after the call.
+        sym        = self._pos_sym
+        entry_px   = self._entry_px
+        entry_time = self._entry_time
+
+        if sym is None or entry_time is None or entry_px <= 0:
+            return
+
+        ret     = (price - entry_px) / entry_px
+        elapsed = (self.time - entry_time).total_seconds() / 3600.0
 
         reason = None
         if ret >= self._tp:
@@ -250,20 +291,21 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
             return
 
         # Use the actual portfolio quantity — never an assumed target size
-        qty = self.portfolio[self._pos_sym].quantity
+        qty = self.portfolio[sym].quantity
         if qty > 0:
             self._exiting = True   # suppress duplicate exit attempts
-            self.market_order(self._pos_sym, -qty, tag=reason)
+            # Log BEFORE market_order — fill may be synchronous.
             self.debug(
-                f"EXIT order {self._pos_sym.value}  reason={reason}"
+                f"EXIT order {sym.value}  reason={reason}"
                 f"  qty={qty:.6f}  ret={ret:.3%}"
             )
+            self.market_order(sym, -qty, tag=reason)
             if reason == "EXIT_SL":
                 self._daily_sl += 1
         else:
             # Portfolio already flat; state was stale — clean it up
             self.debug(
-                f"EXIT {self._pos_sym.value}: portfolio qty=0,"
+                f"EXIT {sym.value}: portfolio qty=0,"
                 f" clearing stale state"
             )
             self._pos_sym    = None
@@ -314,8 +356,14 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
             self.debug(f"ENTRY skip {top_sym.value}: computed qty={qty:.8f}")
             return
 
-        order = self.market_order(top_sym, qty, tag="ENTRY")
+        # IMPORTANT: set _pending_sym BEFORE calling market_order().
+        # In QuantConnect/LEAN, market orders with ImmediateFillModel fill
+        # synchronously — on_order_event fires inside market_order() before it
+        # returns.  If _pending_sym is still None at that point the ENTRY fill
+        # check (sym == self._pending_sym) fails and the state machine gets
+        # permanently stuck.
         self._pending_sym = top_sym
+        order = self.market_order(top_sym, qty, tag="ENTRY")
         self._pending_oid = order.order_id
         self.debug(
             f"ENTRY order {top_sym.value}  score={top_sc:.3f}"
