@@ -141,14 +141,15 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `timeout_hours` | `3.0` | Max hold time in hours |
 | `atr_tp_mult` | `2.0` | ATR multiplier for dynamic TP |
 | `atr_sl_mult` | `1.2` | ATR multiplier for dynamic SL |
-| `score_min` | `0.55` | Upper clamp on the effective score threshold |
-| `score_gap` | `0.01` | Required probability gap to runner-up |
-| `max_dispersion` | `0.25` | Max std_proba across models |
-| `min_agree` | `3` | Min models with proba ≥ agree_thr |
+| `score_min` | `0.25` | Upper clamp on the effective score threshold |
+| `score_gap` | `0.02` | Required probability gap to runner-up |
+| `max_dispersion` | `0.30` | Max std_proba across models |
+| `min_agree` | `1` | Min models with proba ≥ agree_thr |
 | `allocation` | `0.50` | Flat allocation fallback fraction |
 | `kelly_frac` | `0.25` | Fractional-Kelly multiplier |
 | `max_alloc` | `0.80` | Hard ceiling on allocation |
 | `use_kelly` | `True` | Use Kelly sizing; False = flat |
+| `use_calibration` | `True` | Wrap tree models in CalibratedClassifierCV |
 | `max_daily_sl` | `2` | Daily SL cap |
 | `cooldown_mins` | `15` | Global post-exit cooldown (min) |
 | `sl_cooldown_mins` | `60` | Per-coin SL cooldown (min) |
