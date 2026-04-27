@@ -15,9 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from models import VoxEnsemble  # type: ignore  # noqa: E402
 
 # Mirror constants from main.py (cannot import main.py without AlgorithmImports).
-SCORE_MIN       = 0.55
+SCORE_MIN       = 0.35
 SCORE_MIN_FLOOR = 0.15
-MIN_AGREE       = 3
+MIN_AGREE       = 2
 
 
 def _score_min_eff(positive_rate, s_min_floor=SCORE_MIN_FLOOR, s_min=SCORE_MIN):
@@ -87,7 +87,7 @@ class TestScoreMinEff:
         assert _score_min_eff(0.10) == pytest.approx(0.30)
 
     def test_high_positive_rate_clipped_to_score_min(self):
-        """With positive_rate=0.30, effective score is capped at SCORE_MIN=0.55."""
+        """With positive_rate=0.30, effective score is capped at SCORE_MIN=0.35."""
         assert _score_min_eff(0.30) == pytest.approx(SCORE_MIN)
 
     def test_always_within_bounds(self):
@@ -99,7 +99,7 @@ class TestScoreMinEff:
             )
 
     def test_score_min_constant_remains_upper_clamp(self):
-        """SCORE_MIN=0.55 is preserved as the upper bound, never exceeded."""
+        """SCORE_MIN=0.35 is preserved as the upper bound, never exceeded."""
         assert _score_min_eff(1.0) == pytest.approx(SCORE_MIN)
 
 

@@ -15,7 +15,7 @@ from AlgorithmImports import *
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    "BTCUSD",  "ETHUSD",   "SOLUSD",   "XRPUSD",  "DOGEUSD",
+    "BTCUSD",  "ETHUSD",   "SOLUSD",   "XRPUSD",  "XDGUSD",
     "ADAUSD",  "AVAXUSD",  "LINKUSD",  "DOTUSD",  "LTCUSD",
     "TRXUSD",  "BCHUSD",   "MATICUSD", "ATOMUSD", "UNIUSD",
     "AAVEUSD", "ARBUSD",   "OPUSD",    "INJUSD",  "NEARUSD",

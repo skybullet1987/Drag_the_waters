@@ -480,6 +480,16 @@ class VoxEnsemble:
         """True if the ensemble has been trained at least once."""
         return self._fitted
 
+    @property
+    def base_rate(self):
+        """Positive-class base rate from the most recent training run.
+
+        Returns the fraction of label-1 samples seen during the last fit().
+        Used by the caller (main.py) to compute an adaptive confidence threshold
+        that scales with the model's training base rate.
+        """
+        return self._positive_rate
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TRAINING PIPELINE
