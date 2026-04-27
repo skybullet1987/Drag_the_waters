@@ -19,11 +19,12 @@ STOP_LOSS            = 0.012   # −1.2 %  close long on loss
 TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.55    # minimum mean_proba to open a position (upper clamp)
+SCORE_MIN            = 0.35    # minimum mean_proba to open a position (upper clamp)
 SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
+SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
 SCORE_GAP            = 0.01    # required lead of top coin over runner-up (compressed prob surface)
-MAX_DISPERSION       = 0.25    # max std_proba across models
-MIN_AGREE            = 3       # min models with proba >= agree_thr
+MAX_DISPERSION       = 0.35    # max std_proba across models
+MIN_AGREE            = 2       # min models with proba >= agree_thr
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
@@ -109,7 +110,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._max_dd   = float(self.get_parameter("max_dd_pct")       or MAX_DD_PCT)
         self._cb       = float(self.get_parameter("cash_buffer")      or CASH_BUFFER)
         _uc_raw        = self.get_parameter("use_calibration")
-        self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else False
+        self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
         self._label_sl      = float(self.get_parameter("label_sl")           or LABEL_SL)
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
@@ -505,9 +506,9 @@ class VoxAlgorithm(QCAlgorithm):
         min_disp  = float("inf")
 
         # Base-rate-aware effective thresholds (computed once per tick)
-        pr            = self._ensemble._positive_rate
+        pr            = self._ensemble.base_rate
         score_min_eff = float(np.clip(
-            max(self._s_min_floor, 3.0 * pr), self._s_min_floor, self._s_min
+            max(self._s_min_floor, SCORE_MIN_MULT * pr), self._s_min_floor, self._s_min
         ))
         agree_thr     = self._ensemble._agree_threshold()
 
@@ -545,13 +546,17 @@ class VoxAlgorithm(QCAlgorithm):
                 f"positive_rate={pr:.3f}"
             )
         else:
-            self.log(
-                f"[diag] candidates=0 cand={n_cand} "
-                f"rej_disp={rej_disp} rej_agree={rej_agree} rej_score={rej_score} "
-                f"max_p={max_p:.3f} min_disp={min_disp_str} "
-                f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
-                f"positive_rate={pr:.3f}"
-            )
+            # Throttle to once per hour. _try_enter is only called when
+            # self.time.minute % DECISION_INTERVAL_MIN == 0 (i.e. minutes 0,
+            # 15, 30, 45), so minute == 0 fires exactly once per hour.
+            if self.time.minute == 0:
+                self.log(
+                    f"[diag] candidates=0 cand={n_cand} "
+                    f"rej_disp={rej_disp} rej_agree={rej_agree} rej_score={rej_score} "
+                    f"max_p={max_p:.3f} min_disp={min_disp_str} "
+                    f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
+                    f"positive_rate={pr:.3f}"
+                )
 
         if not scores:
             return
