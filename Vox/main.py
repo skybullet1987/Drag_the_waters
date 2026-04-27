@@ -19,12 +19,12 @@ STOP_LOSS            = 0.012   # −1.2 %  close long on loss
 TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.35    # minimum mean_proba to open a position (upper clamp)
+SCORE_MIN            = 0.25    # minimum mean_proba to open a position (upper clamp)
 SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
 SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
-SCORE_GAP            = 0.01    # required lead of top coin over runner-up (compressed prob surface)
-MAX_DISPERSION       = 0.35    # max std_proba across models
-MIN_AGREE            = 2       # min models with proba >= agree_thr
+SCORE_GAP            = 0.02    # required lead of top coin over runner-up
+MAX_DISPERSION       = 0.30    # max std_proba across models
+MIN_AGREE            = 1       # min models with proba >= agree_thr
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
@@ -490,6 +490,12 @@ class VoxAlgorithm(QCAlgorithm):
             candidates.append((sym, feat))
 
         if not candidates:
+            # Only log occasionally to avoid spamming the 100KB log cap
+            if self.time.minute == 0 and self.time.hour % 6 == 0:
+                self.log(
+                    f"[diag] no_features symbols={len(self._symbols)} "
+                    f"(build_features returned None for all)"
+                )
             return
 
         X_all = np.vstack([c[1] for c in candidates])
@@ -499,12 +505,6 @@ class VoxAlgorithm(QCAlgorithm):
             self.debug(f"[vox] batch predict failed: {exc}")
             return
 
-        rej_disp  = 0
-        rej_agree = 0
-        rej_score = 0
-        max_p     = 0.0
-        min_disp  = float("inf")
-
         # Base-rate-aware effective thresholds (computed once per tick)
         pr            = self._ensemble.base_rate
         score_min_eff = float(np.clip(
@@ -512,27 +512,21 @@ class VoxAlgorithm(QCAlgorithm):
         ))
         agree_thr     = self._ensemble._agree_threshold()
 
-        for (sym, _), conf in zip(candidates, confs):
-            mp = conf["mean_proba"]
-            sd = conf["std_proba"]
-            if mp > max_p:
-                max_p = mp
-            if sd < min_disp:
-                min_disp = sd
-            if sd > self._max_disp:
-                rej_disp += 1
-                continue
-            if conf["n_agree"] < self._min_agr:
-                rej_agree += 1
-                continue
-            if mp < score_min_eff:
-                rej_score += 1
-                continue
-            scores[sym]    = mp
-            conf_data[sym] = conf
+        # Per-gate pass counters for diagnostics
+        n_pass_disp  = 0
+        n_pass_agree = 0
+        n_pass_score = 0
 
-        n_cand       = len(candidates)
-        min_disp_str = f"{min_disp:.3f}" if min_disp != float("inf") else "n/a"
+        for (sym, _), conf in zip(candidates, confs):
+            passed_disp  = conf["std_proba"]  <= self._max_disp
+            passed_agree = conf["n_agree"]    >= self._min_agr
+            passed_score = conf["mean_proba"] >= score_min_eff
+            if passed_disp:  n_pass_disp  += 1
+            if passed_agree: n_pass_agree += 1
+            if passed_score: n_pass_score += 1
+            if passed_disp and passed_agree and passed_score:
+                scores[sym]    = conf["mean_proba"]
+                conf_data[sym] = conf
 
         if scores:
             ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -540,22 +534,19 @@ class VoxAlgorithm(QCAlgorithm):
             second_sc = ranked[1][1] if len(ranked) > 1 else 0.0
             self.log(
                 f"[diag] candidates={len(scores)} top={top_sc:.3f} "
-                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f} "
-                f"cand={n_cand} max_p={max_p:.3f} min_disp={min_disp_str} "
-                f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
-                f"positive_rate={pr:.3f}"
+                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f}"
             )
         else:
-            # Throttle to once per hour. _try_enter is only called when
-            # self.time.minute % DECISION_INTERVAL_MIN == 0 (i.e. minutes 0,
-            # 15, 30, 45), so minute == 0 fires exactly once per hour.
+            # Throttle to once per hour to protect the log cap
             if self.time.minute == 0:
+                best_mean   = max(c["mean_proba"] for c in confs)
+                best_nagree = max(c["n_agree"]    for c in confs)
+                best_std    = min(c["std_proba"]  for c in confs)
                 self.log(
-                    f"[diag] candidates=0 cand={n_cand} "
-                    f"rej_disp={rej_disp} rej_agree={rej_agree} rej_score={rej_score} "
-                    f"max_p={max_p:.3f} min_disp={min_disp_str} "
-                    f"agree_thr={agree_thr:.3f} score_min_eff={score_min_eff:.3f} "
-                    f"positive_rate={pr:.3f}"
+                    f"[diag] eval={len(candidates)} "
+                    f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} pass_score={n_pass_score} "
+                    f"best_mean={best_mean:.3f} best_agree={best_nagree} best_disp={best_std:.3f} "
+                    f"(thresh: score>={score_min_eff:.3f} agree>={self._min_agr} disp<={self._max_disp})"
                 )
 
         if not scores:
