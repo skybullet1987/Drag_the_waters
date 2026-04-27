@@ -262,6 +262,15 @@ class VoxAlgorithm(QCAlgorithm):
         if self._pos_sym is not None and not self._exiting:
             if self._pos_sym in data.bars:
                 self._check_exit(float(data.bars[self._pos_sym].close))
+            elif self._entry_time is not None:
+                # No bar for this symbol this tick (illiquid / low-volume pair).
+                # Normal TP/SL checks are skipped, but still check the timeout
+                # so the hold is bounded even when bars are absent.
+                elapsed = (self.time - self._entry_time).total_seconds() / 3600.0
+                if elapsed >= self._toh:
+                    fallback_px = float(self.securities[self._pos_sym].price)
+                    if fallback_px > 0:
+                        self._check_exit(fallback_px)
 
         # ── Entry logic — fire only at DECISION_INTERVAL_MIN boundaries ───────
         if self.time.minute % DECISION_INTERVAL_MIN != 0:
@@ -381,8 +390,9 @@ class VoxAlgorithm(QCAlgorithm):
         if self._pos_sym is not None:
             qty = self.portfolio[self._pos_sym].quantity
             if qty <= 0:
+                sym = self._pos_sym   # capture before clearing
                 self.debug(
-                    f"RECONCILE: tracking {self._pos_sym.value} but qty={qty:.6f}"
+                    f"RECONCILE: tracking {sym.value} but qty={qty:.6f}"
                     f" — clearing stale state"
                 )
                 self._pos_sym    = None
@@ -391,14 +401,39 @@ class VoxAlgorithm(QCAlgorithm):
                 self._tp_dyn     = 0.0
                 self._sl_dyn     = 0.0
                 self._exiting    = False
+                self._exit_time  = self.time
+                # Inform the risk manager so cooldown accounting is not bypassed.
+                self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
 
-        # Safety net for stale pending orders
+        # Safety net for stale pending orders.
+        # If the entry order already settled but on_order_event missed the fill
+        # (synchronous fill race: market_order filled before _pending_sym was set),
+        # reconstruct position state here so the state machine can continue.
         if self._pending_oid is not None:
             order = self.transactions.get_order_by_id(self._pending_oid)
             if order is not None and order.status in (
                 OrderStatus.FILLED, OrderStatus.INVALID, OrderStatus.CANCELED
             ):
-                if order.status != OrderStatus.FILLED:
+                if order.status == OrderStatus.FILLED:
+                    # Recover from a missed synchronous fill.
+                    if self._pos_sym is None and self._pending_sym is not None:
+                        held_qty = self.portfolio[self._pending_sym].quantity
+                        if held_qty > 0:
+                            self._pos_sym    = self._pending_sym
+                            self._entry_time = self.time
+                            # Fill price unavailable here; approximate with current price.
+                            self._entry_px   = float(
+                                self.securities[self._pending_sym].price
+                            )
+                            self.debug(
+                                f"RECONCILE: recovered missed ENTRY fill for"
+                                f" {self._pending_sym.value}"
+                                f"  approx_px={self._entry_px:.4f}"
+                            )
+                    self._fill_tracker.clear(self._pending_oid)
+                    self._pending_sym = None
+                    self._pending_oid = None
+                else:   # INVALID or CANCELED
                     self._fill_tracker.clear(self._pending_oid)
                     self._pending_sym = None
                     self._pending_oid = None
@@ -407,8 +442,19 @@ class VoxAlgorithm(QCAlgorithm):
 
     def _check_exit(self, price):
         """Evaluate ATR-based (or fixed) TP / SL / timeout; submit market sell."""
-        ret     = (price - self._entry_px) / self._entry_px
-        elapsed = (self.time - self._entry_time).total_seconds() / 3600.0
+        # Capture immutable local references BEFORE placing any order.
+        # market_order() can fill synchronously in QuantConnect/LEAN, meaning
+        # on_order_event may clear self._pos_sym (and related fields) before
+        # this function returns.  Using locals throughout avoids NoneType errors.
+        sym        = self._pos_sym
+        entry_px   = self._entry_px
+        entry_time = self._entry_time
+
+        if sym is None or entry_time is None or entry_px <= 0:
+            return
+
+        ret     = (price - entry_px) / entry_px
+        elapsed = (self.time - entry_time).total_seconds() / 3600.0
 
         tp_use = self._tp_dyn if self._tp_dyn > 0 else self._tp
         sl_use = self._sl_dyn if self._sl_dyn > 0 else self._sl
@@ -424,18 +470,20 @@ class VoxAlgorithm(QCAlgorithm):
         if not reason:
             return
 
-        qty = self.portfolio[self._pos_sym].quantity
+        qty = self.portfolio[sym].quantity
         if qty > 0:
             self._exiting = True
-            self.market_order(self._pos_sym, -qty, tag=reason)
+            # Log BEFORE market_order() so we never dereference self._pos_sym
+            # after a potential synchronous fill clears it.
             self.debug(
-                f"EXIT order {self._pos_sym.value}  reason={reason}"
+                f"EXIT order {sym.value}  reason={reason}"
                 f"  qty={qty:.6f}  ret={ret:.3%}"
             )
+            self.market_order(sym, -qty, tag=reason)
         else:
             # Portfolio already flat — clear stale state
             self.debug(
-                f"EXIT {self._pos_sym.value}: portfolio qty=0,"
+                f"EXIT {sym.value}: portfolio qty=0,"
                 f" clearing stale state"
             )
             self._pos_sym    = None
@@ -638,12 +686,19 @@ class VoxAlgorithm(QCAlgorithm):
             )
             return
 
-        # Place entry order
-        order = self.market_order(top_sym, qty, tag="ENTRY")
+        # Place entry order.
+        # IMPORTANT: set _pending_sym (and _tp_dyn/_sl_dyn) BEFORE calling
+        # market_order().  In QuantConnect/LEAN, market orders with the default
+        # ImmediateFillModel fill synchronously — on_order_event fires inside
+        # market_order() before it returns.  If _pending_sym is still None when
+        # that happens the ENTRY fill is silently ignored and the state machine
+        # gets permanently stuck (_pending_sym stays set, _pos_sym never set).
         self._pending_sym = top_sym
-        self._pending_oid = order.order_id
         self._tp_dyn      = tp_use
         self._sl_dyn      = sl_use
+        order = self.market_order(top_sym, qty, tag="ENTRY")
+        # order_id is only available on the returned ticket; assign after the call.
+        self._pending_oid = order.order_id
         self._fill_tracker.start_order(order.order_id, qty)
 
         self.debug(
