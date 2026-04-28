@@ -248,15 +248,15 @@ drawdown risk than balanced mode.
 | `allocation` | 0.75 | 0.50 |
 | `max_alloc` | 0.95 | 0.80 |
 | `kelly_frac` | 0.50 | 0.25 |
-| `take_profit` | 0.045 (+4.5 %) | 0.030 |
-| `stop_loss` | 0.020 (−2.0 %) | 0.015 |
+| `take_profit` | 0.045 (+4.5%) | 0.030 |
+| `stop_loss` | 0.020 (−2.0%) | 0.015 |
 | `timeout_hours` | 8 | 6 |
 | `min_hold_minutes` | 5 | 15 |
 | `emergency_sl` | 0.025 | 0.030 |
 | `max_daily_sl` | 3 | 2 |
 | `cooldown_mins` | 5 | 20 |
 | `sl_cooldown_mins` | 20 | 60 |
-| `max_dd_pct` | 0.20 (20 %) | 0.08 |
+| `max_dd_pct` | 0.20 (20%) | 0.08 |
 
 Aggressive mode also enables:
 - **Momentum score boost** in the final ranking formula (see below).
@@ -283,19 +283,19 @@ cooldowns, high drawdown tolerance.
 | `ev_gap` | 0.0 | 0.0001 |
 | `cost_bps` | 20 | 35 |
 | `allocation` | 0.90 | 0.50 |
-| `max_alloc` | 1.00 (100 %) | 0.80 |
+| `max_alloc` | 1.00 (100%) | 0.80 |
 | `kelly_frac` | 0.75 | 0.25 |
-| `take_profit` | 0.060 (+6.0 %) | 0.030 |
-| `stop_loss` | 0.025 (−2.5 %) | 0.015 |
+| `take_profit` | 0.060 (+6.0%) | 0.030 |
+| `stop_loss` | 0.025 (−2.5%) | 0.015 |
 | `timeout_hours` | 12 | 6 |
 | `min_hold_minutes` | 3 | 15 |
-| `emergency_sl` | 0.040 (−4.0 %) | 0.030 |
+| `emergency_sl` | 0.040 (−4.0%) | 0.030 |
 | `max_daily_sl` | 5 | 2 |
 | `cooldown_mins` | 0 | 20 |
 | `sl_cooldown_mins` | 5 | 60 |
 | `penalty_cooldown_losses` | 5 | 3 |
 | `penalty_cooldown_hours` | 12 | 48 |
-| `max_dd_pct` | 0.35 (35 %) | 0.08 |
+| `max_dd_pct` | 0.35 (35%) | 0.08 |
 
 Ruthless mode also enables:
 - **Momentum score boost** in the final ranking formula.
@@ -321,8 +321,8 @@ pump events that occur before the ML ensemble fully detects the move.
 
 | Feature | Default threshold | Parameter |
 |---------|------------------|-----------|
-| `ret_4` (4-bar return) | ≥ 0.015 (+1.5 %) | `momentum_ret4_min` |
-| `ret_16` (16-bar return) | ≥ 0.025 (+2.5 %) | `momentum_ret16_min` |
+| `ret_4` (4-bar return) | ≥ 0.015 (+1.5%) | `momentum_ret4_min` |
+| `ret_16` (16-bar return) | ≥ 0.025 (+2.5%) | `momentum_ret16_min` |
 | `vol_r` (volume ratio) | ≥ 2.0× | `momentum_volume_min` |
 | `btc_rel` (BTC outperformance) | ≥ 0.005 | `momentum_btc_rel_min` |
 

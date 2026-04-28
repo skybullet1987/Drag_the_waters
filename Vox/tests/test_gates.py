@@ -343,7 +343,7 @@ class TestRiskProfileConstants:
 
     def test_ruthless_max_alloc_is_full(self):
         """Ruthless max_alloc must be 1.00 (100 % of portfolio)."""
-        assert RUTHLESS_MAX_ALLOC == pytest.approx(1.00)
+        assert RUTHLESS_MAX_ALLOC == 1.00
 
     def test_ruthless_allocation_larger_than_aggressive(self):
         """Ruthless base allocation must be larger than aggressive."""
