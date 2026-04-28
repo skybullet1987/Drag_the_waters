@@ -315,10 +315,10 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         sellable = min(portfolio_qty, cash_qty)
 
         # Floor to QTY_PRECISION decimal places and subtract one unit buffer
-        factor   = 10 ** QTY_PRECISION
-        sellable = int(sellable * factor) / factor
-        buffer   = 1.0 / factor
-        sellable = sellable - buffer
+        precision_factor = 10 ** QTY_PRECISION
+        sellable         = int(sellable * precision_factor) / precision_factor
+        safety_buffer_qty = 1.0 / precision_factor
+        sellable = sellable - safety_buffer_qty
 
         if sellable <= 0:
             return 0.0

@@ -588,7 +588,7 @@ class VoxAlgorithm(QCAlgorithm):
         conf_data = {}   # sym -> confidence dict from ensemble
         tp_sl_data = {}  # sym -> (tp_use, sl_use, atr, price) for re-use
 
-        cost = self._cost_bps * 1e-4   # e.g. 20 bps = 0.0020
+        cost_fraction = self._cost_bps * 1e-4   # e.g. 20 bps = 0.0020
 
         btc_closes = (
             list(self._state[self._btc_sym]["closes"])
@@ -672,11 +672,11 @@ class VoxAlgorithm(QCAlgorithm):
                 sl_use = self._sl
 
             # ── Expected-value scoring ────────────────────────────────────────
-            mean_p = conf["mean_proba"]
-            std_p  = conf["std_proba"]
-            gross_ev       = mean_p * tp_use - (1.0 - mean_p) * sl_use
-            ev_after_costs = gross_ev - cost
-            confidence_adj = max(0.0, 1.0 - std_p)
+            mean_proba     = conf["mean_proba"]
+            std_proba      = conf["std_proba"]
+            gross_ev       = mean_proba * tp_use - (1.0 - mean_proba) * sl_use
+            ev_after_costs = gross_ev - cost_fraction
+            confidence_adj = max(0.0, 1.0 - std_proba)
             entry_score    = ev_after_costs * confidence_adj
 
             if ev_after_costs <= self._min_ev:
@@ -699,8 +699,8 @@ class VoxAlgorithm(QCAlgorithm):
                 f" top={top_sym_d.value}"
                 f" ev_score={top_sc_d:.5f}"
                 f" ev_gap={top_sc_d-second_sc_d:.5f}"
-                f" mean_p={top_cd['mean_proba']:.3f}"
-                f" std_p={top_cd['std_proba']:.3f}"
+                f" mean_proba={top_cd['mean_proba']:.3f}"
+                f" std_proba={top_cd['std_proba']:.3f}"
                 f" n_agree={top_cd['n_agree']}"
                 f" tp={top_tp:.4f} sl={top_sl:.4f}"
             )
@@ -718,7 +718,7 @@ class VoxAlgorithm(QCAlgorithm):
                     f"best_disp={best_std:.3f} "
                     f"(thresh: score>={score_min_eff:.3f} "
                     f"agree>={self._min_agr} disp<={self._max_disp} "
-                    f"ev>{self._min_ev:.5f} cost={cost:.4f})"
+                    f"ev>{self._min_ev:.5f} cost={cost_fraction:.4f})"
                 )
 
         if not scores:
@@ -817,8 +817,8 @@ class VoxAlgorithm(QCAlgorithm):
             f"  ev_score={top_sc:.5f}"
             f"  gross_ev={gross_ev:.5f}"
             f"  cost={cost_frac:.4f}"
-            f"  mean_p={mean_proba_top:.3f}"
-            f"  std_p={conf_data[top_sym]['std_proba']:.3f}"
+            f"  mean_proba={mean_proba_top:.3f}"
+            f"  std_proba={conf_data[top_sym]['std_proba']:.3f}"
             f"  n_agree={conf_data[top_sym]['n_agree']}"
             f"  price={price:.4f}  qty={qty:.6f}"
             f"  alloc={alloc:.3f}  tp={tp_use:.4f}  sl={sl_use:.4f}"

@@ -230,8 +230,8 @@ class OrderHelper:
         if lot_size > 0:
             sellable = math.floor(sellable / lot_size) * lot_size
             # Subtract safety buffer (one or more lots) to absorb fee/rounding
-            buffer   = exit_qty_buffer_lots * lot_size
-            sellable = sellable - buffer
+            buffer_qty = exit_qty_buffer_lots * lot_size
+            sellable   = sellable - buffer_qty
 
         # Must be actionable
         if sellable <= 0 or sellable < min_order_size:
