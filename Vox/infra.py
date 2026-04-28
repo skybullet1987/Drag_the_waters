@@ -115,6 +115,10 @@ class OrderHelper:
     All methods are stateless and may be called without instantiation.
     """
 
+    # Quote suffixes used to derive the base currency from a symbol string.
+    # Listed longest-first so the correct one is matched before any prefix.
+    _QUOTE_SUFFIXES = ("USDT", "USDC", "USD", "EUR", "GBP", "BTC", "ETH")
+
     @staticmethod
     def get_lot_size(security):
         """
@@ -162,6 +166,47 @@ class OrderHelper:
         return qty >= min_order_size
 
     @staticmethod
+    def get_crypto_base_currency(algorithm, sym):
+        """
+        Derive the base currency for a crypto symbol without relying on the
+        nonexistent ``SymbolProperties.base_currency`` attribute.
+
+        QuantConnect ``SymbolProperties`` does **not** expose ``base_currency``.
+        This method derives it by:
+
+        1. Reading ``symbol_properties.quote_currency`` (which QC does expose);
+           if ``sym.value`` ends with that quote string, the base is the
+           leading portion (e.g. ``OPUSD`` with quote ``USD`` → ``OP``).
+        2. Falling back to stripping common quote suffixes from ``sym.value``
+           in longest-first order: ``USDT``, ``USDC``, ``USD``, ``EUR``,
+           ``GBP``, ``BTC``, ``ETH``.
+
+        Returns ``None`` when the base currency cannot be determined.
+        """
+        sym_val = sym.value.upper()
+
+        # 1. Prefer quote_currency from symbol_properties (QC-supported field).
+        try:
+            quote = str(
+                algorithm.securities[sym].symbol_properties.quote_currency
+            ).upper()
+            if quote and sym_val.endswith(quote):
+                base = sym_val[: -len(quote)]
+                if base:
+                    return base
+        except Exception:
+            pass
+
+        # 2. Fallback: strip well-known quote suffixes (longest first).
+        for suffix in OrderHelper._QUOTE_SUFFIXES:
+            if sym_val.endswith(suffix):
+                base = sym_val[: -len(suffix)]
+                if base:
+                    return base
+
+        return None
+
+    @staticmethod
     def safe_crypto_sell_qty(algorithm, sym, lot_size, min_order_size,
                              exit_qty_buffer_lots=1):
         """
@@ -197,21 +242,9 @@ class OrderHelper:
             return 0.0
 
         # ── Determine base currency ───────────────────────────────────────────
-        base_ccy = None
-        try:
-            base_ccy = str(
-                algorithm.securities[sym].symbol_properties.base_currency
-            )
-        except Exception:
-            pass
-
-        if not base_ccy:
-            # Fallback: strip well-known quote suffixes from the symbol value.
-            sym_val = sym.value.upper()
-            for suffix in ("USDT", "USDC", "USD", "EUR", "BTC", "ETH"):
-                if sym_val.endswith(suffix):
-                    base_ccy = sym_val[: -len(suffix)]
-                    break
+        # QC SymbolProperties does not expose base_currency; use the dedicated
+        # resolver which reads quote_currency and falls back to suffix parsing.
+        base_ccy = OrderHelper.get_crypto_base_currency(algorithm, sym)
 
         # ── CashBook balance for the base currency ────────────────────────────
         cash_qty = portfolio_qty   # default: trust portfolio qty
