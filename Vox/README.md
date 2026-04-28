@@ -183,16 +183,34 @@ The last 10 trade outcomes are tracked per symbol in a rolling deque.
 Penalty cooldown is independent of the shorter per-coin SL cooldown in
 `RiskManager` (default 60 minutes after a single SL).
 
-### Conservative mode
+### Risk profiles
 
-Setting `conservative_mode=True` (QC parameter panel) applies stricter,
-research-grade defaults in one switch, without requiring the user to set every
-parameter manually.  These are the original Vox v2 default values, which have
-been relaxed in normal mode to ensure candidates can pass the gates under
-reasonable market conditions.
+Vox supports four risk profiles, selectable via the `risk_profile` QC parameter
+(or convenience boolean aliases).  Profiles are applied in this priority order:
 
-| Parameter | Conservative override | Normal default |
-|-----------|-----------------------|----------------|
+```text
+ruthless_mode=true  >  aggressive_mode=true  >  conservative_mode=true
+  >  risk_profile parameter  >  default (balanced)
+```
+
+| Profile | `risk_profile` value | Alias | Character |
+|---------|----------------------|-------|-----------|
+| Conservative | `"conservative"` | `conservative_mode=true` | Strict research-grade gates, rarely trades |
+| **Balanced** (default) | `"balanced"` | — | Tradable defaults, controlled drawdown |
+| Aggressive | `"aggressive"` | `aggressive_mode=true` | Looser gates, larger sizing, wider TP/SL |
+| Ruthless | `"ruthless"` | `ruthless_mode=true` | Maximum aggression — **extreme risk** |
+
+#### Balanced (default)
+
+Normal mode — intentionally tradable.  See the parameter table below.
+
+#### Conservative mode
+
+Setting `conservative_mode=True` (or `risk_profile=conservative`) applies
+stricter, research-grade defaults in one switch.
+
+| Parameter | Conservative override | Balanced default |
+|-----------|-----------------------|-----------------|
 | `score_min` | ≥ 0.55 | 0.50 |
 | `max_dispersion` | ≤ 0.15 | 0.22 |
 | `min_agree` | ≥ 3 | 2 |
@@ -205,6 +223,162 @@ reasonable market conditions.
 | `stop_loss` | ≥ 0.020 | 0.015 |
 | `min_hold_minutes` | ≥ 20 | 15 |
 
+**Use conservative mode for:** research validation, high-quality trade
+selection, and comparing filtered vs unfiltered sets.
+
+**Do not use conservative mode in normal operation** — it will block most trades
+because `pred_return_min >= 0.003` requires a strong positive predicted return,
+which the ensemble rarely exceeds in the first months of data.
+
+#### Aggressive mode (`risk_profile=aggressive` or `aggressive_mode=true`)
+
+Looser signal gates, larger position sizing, wider TP/SL, faster re-entry.
+Suitable for users who want more trades and higher upside, and accept higher
+drawdown risk than balanced mode.
+
+| Parameter | Aggressive | Balanced default |
+|-----------|-----------|-----------------|
+| `score_min` | 0.48 | 0.50 |
+| `max_dispersion` | 0.28 | 0.22 |
+| `min_agree` | 1 | 2 |
+| `min_ev` | 0.0005 | 0.001 |
+| `pred_return_min` | −0.0010 | −0.0005 |
+| `ev_gap` | 0.0 | 0.0001 |
+| `cost_bps` | 25 | 35 |
+| `allocation` | 0.75 | 0.50 |
+| `max_alloc` | 0.95 | 0.80 |
+| `kelly_frac` | 0.50 | 0.25 |
+| `take_profit` | 0.045 (+4.5 %) | 0.030 |
+| `stop_loss` | 0.020 (−2.0 %) | 0.015 |
+| `timeout_hours` | 8 | 6 |
+| `min_hold_minutes` | 5 | 15 |
+| `emergency_sl` | 0.025 | 0.030 |
+| `max_daily_sl` | 3 | 2 |
+| `cooldown_mins` | 5 | 20 |
+| `sl_cooldown_mins` | 20 | 60 |
+| `max_dd_pct` | 0.20 (20 %) | 0.08 |
+
+Aggressive mode also enables:
+- **Momentum score boost** in the final ranking formula (see below).
+- **Momentum breakout override** (see below).
+
+#### Ruthless mode (`risk_profile=ruthless` or `ruthless_mode=true`)
+
+> ⚠ **HIGH RISK — use for experimentation only.**
+> Ruthless mode can produce fast, large drawdowns.  It is designed for users
+> who explicitly want maximum trade frequency and upside, and accept that large
+> losses are possible.  **Never use ruthless mode for live trading without
+> careful validation on a small account first.**
+
+Maximum aggression: very loose gates, maximum sizing, wide TP/SL, minimal
+cooldowns, high drawdown tolerance.
+
+| Parameter | Ruthless | Balanced default |
+|-----------|---------|-----------------|
+| `score_min` | 0.45 | 0.50 |
+| `max_dispersion` | 0.35 | 0.22 |
+| `min_agree` | 1 | 2 |
+| `min_ev` | 0.0 | 0.001 |
+| `pred_return_min` | −0.002 | −0.0005 |
+| `ev_gap` | 0.0 | 0.0001 |
+| `cost_bps` | 20 | 35 |
+| `allocation` | 0.90 | 0.50 |
+| `max_alloc` | 1.00 (100 %) | 0.80 |
+| `kelly_frac` | 0.75 | 0.25 |
+| `take_profit` | 0.060 (+6.0 %) | 0.030 |
+| `stop_loss` | 0.025 (−2.5 %) | 0.015 |
+| `timeout_hours` | 12 | 6 |
+| `min_hold_minutes` | 3 | 15 |
+| `emergency_sl` | 0.040 (−4.0 %) | 0.030 |
+| `max_daily_sl` | 5 | 2 |
+| `cooldown_mins` | 0 | 20 |
+| `sl_cooldown_mins` | 5 | 60 |
+| `penalty_cooldown_losses` | 5 | 3 |
+| `penalty_cooldown_hours` | 12 | 48 |
+| `max_dd_pct` | 0.35 (35 %) | 0.08 |
+
+Ruthless mode also enables:
+- **Momentum score boost** in the final ranking formula.
+- **Momentum breakout override** (see below).
+
+**Suggested quick setup:**
+```text
+risk_profile = ruthless
+```
+or:
+```text
+ruthless_mode = true
+```
+
+### Momentum breakout override (aggressive/ruthless)
+
+In aggressive and ruthless profiles, a candidate that fails normal ML gates
+(class probability / dispersion / agreement) may still be entered if strong
+momentum conditions are present.  This allows Vox to participate in crypto
+pump events that occur before the ML ensemble fully detects the move.
+
+**Momentum override conditions (all must be satisfied):**
+
+| Feature | Default threshold | Parameter |
+|---------|------------------|-----------|
+| `ret_4` (4-bar return) | ≥ 0.015 (+1.5 %) | `momentum_ret4_min` |
+| `ret_16` (16-bar return) | ≥ 0.025 (+2.5 %) | `momentum_ret16_min` |
+| `vol_r` (volume ratio) | ≥ 2.0× | `momentum_volume_min` |
+| `btc_rel` (BTC outperformance) | ≥ 0.005 | `momentum_btc_rel_min` |
+
+Additionally, the candidate is blocked if its expected value after costs is
+worse than `momentum_override_min_ev` (default −0.002, i.e. −0.2 %).  This
+prevents obviously catastrophic entries from slipping through.
+
+The regime filter still applies to momentum override candidates.  All execution
+safety, risk manager, lot-size, and cash guards are fully enforced.
+
+To enable momentum override explicitly in balanced mode:
+```text
+momentum_override = true
+```
+
+To disable it even in ruthless mode:
+```text
+momentum_override = false
+```
+
+When a trade is entered via momentum override, it is identified in logs:
+```text
+[vox] MOMENTUM OVERRIDE candidate=SOLUSD ret4=... ret16=... vol_r=... btc_rel=...
+      ev=... pred_ret=... proba=...
+```
+
+And in the persistence log record:
+```json
+"entry_path": "momentum_override"
+```
+
+Normal ML entries have `"entry_path": "ml"`.
+
+### Momentum score boost (aggressive/ruthless)
+
+For aggressive and ruthless profiles, the final ranking formula adds a momentum
+contribution to raise strong breakout candidates to the top:
+
+```text
+momentum_score = 0.40 × ret_4 + 0.30 × ret_16
+               + 0.20 × normalised_volume_excess + 0.10 × btc_rel
+
+  (capped to [−0.05, 0.10] to avoid raw-momentum explosion)
+
+final_score = 0.50 × ev + 0.25 × pred_return + 0.25 × momentum_score
+```
+
+The balanced/conservative formula is unchanged:
+```text
+final_score = 0.6 × ev + 0.4 × pred_return
+```
+
+### Conservative mode
+
+(See the conservative row in the [Risk profiles](#risk-profiles) table above.)
+
 **Use conservative mode for:**
 - Research validation where you want strict selectivity to ensure high quality.
 - Evaluating whether a smaller set of high-confidence trades is profitable.
@@ -216,14 +390,16 @@ predicted return, which the ensemble rarely exceeds in the first months of data.
 
 ### Realized EV logging
 
-At entry, Vox stores predicted `class_proba`, `pred_return`, `ev`, and
-`final_score`.  At exit, the realized return and exit reason are logged to
-`ObjectStore` alongside the entry predictions via `PersistenceManager.log_trade`.
+At entry, Vox stores predicted `class_proba`, `pred_return`, `ev`,
+`final_score`, and `entry_path` (`"ml"` or `"momentum_override"`).  At exit,
+the realized return and exit reason are logged to `ObjectStore` alongside the
+entry predictions via `PersistenceManager.log_trade`.
 
 This allows post-hoc evaluation of:
 - Does predicted EV correlate with realized return?
 - Which symbols/hours have positive realized EV?
 - Are the model probabilities calibrated (e.g. `class_proba=0.60` → ~60 % win rate)?
+- How do ML-path vs momentum-override-path trades compare in realized return?
 
 ---
 
@@ -281,11 +457,14 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 
 > **Normal mode is intentionally balanced/tradable.**  The defaults below allow
 > candidates to pass the gates under reasonable market conditions.  Set
-> `conservative_mode=True` to restore stricter research-grade thresholds — see
-> [Conservative mode](#conservative-mode) below.
+> `conservative_mode=True` (or `risk_profile=conservative`) to restore stricter
+> research-grade thresholds.  See [Risk profiles](#risk-profiles) for all options.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `risk_profile` | `"balanced"` | Risk/reward profile: `conservative`, `balanced`, `aggressive`, `ruthless` |
+| `aggressive_mode` | `False` | Convenience alias for `risk_profile=aggressive` |
+| `ruthless_mode` | `False` | Convenience alias for `risk_profile=ruthless` |
 | `take_profit` | `0.030` | Take-profit fraction (+3 %) — wider than v1 to reduce fee drag |
 | `stop_loss` | `0.015` | Stop-loss fraction (−1.5 %) — wider to avoid noise chop |
 | `timeout_hours` | `6.0` | Max hold time in hours |
@@ -311,9 +490,15 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `pred_return_min` | `-0.0005` | Regression veto: blocks only clearly bad predicted returns (−0.05 %) |
 | `min_hold_minutes` | `15` | Suppress ordinary exits before this many minutes |
 | `emergency_sl` | `0.030` | Allow early exit during min-hold if loss exceeds this (3.0 %) |
-| `conservative_mode` | `False` | Apply stricter gate overrides in one switch |
+| `conservative_mode` | `False` | Legacy alias for `risk_profile=conservative` |
 | `penalty_cooldown_losses` | `3` | Consecutive SL exits triggering penalty cooldown |
 | `penalty_cooldown_hours` | `48` | Hours a symbol is blocked after penalty trigger |
+| `momentum_override` | profile default | Enable momentum breakout override (`true`/`false`; auto-enabled for aggressive/ruthless) |
+| `momentum_ret4_min` | `0.015` | Minimum 4-bar return for momentum override |
+| `momentum_ret16_min` | `0.025` | Minimum 16-bar return for momentum override |
+| `momentum_volume_min` | `2.0` | Minimum volume ratio for momentum override |
+| `momentum_btc_rel_min` | `0.005` | Minimum BTC-relative outperformance for momentum override |
+| `momentum_override_min_ev` | `-0.002` | Block momentum override if EV is below this threshold |
 
 ### Label / training parameters
 
