@@ -8,36 +8,42 @@ from datetime import timedelta
 from infra   import add_universe, KRAKEN_PAIRS, OrderHelper, PartialFillTracker, PersistenceManager
 from models  import (
     build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train,
-    LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS,
+    LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS, LABEL_COST_BPS,
 )
 from risk    import RegimeFilter, RiskManager, compute_qty
 # endregion
 
 # ── Strategy constants (all overridable via the QC parameter panel) ───────────
-TAKE_PROFIT          = 0.020   # +2.0 %  close long on gain
-STOP_LOSS            = 0.012   # −1.2 %  close long on loss
-TIMEOUT_HOURS        = 3.0     # close after this many hours regardless
+TAKE_PROFIT          = 0.030   # +3.0 %  close long on gain  (wider to reduce fee drag)
+STOP_LOSS            = 0.015   # −1.5 %  close long on loss  (wider to avoid noise chop)
+TIMEOUT_HOURS        = 6.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.25    # minimum mean_proba to open a position (upper clamp)
+SCORE_MIN            = 0.55    # minimum class_proba to open a position (upper clamp)
 SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
 SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
 SCORE_GAP            = 0.02    # probability gap: required lead of top coin over runner-up (mean_proba units)
-MAX_DISPERSION       = 0.30    # max std_proba across models
-MIN_AGREE            = 1       # min models with proba >= agree_thr
+MAX_DISPERSION       = 0.15    # max std_proba across models (tightened from 0.30)
+MIN_AGREE            = 3       # min models with proba >= agree_thr (3 of 4 models)
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
 USE_KELLY            = True    # set False to use flat ALLOCATION
-MAX_DAILY_SL         = 2       # halt new entries after this many SL hits per day
-COOLDOWN_MINS        = 15      # minutes to wait after any exit before re-entering
+MAX_DAILY_SL         = 1       # halt new entries after this many SL hits per day
+COOLDOWN_MINS        = 30      # minutes to wait after any exit before re-entering
 SL_COOLDOWN_MINS     = 60      # per-coin cooldown specifically after an SL exit
 MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops > 8 %
 CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
 EXIT_QTY_BUFFER_LOTS = 1       # safety lots subtracted from sell qty to absorb fee/rounding
-COST_BPS             = 20      # estimated round-trip fee+slippage in basis points (0.20 %)
-MIN_EV               = 0.0005  # minimum expected-value (return fraction) after costs: 0.0005 = 0.05 %
+COST_BPS             = 50      # estimated round-trip fee+slippage in basis points (0.50 %)
+MIN_EV               = 0.004   # minimum expected-value (return fraction) after costs: 0.004 = 0.4 %
 EV_GAP               = 0.00025 # required EV lead of top coin over second-best (return fraction units): 0.00025 = 0.025 %
+PRED_RETURN_MIN      = 0.003   # minimum predicted return from regression ensemble: 0.003 = 0.3 %
+MIN_HOLD_MINUTES     = 15      # suppress ordinary TP/SL/timeout exits before this many minutes
+EMERGENCY_SL         = 0.030   # allow early exit (before min hold) only if loss exceeds this: 3.0 %
+CONSERVATIVE_MODE    = False   # when True, applies stricter gates without manual per-param override
+PENALTY_COOLDOWN_LOSSES = 3    # consecutive SL exits on a symbol before penalty cooldown triggers
+PENALTY_COOLDOWN_HOURS  = 48   # hours a symbol is blocked after repeated losses
 MAX_EXIT_RETRY_COUNT = 3       # max consecutive INVALID exit retries before treating as dust
 RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
 DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
@@ -121,11 +127,35 @@ class VoxAlgorithm(QCAlgorithm):
         self._cost_bps = float(self.get_parameter("cost_bps")         or COST_BPS)
         self._min_ev   = float(self.get_parameter("min_ev")           or MIN_EV)
         self._ev_gap   = float(self.get_parameter("ev_gap")           or EV_GAP)   # EV-gap threshold (return-fraction units, NOT probability units)
+        self._pred_return_min = float(self.get_parameter("pred_return_min") or PRED_RETURN_MIN)
+        self._min_hold_minutes = int(self.get_parameter("min_hold_minutes") or MIN_HOLD_MINUTES)
+        self._emergency_sl = float(self.get_parameter("emergency_sl") or EMERGENCY_SL)
+        self._penalty_losses = int(self.get_parameter("penalty_cooldown_losses") or PENALTY_COOLDOWN_LOSSES)
+        self._penalty_hours  = float(self.get_parameter("penalty_cooldown_hours") or PENALTY_COOLDOWN_HOURS)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
         self._label_sl      = float(self.get_parameter("label_sl")           or LABEL_SL)
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
+        self._label_cost_bps = float(self.get_parameter("label_cost_bps")    or LABEL_COST_BPS)
+
+        # ── Conservative mode: apply stricter gates in one switch ─────────────
+        # When enabled, overrides specific parameters to their conservative
+        # values without requiring the user to set each one manually.
+        _cm_raw = self.get_parameter("conservative_mode")
+        self._conservative_mode = (
+            str(_cm_raw).lower() in ("true", "1", "yes")
+        ) if _cm_raw else CONSERVATIVE_MODE
+        if self._conservative_mode:
+            self._s_min          = max(self._s_min,          0.60)
+            self._max_disp       = min(self._max_disp,        0.12)
+            self._min_agr        = max(self._min_agr,         4)
+            self._min_ev         = max(self._min_ev,          0.005)
+            self._tp             = max(self._tp,              0.035)
+            self._sl             = max(self._sl,              0.020)
+            self._min_hold_minutes = max(self._min_hold_minutes, 20)
+            self._pred_return_min  = max(self._pred_return_min,  0.005)
+            self.log("[vox] Conservative mode enabled: stricter gate overrides applied.")
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -199,6 +229,17 @@ class VoxAlgorithm(QCAlgorithm):
         self._exiting          = False   # True while an exit order is in flight
         self._exit_time        = None    # time of most recent completed exit
         self._exit_retry_count = 0       # consecutive INVALID exit retry counter
+
+        # ── Entry prediction store (for realized-EV logging at exit) ──────────
+        # sym -> {class_proba, pred_return, ev, final_score, tp, sl, time}
+        self._entry_predictions = {}
+
+        # ── Per-symbol penalty cooldown ────────────────────────────────────────
+        # Tracks recent trade outcomes per symbol to apply extended cooldowns
+        # after repeated losses (independent of the per-coin SL cooldown in RiskManager).
+        from collections import deque as _deque
+        self._sym_outcomes     = {sym: _deque(maxlen=10) for sym in self._symbols}
+        self._sym_penalty_until = {}  # sym -> datetime when penalty ends
 
         # ── Diagnostic throttling ──────────────────────────────────────────────
         # Routine skip messages (EV gap too small, regime block, risk block) are
@@ -354,6 +395,33 @@ class VoxAlgorithm(QCAlgorithm):
                 is_sl = tag == "EXIT_SL"
                 self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
                 self._fill_tracker.clear(oid)
+
+                # ── Realized EV logging ────────────────────────────────────────
+                # Log predicted vs realized for each completed trade so the user
+                # can evaluate calibration and model quality out-of-sample.
+                # Retrieve the entry predictions stored at entry time.
+                entry_pred = self._entry_predictions.pop(sym, None)
+                self._persistence.log_trade({
+                    "event":              "exit",
+                    "time":               str(self.time),
+                    "symbol":             sym.value,
+                    "exit_reason":        tag,
+                    "realized_return":    round(ret, 6),
+                    "predicted_class_proba": round(entry_pred["class_proba"], 4) if entry_pred else None,
+                    "predicted_return":   round(entry_pred["pred_return"], 6)    if entry_pred else None,
+                    "predicted_ev":       round(entry_pred["ev"], 6)             if entry_pred else None,
+                    "final_score":        round(entry_pred["final_score"], 6)    if entry_pred else None,
+                    "tp":                 round(entry_pred["tp"], 4)             if entry_pred else None,
+                    "sl":                 round(entry_pred["sl"], 4)             if entry_pred else None,
+                })
+
+                # ── Per-symbol outcome tracking (penalty cooldown) ─────────────
+                if sym not in self._sym_outcomes:
+                    from collections import deque as _dq
+                    self._sym_outcomes[sym] = _dq(maxlen=10)
+                self._sym_outcomes[sym].append(ret)
+                self._update_penalty_cooldown(sym, is_sl)
+
                 self._pos_sym    = None
                 self._entry_px   = 0.0
                 self._entry_time = None
@@ -494,7 +562,14 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Exit logic ────────────────────────────────────────────────────────────
 
     def _check_exit(self, price):
-        """Evaluate ATR-based (or fixed) TP / SL / timeout; submit market sell."""
+        """Evaluate ATR-based (or fixed) TP / SL / timeout; submit market sell.
+
+        Minimum-hold protection:
+          If elapsed time < min_hold_minutes, ordinary TP/SL/timeout exits are
+          suppressed.  Only an emergency stop is allowed (loss > emergency_sl).
+          This prevents the algo from entering and immediately being shaken out
+          by microstructure noise within a few bars.
+        """
         # Capture immutable local references BEFORE placing any order.
         # market_order() can fill synchronously in QuantConnect/LEAN, meaning
         # on_order_event may clear self._pos_sym (and related fields) before
@@ -506,22 +581,33 @@ class VoxAlgorithm(QCAlgorithm):
         if sym is None or entry_time is None or entry_px <= 0:
             return
 
-        ret     = (price - entry_px) / entry_px
-        elapsed = (self.time - entry_time).total_seconds() / 3600.0
+        ret             = (price - entry_px) / entry_px
+        elapsed_sec     = (self.time - entry_time).total_seconds()
+        elapsed_hours   = elapsed_sec / 3600.0
+        elapsed_minutes = elapsed_sec / 60.0
 
         tp_use = self._tp_dyn if self._tp_dyn > 0 else self._tp
         sl_use = self._sl_dyn if self._sl_dyn > 0 else self._sl
 
-        reason = None
-        if ret >= tp_use:
-            reason = "EXIT_TP"
-        elif ret <= -sl_use:
-            reason = "EXIT_SL"
-        elif elapsed >= self._toh:
-            reason = "EXIT_TIMEOUT"
+        # ── Minimum hold period ────────────────────────────────────────────────
+        # During the minimum hold window, suppress ordinary exits.  Only the
+        # emergency SL is allowed to exit early to protect against large gaps.
+        if elapsed_minutes < self._min_hold_minutes:
+            if ret <= -self._emergency_sl:
+                reason = "EXIT_SL"   # emergency stop — override min-hold
+            else:
+                return               # hold — suppress normal TP/SL/timeout
+        else:
+            reason = None
+            if ret >= tp_use:
+                reason = "EXIT_TP"
+            elif ret <= -sl_use:
+                reason = "EXIT_SL"
+            elif elapsed_hours >= self._toh:
+                reason = "EXIT_TIMEOUT"
 
-        if not reason:
-            return
+            if not reason:
+                return
 
         # ── Safe sell quantity — guards against CashBook / portfolio mismatch ──
         # In Kraken cash mode, portfolio[sym].quantity can exceed the actual
@@ -544,6 +630,7 @@ class VoxAlgorithm(QCAlgorithm):
             self.debug(
                 f"EXIT order {sym.value}  reason={reason}"
                 f"  qty={qty:.6f}  ret={ret:.3%}"
+                f"  elapsed_min={elapsed_minutes:.1f}"
             )
             self.market_order(sym, -qty, tag=reason)
         else:
@@ -572,37 +659,40 @@ class VoxAlgorithm(QCAlgorithm):
         Score all symbols; if a clear winner passes all gates, place a buy order.
 
         Gate pipeline (in order):
-          1. Sufficient feature history
-          2. Ensemble confidence: mean_proba >= score_min_eff (base-rate-aware)
-          3. Ensemble dispersion: std_proba <= MAX_DISPERSION
-          4. Model agreement: n_agree >= MIN_AGREE
-          5. EV gate: expected_value_after_costs > self._min_ev  (return-fraction units)
-          6. EV gap to runner-up >= self._ev_gap  (return-fraction units, NOT probability units)
-          7. Regime filter: 4h BTC SMA + slope
-          8. Risk manager: cooldown, daily SL cap, drawdown CB
-          9. Pre-trade validation: price > 0, cash, lot-size, min-order
+          1.  Sufficient feature history
+          2.  Symbol NOT in penalty cooldown (repeated-loss gate)
+          3.  Ensemble confidence: class_proba >= score_min_eff (base-rate-aware)
+          4.  Ensemble dispersion: std_proba <= MAX_DISPERSION
+          5.  Model agreement: n_agree >= MIN_AGREE
+          6.  EV gate: ev_after_costs > self._min_ev  (return-fraction units)
+          7.  Predicted-return gate: pred_return >= PRED_RETURN_MIN
+              (only enforced when regression ensemble is trained)
+          8.  Final-score gap to runner-up >= self._ev_gap  (return-fraction units)
+          9.  Regime filter: 4h BTC SMA + slope
+          10. Risk manager: cooldown, daily SL cap, drawdown CB
+          11. Pre-trade validation: price > 0, cash, lot-size, min-order
 
-        Note on gate 6: self._ev_gap uses EV_GAP (default 0.00025 = 0.025 %) while
+        Ranking and decision score (Vox v2):
+            class_proba    = weighted classifier probability (VotingClassifier)
+            pred_return    = weighted regression return (0.0 if not trained yet)
+            ev             = class_proba × tp_use − (1 − class_proba) × sl_use − cost_fraction
+            final_score    = 0.6 × ev + 0.4 × pred_return   (if regressors trained)
+                           = ev × (1 − std_proba)            (fallback: EV × confidence)
+
+        Candidates are ranked by final_score.
+
+        Note: self._ev_gap uses EV_GAP (default 0.00025 = 0.025 %) while
         self._s_gap uses SCORE_GAP (default 0.02 = 2 pp) for probability gaps only.
-        Mixing the two caused trades with strong positive EV to be blocked because
-        the probability-scale threshold is ~80× larger than typical EV scores.
-
-        Candidates passing the confidence gates are ranked by a
-        profit-aware expected-value score:
-
-            gross_ev       = mean_proba × tp_use − (1 − mean_proba) × sl_use
-            ev_after_costs = gross_ev − COST_BPS × 1e-4
-            confidence_adj = max(0, 1 − std_proba)
-            entry_score    = ev_after_costs × confidence_adj
-
-        This ensures the algo prioritises trades with positive edge AFTER
-        estimated fees/slippage, weighted down when models strongly disagree.
+        Mixing the two would block strong EV candidates because the probability-scale
+        threshold is ~80× larger than typical EV scores (0.001–0.02 range).
         """
-        scores    = {}   # sym -> entry_score (EV-adjusted)
+        scores    = {}   # sym -> final_score
         conf_data = {}   # sym -> confidence dict from ensemble
         tp_sl_data = {}  # sym -> (tp_use, sl_use, atr, price) for re-use
+        ev_data    = {}  # sym -> ev_after_costs
 
-        cost_fraction = self._cost_bps * 1e-4   # e.g. 20 bps = 0.0020
+        cost_fraction = self._cost_bps * 1e-4
+        reg_fitted    = getattr(self._ensemble, "_reg_fitted", False)
 
         btc_closes = (
             list(self._state[self._btc_sym]["closes"])
@@ -613,6 +703,11 @@ class VoxAlgorithm(QCAlgorithm):
         for sym in self._symbols:
             st = self._state.get(sym)
             if st is None:
+                continue
+
+            # ── Penalty cooldown gate ─────────────────────────────────────────
+            # Skip symbols that are in their post-repeated-loss cooldown window.
+            if self._is_in_penalty_cooldown(sym):
                 continue
 
             closes  = list(st["closes"])
@@ -653,18 +748,24 @@ class VoxAlgorithm(QCAlgorithm):
         agree_thr     = self._ensemble._agree_threshold()
 
         # Per-gate pass counters for diagnostics
-        n_pass_disp  = 0
-        n_pass_agree = 0
-        n_pass_score = 0
-        n_pass_ev    = 0
+        n_pass_disp     = 0
+        n_pass_agree    = 0
+        n_pass_score    = 0
+        n_pass_ev       = 0
+        n_pass_pred_ret = 0
 
         for (sym, _), conf in zip(candidates, confs):
-            passed_disp  = conf["std_proba"]  <= self._max_disp
-            passed_agree = conf["n_agree"]    >= self._min_agr
-            passed_score = conf["mean_proba"] >= score_min_eff
-            if passed_disp:  n_pass_disp  += 1
-            if passed_agree: n_pass_agree += 1
-            if passed_score: n_pass_score += 1
+            class_proba   = conf["class_proba"]    # weighted VotingClassifier probability
+            std_proba     = conf["std_proba"]
+            n_agree       = conf["n_agree"]
+            pred_return   = conf["pred_return"]     # 0.0 if regressors not trained
+
+            passed_disp   = std_proba   <= self._max_disp
+            passed_agree  = n_agree     >= self._min_agr
+            passed_score  = class_proba >= score_min_eff
+            if passed_disp:   n_pass_disp  += 1
+            if passed_agree:  n_pass_agree += 1
+            if passed_score:  n_pass_score += 1
             if not (passed_disp and passed_agree and passed_score):
                 continue
 
@@ -685,35 +786,51 @@ class VoxAlgorithm(QCAlgorithm):
                 tp_use = self._tp
                 sl_use = self._sl
 
-            # ── Expected-value scoring ────────────────────────────────────────
-            mean_proba     = conf["mean_proba"]
-            std_proba      = conf["std_proba"]
-            gross_ev       = mean_proba * tp_use - (1.0 - mean_proba) * sl_use
-            ev_after_costs = gross_ev - cost_fraction
-            confidence_adj = max(0.0, 1.0 - std_proba)
-            entry_score    = ev_after_costs * confidence_adj
+            # ── Vox v2 decision score ─────────────────────────────────────────
+            # ev = classifier probability × TP − (1−prob) × SL − costs
+            ev_after_costs = (
+                class_proba * tp_use
+                - (1.0 - class_proba) * sl_use
+                - cost_fraction
+            )
 
             if ev_after_costs <= self._min_ev:
                 continue   # negative edge after costs — skip
             n_pass_ev += 1
 
-            scores[sym]     = entry_score
+            # Predicted-return gate (only applied when regressors are trained).
+            if reg_fitted and pred_return < self._pred_return_min:
+                continue
+            n_pass_pred_ret += 1
+
+            # final_score blends EV and predicted return (regressor-aware).
+            if reg_fitted and pred_return != 0.0:
+                final_score = 0.6 * ev_after_costs + 0.4 * pred_return
+            else:
+                # Fallback when regressors not yet trained: EV × confidence adj
+                confidence_adj = max(0.0, 1.0 - std_proba)
+                final_score    = ev_after_costs * confidence_adj
+
+            scores[sym]     = final_score
             conf_data[sym]  = conf
             tp_sl_data[sym] = (tp_use, sl_use, atr, price)
+            ev_data[sym]    = ev_after_costs
 
         if scores:
-            ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-            top_sym_d = ranked[0][0]
-            top_sc_d  = ranked[0][1]
+            ranked      = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            top_sym_d   = ranked[0][0]
+            top_sc_d    = ranked[0][1]
             second_sc_d = ranked[1][1] if len(ranked) > 1 else 0.0
-            top_cd    = conf_data[top_sym_d]
+            top_cd      = conf_data[top_sym_d]
             top_tp, top_sl, top_atr, top_px = tp_sl_data[top_sym_d]
             self.log(
                 f"[diag] candidates={len(scores)}"
                 f" top={top_sym_d.value}"
-                f" ev_score={top_sc_d:.5f}"
-                f" ev_gap={top_sc_d-second_sc_d:.5f}"
-                f" mean_proba={top_cd['mean_proba']:.3f}"
+                f" final_score={top_sc_d:.5f}"
+                f" ev_score={ev_data[top_sym_d]:.5f}"
+                f" pred_ret={top_cd['pred_return']:.5f}"
+                f" gap={top_sc_d-second_sc_d:.5f}"
+                f" class_proba={top_cd['class_proba']:.3f}"
                 f" std_proba={top_cd['std_proba']:.3f}"
                 f" n_agree={top_cd['n_agree']}"
                 f" tp={top_tp:.4f} sl={top_sl:.4f}"
@@ -721,18 +838,21 @@ class VoxAlgorithm(QCAlgorithm):
         else:
             # Throttle to once per hour to protect the log cap
             if self.time.minute == 0:
-                best_mean   = max(c["mean_proba"] for c in confs)
-                best_nagree = max(c["n_agree"]    for c in confs)
-                best_std    = min(c["std_proba"]  for c in confs)
+                best_proba  = max(c["class_proba"] for c in confs)
+                best_nagree = max(c["n_agree"]     for c in confs)
+                best_std    = min(c["std_proba"]   for c in confs)
+                best_pred   = max(c["pred_return"] for c in confs)
                 self.log(
                     f"[diag] eval={len(candidates)} "
                     f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} "
                     f"pass_score={n_pass_score} pass_ev={n_pass_ev} "
-                    f"best_mean={best_mean:.3f} best_agree={best_nagree} "
-                    f"best_disp={best_std:.3f} "
+                    f"pass_pred_ret={n_pass_pred_ret} "
+                    f"best_proba={best_proba:.3f} best_agree={best_nagree} "
+                    f"best_disp={best_std:.3f} best_pred_ret={best_pred:.5f} "
                     f"(thresh: score>={score_min_eff:.3f} "
                     f"agree>={self._min_agr} disp<={self._max_disp} "
-                    f"ev>{self._min_ev:.5f} cost={cost_fraction:.4f})"
+                    f"ev>{self._min_ev:.5f} pred_ret>={self._pred_return_min:.5f} "
+                    f"cost={cost_fraction:.4f})"
                 )
 
         if not scores:
@@ -742,16 +862,15 @@ class VoxAlgorithm(QCAlgorithm):
         top_sym, top_sc = ranked[0]
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
-        # Gap check on EV-adjusted score — uses self._ev_gap (return-fraction units),
+        # Gap check on final score — uses self._ev_gap (return-fraction units),
         # NOT self._s_gap (probability units).  SCORE_GAP=0.02 was designed for
         # probability differences (0–1 scale) and is far too large for EV scores
         # which are typically in the 0.001–0.02 range.
-        # Skip the gap check when there is only one candidate: no second EV to
-        # compare against, so any positive EV qualifies.
+        # Skip the gap check when there is only one candidate.
         ev_gap_actual = top_sc - second_sc
         if len(ranked) > 1 and ev_gap_actual < self._ev_gap:
             self._throttled_skip_debug(
-                f"[vox] EV gap too small: top={top_sc:.5f}"
+                f"[vox] Score gap too small: top={top_sc:.5f}"
                 f"  second={second_sc:.5f}"
                 f"  gap={ev_gap_actual:.5f}"
                 f"  required={self._ev_gap:.5f}"
@@ -774,11 +893,13 @@ class VoxAlgorithm(QCAlgorithm):
 
         # ── Pre-trade validation ───────────────────────────────────────────────
         tp_use, sl_use, atr, price = tp_sl_data[top_sym]
-        mean_proba_top = conf_data[top_sym]["mean_proba"]
+        class_proba_top  = conf_data[top_sym]["class_proba"]
+        pred_return_top  = conf_data[top_sym]["pred_return"]
+        ev_top           = ev_data[top_sym]
 
-        # Kelly / flat sizing (uses mean_proba and ATR TP/SL for Kelly edge)
+        # Kelly / flat sizing (uses class_proba and ATR TP/SL for Kelly edge)
         qty, alloc = compute_qty(
-            mean_proba      = mean_proba_top,
+            mean_proba      = class_proba_top,
             tp              = tp_use,
             sl              = sl_use,
             price           = price,
@@ -832,14 +953,23 @@ class VoxAlgorithm(QCAlgorithm):
         self._pending_oid = order.order_id
         self._fill_tracker.start_order(order.order_id, qty)
 
-        cost_frac = self._cost_bps * 1e-4
-        gross_ev  = mean_proba_top * tp_use - (1.0 - mean_proba_top) * sl_use
+        # Store entry predictions for realized-EV logging at exit.
+        self._entry_predictions[top_sym] = {
+            "class_proba": class_proba_top,
+            "pred_return": pred_return_top,
+            "ev":          ev_top,
+            "final_score": top_sc,
+            "tp":          tp_use,
+            "sl":          sl_use,
+            "time":        self.time,
+        }
+
         self.debug(
             f"ENTRY order {top_sym.value}"
-            f"  ev_score={top_sc:.5f}"
-            f"  gross_ev={gross_ev:.5f}"
-            f"  cost={cost_frac:.4f}"
-            f"  mean_proba={mean_proba_top:.3f}"
+            f"  final_score={top_sc:.5f}"
+            f"  ev={ev_top:.5f}"
+            f"  pred_ret={pred_return_top:.5f}"
+            f"  class_proba={class_proba_top:.3f}"
             f"  std_proba={conf_data[top_sym]['std_proba']:.3f}"
             f"  n_agree={conf_data[top_sym]['n_agree']}"
             f"  price={price:.4f}  qty={qty:.6f}"
@@ -854,13 +984,14 @@ class VoxAlgorithm(QCAlgorithm):
             "price":        price,
             "qty":          qty,
             "alloc":        alloc,
-            "mean_proba":   mean_proba_top,
+            "class_proba":  class_proba_top,
+            "pred_return":  pred_return_top,
             "n_agree":      conf_data[top_sym]["n_agree"],
             "std_proba":    conf_data[top_sym]["std_proba"],
             "tp":           tp_use,
             "sl":           sl_use,
-            "ev_score":     top_sc,
-            "gross_ev":     gross_ev,
+            "ev_score":     ev_top,
+            "final_score":  top_sc,
             "cost_bps":     self._cost_bps,
         })
 
@@ -871,7 +1002,7 @@ class VoxAlgorithm(QCAlgorithm):
         self.log("[vox] Starting scheduled retrain …")
         timeout_bars = int(self._toh * 60 / DECISION_INTERVAL_MIN)
 
-        X, y = build_training_data(
+        X, y_class, y_return = build_training_data(
             algorithm             = self,
             symbols               = self._symbols,
             state_dict            = self._state,
@@ -882,17 +1013,20 @@ class VoxAlgorithm(QCAlgorithm):
             label_tp              = self._label_tp,
             label_sl              = self._label_sl,
             label_horizon_bars    = self._label_horizon,
+            cost_bps              = self._label_cost_bps,
         )
         if X is None or len(X) < 50:
             self.log("[vox] Retrain skipped: insufficient training data.")
             return
 
         try:
-            self._ensemble = walk_forward_train(self._ensemble, X, y)
+            self._ensemble = walk_forward_train(self._ensemble, X, y_class, y_return)
             self._model_ready = self._ensemble.is_fitted
             self._persistence.save_model(self._ensemble)
+            reg_trained = getattr(self._ensemble, "_reg_fitted", False)
             self.log(
                 f"[vox] Retrain complete. Samples={len(X)}, fitted={self._model_ready}"
+                f", reg_fitted={reg_trained}"
             )
         except Exception as exc:
             self.log(f"[vox] Retrain failed: {exc}")
@@ -902,6 +1036,57 @@ class VoxAlgorithm(QCAlgorithm):
     def _reset_daily(self):
         """Reset daily counters at midnight UTC."""
         self._risk.reset_daily()
+
+    # ── Per-symbol penalty cooldown ───────────────────────────────────────────
+
+    def _is_in_penalty_cooldown(self, sym):
+        """
+        Return True if *sym* is currently blocked by the penalty cooldown.
+
+        The penalty cooldown is applied when a symbol has had
+        ``_penalty_losses`` consecutive SL exits.  It is independent of the
+        per-coin SL cooldown in RiskManager (which is much shorter).
+        """
+        penalty_until = self._sym_penalty_until.get(sym)
+        if penalty_until is None:
+            return False
+        if self.time >= penalty_until:
+            # Cooldown expired — clean up
+            del self._sym_penalty_until[sym]
+            return False
+        return True
+
+    def _update_penalty_cooldown(self, sym, is_sl):
+        """
+        Check recent outcomes for *sym* and apply a penalty cooldown if needed.
+
+        Called after each trade exit.  If the last ``_penalty_losses``
+        outcomes are all SL exits (net negative), the symbol is blocked for
+        ``_penalty_hours`` hours.
+
+        Parameters
+        ----------
+        sym   : Symbol — the exited symbol.
+        is_sl : bool   — True if this exit was an SL.
+        """
+        if not is_sl:
+            return   # Only SL exits contribute to penalty counting
+
+        outcomes = list(self._sym_outcomes.get(sym, []))
+        if len(outcomes) < self._penalty_losses:
+            return   # Not enough history yet
+
+        # Check that the last N outcomes are all losses (SL returns are negative)
+        recent = outcomes[-self._penalty_losses:]
+        all_losses = all(r < 0 for r in recent)
+        if all_losses:
+            penalty_end = self.time + timedelta(hours=self._penalty_hours)
+            self._sym_penalty_until[sym] = penalty_end
+            self.log(
+                f"[vox] PENALTY COOLDOWN: {sym.value} has had {self._penalty_losses}"
+                f" consecutive losses — blocked until {penalty_end} "
+                f"({self._penalty_hours}h)"
+            )
 
     # ── Throttled diagnostic helper ───────────────────────────────────────────
 

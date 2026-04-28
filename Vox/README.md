@@ -1,12 +1,13 @@
-# Vox — ML Ensemble Kraken Rotation Strategy
+# Vox v2 — ML Ensemble Kraken Rotation Strategy
 
 ## What is Vox?
 
 **Vox** is a machine-learning overlay strategy that lives alongside the
 rule-based `main.py` (KrakenTopCoinAlgorithm) in this repository.  Where
 `main.py` uses a hand-crafted composite score (momentum + RSI + volume spike),
-Vox replaces the scoring layer with a five-model **heterogeneous soft-voting
-ensemble** trained on triple-barrier labels derived from the same market data.
+Vox replaces the scoring layer with a four-model **heterogeneous soft-voting
+classifier ensemble** combined with an **expected-return regression ensemble**,
+trained on cost-aware triple-barrier labels derived from the same market data.
 
 Both strategies share the same fill-driven state machine pattern (position
 state updated only in `on_order_event`), the same Kraken brokerage model, and
@@ -15,7 +16,7 @@ compared independently — Vox does **not** modify `main.py`.
 
 ---
 
-## Architecture
+## Architecture (Vox v2)
 
 ```
   ┌─────────────┐   5-min bars    ┌──────────────────────────┐
@@ -27,37 +28,37 @@ compared independently — Vox does **not** modify `main.py`.
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Feature Builder         │
-                                  │  (models.py)           │
+                                  │  (models.py)             │
                                   │  ret×4, RSI, ATR, vol,   │
                                   │  BTC-rel, hour           │
                                   └──────────┬───────────────┘
                                              │
                                              ▼
                                   ┌──────────────────────────┐
-                                  │  VoxEnsemble             │
-                                  │  (models.py)           │
-                                  │  Soft vote of 5 models   │
+                                  │  VoxEnsemble (v2)        │
+                                  │  Classifiers (weighted)  │
+                                  │  + Return Regressors     │
                                   └──────────┬───────────────┘
-                                             │  mean_proba, std_proba,
-                                             │  n_agree, per_model
+                                             │  class_proba, std_proba,
+                                             │  n_agree, pred_return
                                              ▼
                                   ┌──────────────────────────┐
-                                  │  Confidence Gate         │
-                                  │  score_min / score_gap   │
-                                  │  max_dispersion / min_agree│
+                                  │  Vox v2 Decision Gate    │
+                                  │  EV + pred_return + cost │
+                                  │  penalty cooldown        │
                                   └──────────┬───────────────┘
                                              │
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Regime Gate             │
-                                  │  (risk.py)             │
+                                  │  (risk.py)               │
                                   │  4h BTC SMA(20) + slope  │
                                   └──────────┬───────────────┘
                                              │
                                              ▼
                                   ┌──────────────────────────┐
                                   │  Kelly Sizer             │
-                                  │  (risk.py)             │
+                                  │  (risk.py)               │
                                   │  Fractional-Kelly or     │
                                   │  flat allocation         │
                                   └──────────┬───────────────┘
@@ -79,22 +80,162 @@ compared independently — Vox does **not** modify `main.py`.
 
 ---
 
-## Ensemble Models
+## Vox v2 Model Stack
 
-| # | Name | Class | Why |
-|---|------|-------|-----|
-| 1 | `lr` | `LogisticRegression(C=1.0)` | Linear baseline; fast, interpretable, well-calibrated out-of-box |
-| 2 | `rf` | `RandomForestClassifier(n_estimators=200, max_depth=5)` + isotonic calibration | Bagged trees capture non-linear interactions; decorrelated from LGBM |
-| 3 | `lgbm` | `LGBMClassifier(n_estimators=200, lr=0.05, …)` + isotonic calibration | Gradient-boosted trees; high signal-to-noise on tabular financial data |
-| 4 | `et` | `ExtraTreesClassifier(n_estimators=200, max_depth=5)` + isotonic calibration | Extremely randomised splits create low correlation with RF; adds diversity |
-| 5 | `gnb` | `GaussianNB()` | Probabilistic baseline with no hyper-parameters; anchors the soft vote |
+### Classifier ensemble (weighted soft voting)
 
-If LightGBM is not installed, `lgbm` falls back to `GradientBoostingClassifier`
-with matching depth/learning-rate settings and a log warning.
+| Name | Class | Weight | Notes |
+|------|-------|--------|-------|
+| `hgbc` | `HistGradientBoostingClassifier` | **0.35** | Strong sklearn-native boosted trees; well-calibrated; no external deps |
+| `et` | `ExtraTreesClassifier` + isotonic calib | **0.25** | Randomly split trees; uncorrelated from RF |
+| `lr` | `LogisticRegression` | **0.20** | Linear baseline; fast; well-calibrated by design |
+| `rf` | `RandomForestClassifier` + isotonic calib | **0.20** | Bagged trees |
 
-All tree models are wrapped in `CalibratedClassifierCV(method="isotonic", cv=3)`
-so that `predict_proba` outputs are reliable probability estimates rather than
-raw decision-function scores.
+> **GaussianNB is intentionally removed.** At typical positive rates of 1–5%
+> it dominates the soft vote with extreme probabilities and degrades calibration.
+> It is not retained even at low weight.
+
+### Regression ensemble (weighted mean predicted return)
+
+| Name | Class | Weight | Notes |
+|------|-------|--------|-------|
+| `hgbr` | `HistGradientBoostingRegressor` | **0.40** | Strong sklearn-native gradient booster |
+| `etr` | `ExtraTreesRegressor` | **0.35** | Non-linear, diverse from HGBR |
+| `ridge` | `Ridge` | **0.25** | Stable linear baseline; handles small datasets |
+
+Trained on cost-aware realised trade returns from `triple_barrier_outcome()`.
+Only used when enough training samples are available (≥ 50 samples).
+
+---
+
+## Vox v2 Decision Equation
+
+For each candidate symbol that passes the confidence gates, Vox computes:
+
+```text
+class_proba  = weighted VotingClassifier P(class=1)
+pred_return  = weighted regression prediction of net forward return
+
+ev = class_proba × tp_use − (1 − class_proba) × sl_use − cost_fraction
+
+final_score = 0.6 × ev + 0.4 × pred_return   (when regressors trained)
+            = ev × (1 − std_proba)            (fallback, before regressor training)
+```
+
+Where:
+- `tp_use`, `sl_use` — ATR-based TP/SL per candidate (or fixed fallback)
+- `cost_fraction` — `COST_BPS × 1e-4` (estimated round-trip fee + slippage)
+- `std_proba` — std-dev of per-model probabilities (model disagreement)
+
+Candidates are **ranked by `final_score`** and the top candidate is selected
+only if it passes all gates (see entry-gate pipeline below).
+
+---
+
+## Entry Gate Pipeline (Vox v2)
+
+| # | Gate | Description |
+|---|------|-------------|
+| 1 | Feature history | `build_features()` returns a valid feature vector |
+| 2 | **Penalty cooldown** | Symbol not in post-repeated-loss penalty cooldown |
+| 3 | Class probability | `class_proba >= score_min_eff` (base-rate-aware) |
+| 4 | Dispersion | `std_proba <= MAX_DISPERSION (0.15)` |
+| 5 | Agreement | `n_agree >= MIN_AGREE (3)` — 3 of 4 models agree |
+| 6 | **EV gate** | `ev_after_costs > MIN_EV (0.004)` — 0.4 % expected edge |
+| 7 | **Predicted return** | `pred_return >= PRED_RETURN_MIN (0.003)` (if regressors trained) |
+| 8 | Score gap | `top_final_score − second_final_score >= EV_GAP (0.00025)` |
+| 9 | Regime | 4h BTC SMA(20) above price + positive slope |
+| 10 | Risk manager | Global cooldown, daily SL cap, drawdown circuit-breaker |
+| 11 | Pre-trade | Price > 0, sufficient cash, lot-size ≥ min order |
+
+---
+
+## Trade-Quality Controls (Vox v2)
+
+### Minimum hold time
+
+Ordinary TP/SL/timeout exits are suppressed for the first `MIN_HOLD_MINUTES`
+(default 15) minutes.  The only exception is an **emergency SL**: if the loss
+exceeds `EMERGENCY_SL` (default 3.0 %) before the minimum hold time, the
+position is closed regardless.
+
+```python
+# Logic in _check_exit():
+if elapsed_minutes < min_hold_minutes:
+    if ret <= -emergency_sl:
+        exit(reason="EXIT_SL")   # emergency stop
+    else:
+        return                   # suppress normal exit — hold
+else:
+    # Normal TP/SL/timeout logic
+```
+
+This prevents the algorithm from entering and immediately being shaken out by
+microstructure noise within 1–5 bars.
+
+### Per-symbol penalty cooldown (repeated losses)
+
+After `PENALTY_COOLDOWN_LOSSES` (default 3) consecutive SL exits on the same
+symbol, that symbol is blocked for `PENALTY_COOLDOWN_HOURS` (default 48 hours).
+Entry logic skips symbols in this penalty window.
+
+The last 10 trade outcomes are tracked per symbol in a rolling deque.
+Penalty cooldown is independent of the shorter per-coin SL cooldown in
+`RiskManager` (default 60 minutes after a single SL).
+
+### Conservative mode
+
+Setting `conservative_mode=True` (QC parameter panel) applies stricter defaults
+in one switch, without requiring the user to set every parameter manually:
+
+| Parameter | Conservative override |
+|-----------|----------------------|
+| `score_min` | ≥ 0.60 |
+| `max_dispersion` | ≤ 0.12 |
+| `min_agree` | ≥ 4 |
+| `min_ev` | ≥ 0.005 |
+| `take_profit` | ≥ 0.035 |
+| `stop_loss` | ≥ 0.020 |
+| `min_hold_minutes` | ≥ 20 |
+| `pred_return_min` | ≥ 0.005 |
+
+### Realized EV logging
+
+At entry, Vox stores predicted `class_proba`, `pred_return`, `ev`, and
+`final_score`.  At exit, the realized return and exit reason are logged to
+`ObjectStore` alongside the entry predictions via `PersistenceManager.log_trade`.
+
+This allows post-hoc evaluation of:
+- Does predicted EV correlate with realized return?
+- Which symbols/hours have positive realized EV?
+- Are the model probabilities calibrated (e.g. `class_proba=0.60` → ~60 % win rate)?
+
+---
+
+## Cost-Aware Labels
+
+Training labels use `triple_barrier_outcome()` instead of `triple_barrier_label()`.
+The new function applies a cost adjustment:
+
+```text
+label  = 1  if TP is hit before SL/timeout AND (tp - cost_fraction) > 0
+realized_net_return:
+  TP hit    →  tp_use − cost_fraction
+  SL hit    →  −sl_use − cost_fraction
+  Timeout   →  (final_price − entry_price) / entry_price − cost_fraction
+```
+
+The **regression targets** (`y_return`) are these realized net returns.
+The **classification labels** (`y_class`) are 1 only when the TP barrier is hit
+and the net profit is positive.  This ensures the model learns to identify trades
+that are *actually profitable after costs*, not just raw price movements.
+
+Label cost is controlled by `LABEL_COST_BPS` (default 30 bps), which can be
+overridden via the QC parameter `label_cost_bps`.
+
+> **Triple-barrier semantics preserved:** Labels are still generated by the
+> triple-barrier method (TP before SL/timeout = 1, otherwise 0).  The only
+> change is the net-of-costs requirement.  Next-bar up/down labels are not used.
 
 ---
 
@@ -116,45 +257,43 @@ entry price ──────────────────────�
 A bar is labelled **1** if the price reaches the upper barrier before the lower
 barrier within `timeout_bars` steps; **0** otherwise.
 
-### Alignment Constraint
-
-> **Note:** Training labels are now intentionally decoupled from execution
-> barriers.  The dedicated `LABEL_TP`, `LABEL_SL`, `LABEL_HORIZON_BARS`
-> constants (see below) govern what is labelled "1" at training time, while
-> `TAKE_PROFIT`, `STOP_LOSS`, and `TIMEOUT_HOURS` govern when positions are
-> closed at execution time.  Looser training barriers increase the positive
-> rate, improving model calibration without changing the live trading behaviour.
-
----
-
 ## Parameters and Defaults
 
 All parameters are defined at the top of `main.py` as module-level constants
 and can be overridden at runtime via the QuantConnect parameter panel.
 
-### Execution parameters
+### Execution parameters (Vox v2 defaults)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `take_profit` | `0.020` | Take-profit fraction (+2 %) |
-| `stop_loss` | `0.012` | Stop-loss fraction (−1.2 %) |
-| `timeout_hours` | `3.0` | Max hold time in hours |
+| `take_profit` | `0.030` | Take-profit fraction (+3 %) — wider than v1 to reduce fee drag |
+| `stop_loss` | `0.015` | Stop-loss fraction (−1.5 %) — wider to avoid noise chop |
+| `timeout_hours` | `6.0` | Max hold time in hours |
 | `atr_tp_mult` | `2.0` | ATR multiplier for dynamic TP |
 | `atr_sl_mult` | `1.2` | ATR multiplier for dynamic SL |
-| `score_min` | `0.25` | Upper clamp on the effective score threshold |
-| `score_gap` | `0.02` | Required probability gap to runner-up |
-| `max_dispersion` | `0.30` | Max std_proba across models |
-| `min_agree` | `1` | Min models with proba ≥ agree_thr |
+| `score_min` | `0.55` | Upper clamp on the effective score threshold (class_proba gate) |
+| `score_gap` | `0.02` | Required probability gap to runner-up (probability units) |
+| `max_dispersion` | `0.15` | Max std_proba across models (tightened from 0.30) |
+| `min_agree` | `3` | Min models with proba ≥ agree_thr (3 of 4 classifiers) |
 | `allocation` | `0.50` | Flat allocation fallback fraction |
 | `kelly_frac` | `0.25` | Fractional-Kelly multiplier |
 | `max_alloc` | `0.80` | Hard ceiling on allocation |
 | `use_kelly` | `True` | Use Kelly sizing; False = flat |
 | `use_calibration` | `True` | Wrap tree models in CalibratedClassifierCV |
-| `max_daily_sl` | `2` | Daily SL cap |
-| `cooldown_mins` | `15` | Global post-exit cooldown (min) |
+| `max_daily_sl` | `1` | Daily SL cap (tightened from 2) |
+| `cooldown_mins` | `30` | Global post-exit cooldown (min) |
 | `sl_cooldown_mins` | `60` | Per-coin SL cooldown (min) |
 | `max_dd_pct` | `0.08` | Drawdown circuit-breaker (8 %) |
 | `cash_buffer` | `0.99` | Cash headroom multiplier |
+| `cost_bps` | `50` | Estimated round-trip cost in basis points (0.50 %) |
+| `min_ev` | `0.004` | Minimum EV after costs to enter (0.4 %) |
+| `ev_gap` | `0.00025` | Required final_score gap to runner-up (return-fraction units) |
+| `pred_return_min` | `0.003` | Minimum regression-predicted return (0.3 %) |
+| `min_hold_minutes` | `15` | Suppress ordinary exits before this many minutes |
+| `emergency_sl` | `0.030` | Allow early exit during min-hold if loss exceeds this (3.0 %) |
+| `conservative_mode` | `False` | Apply stricter gate overrides in one switch |
+| `penalty_cooldown_losses` | `3` | Consecutive SL exits triggering penalty cooldown |
+| `penalty_cooldown_hours` | `48` | Hours a symbol is blocked after penalty trigger |
 
 ### Label / training parameters
 
@@ -164,10 +303,20 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `LABEL_TP` / `label_tp` | `0.012` | Take-profit fraction for training labels (+1.2 %) |
 | `LABEL_SL` / `label_sl` | `0.010` | Stop-loss fraction for training labels (−1.0 %) |
 | `LABEL_HORIZON_BARS` / `label_horizon_bars` | `72` | Timeout bars for training labels (≈6h at 5-min bars) |
+| `LABEL_COST_BPS` / `label_cost_bps` | `30` | Round-trip cost for cost-aware label generation |
 
 `LABEL_*` constants are defined in `models.py` and re-imported by `main.py`.
 The looser barriers increase the positive rate from ~1–5 % to a more balanced
 range, improving ensemble calibration without changing live execution behaviour.
+
+### Alignment Constraint
+
+> **Note:** Training labels are intentionally decoupled from execution
+> barriers.  `LABEL_TP`, `LABEL_SL`, `LABEL_HORIZON_BARS` govern what is
+> labelled "1" at training time, while `TAKE_PROFIT`, `STOP_LOSS`, and
+> `TIMEOUT_HOURS` govern when positions are closed at execution time.
+> `LABEL_COST_BPS` adds a cost deduction to labels so the model learns trades
+> that are profitable *after costs*, not merely raw price moves.
 
 ### Base-rate-aware confidence gate
 
@@ -177,7 +326,7 @@ most recent training `positive_rate` (`pr`):
 | Threshold | Formula | Notes |
 |-----------|---------|-------|
 | `agree_thr` | `clip(2 × pr, 0.15, 0.55)` | Replaces the hard-coded `0.5` in the model agreement count |
-| `score_min_eff` | `clip(max(SCORE_MIN_FLOOR, 3 × pr), SCORE_MIN_FLOOR, SCORE_MIN)` | Replaces the raw `SCORE_MIN` in the mean_proba gate |
+| `score_min_eff` | `clip(max(SCORE_MIN_FLOOR, 3 × pr), SCORE_MIN_FLOOR, SCORE_MIN)` | Replaces the raw `SCORE_MIN` in the class_proba gate |
 
 Both values are logged every decision tick in the `[diag]` line.
 
@@ -323,27 +472,33 @@ logging line that references `self._pos_sym.value`.
 
 ---
 
-## Soft-Voting Ensemble Design
+## Soft-Voting Ensemble Design (Vox v2)
 
-The `VoxEnsemble` (in `models.py`) implements a **heterogeneous soft-voting**
-ensemble rather than hard majority voting.  Soft voting averages the
-`predict_proba` output of each model and is more robust to class imbalance and
-miscalibrated individual models.
+The `VoxEnsemble` (in `models.py`) implements a **weighted heterogeneous soft-voting**
+classifier ensemble combined with a **regression ensemble** for expected return
+prediction.
 
-### Why soft voting?
+### Why weighted soft voting?
 
 With positive rates of 1–5 % (typical for triple-barrier labeling on short
 time horizons), hard majority voting nearly always produces the majority class.
-Averaging probabilities lets a confident minority of models pull the mean above
-the adaptive threshold even when most models output sub-0.5 probabilities.
+Averaging probabilities lets a confident minority of models pull the weighted mean
+above the adaptive threshold even when most models output sub-0.5 probabilities.
+
+HistGradientBoostingClassifier receives the highest weight (0.35) because it is
+typically the strongest tabular model in this ensemble and has good built-in
+probability calibration.
 
 ### Confidence metrics used
 
 | Metric | How computed | Used for |
 |--------|-------------|----------|
-| `mean_proba` | Average P(class=1) across all models | Primary entry gate (`score_min_eff`) |
+| `class_proba` | VotingClassifier's weighted P(class=1) | Primary entry gate (`score_min_eff`) |
+| `mean_proba` | Same as `class_proba` (backward-compat alias) | — |
 | `std_proba` | Std-dev of per-model probabilities | Dispersion gate: high std → uncertain → skip |
 | `n_agree` | Count of models with P ≥ `agree_thr` | Agreement gate: require ≥ `min_agree` |
+| `pred_return` | Weighted regression ensemble prediction | Predicted-return gate + final_score blend |
+| `return_dispersion` | Std-dev of regressor predictions | Informational; not gated |
 
 The adaptive thresholds are:
 
@@ -354,15 +509,12 @@ The adaptive thresholds are:
 
 ### Calibration
 
-Tree-based models (RF, LGBM/GB, ET) are wrapped in
+Tree-based models (RF, ET) are wrapped in
 `CalibratedClassifierCV(method="isotonic", cv=2)` to convert raw scores into
-reliable probability estimates.  LogisticRegression and GaussianNB are
-well-calibrated out-of-the-box.  Calibration can be disabled via the
+reliable probability estimates.  LogisticRegression is well-calibrated by design.
+`HistGradientBoostingClassifier` has good built-in calibration and is used directly
+to avoid cv-split issues on small datasets.  Calibration can be disabled via the
 `use_calibration=False` parameter for faster iteration.
-
-GaussianNB is re-fit with class-frequency-derived sample weights after the
-main ensemble fit to prevent the majority-class imbalance from dominating its
-naive likelihood.
 
 ---
 
@@ -446,13 +598,14 @@ on `mean_proba` ignores this asymmetry.
 
 ### EV scoring formula
 
-For each candidate passing the confidence gates, Vox computes:
+For each candidate passing the confidence gates, Vox v2 computes:
 
 ```text
-gross_ev       = mean_proba × tp_use − (1 − mean_proba) × sl_use
-ev_after_costs = gross_ev − COST_BPS × 1e-4
-confidence_adj = max(0, 1 − std_proba)
-entry_score    = ev_after_costs × confidence_adj
+class_proba  = weighted VotingClassifier P(class=1)
+pred_return  = weighted regression ensemble prediction
+ev           = class_proba × tp_use − (1 − class_proba) × sl_use − cost_fraction
+final_score  = 0.6 × ev + 0.4 × pred_return   (if regressors trained)
+             = ev × (1 − std_proba)             (fallback before regressor training)
 ```
 
 where:
@@ -460,72 +613,111 @@ where:
 | Term | Description |
 |------|-------------|
 | `tp_use`, `sl_use` | Per-candidate ATR-based TP/SL (or fixed fallback) |
-| `COST_BPS` | Estimated round-trip fee + slippage in basis points (default 20 bps) |
-| `confidence_adj` | Multiplier in [0, 1]: reduces score when models strongly disagree |
+| `cost_fraction` | `COST_BPS × 1e-4` — estimated round-trip fee + slippage |
+| `pred_return` | Regression ensemble predicted net return (0.0 if not trained) |
 
-All EV-related values (`gross_ev`, `ev_after_costs`, `entry_score`) are
-**return fractions**, not probabilities.  A value of `0.001` means a 0.1 %
-expected return; `0.01` means 1 %.  This is important when setting the EV
-thresholds: `MIN_EV = 0.0005` requires only a 0.05 % expected return, while
-`SCORE_GAP = 0.02` in probability units represents a 2 percentage-point
-probability lead — a very different magnitude.
+All EV-related values (`ev`, `final_score`) are **return fractions**, not probabilities.
+A value of `0.001` means a 0.1 % expected return; `0.01` means 1 %.  This is important
+when setting thresholds: `MIN_EV = 0.004` requires 0.4 % expected return after costs.
 
-Candidates are then **ranked by `entry_score`** rather than raw `mean_proba`,
-and only candidates with `ev_after_costs > min_ev` are considered.
+Candidates are ranked by `final_score` and only candidates with
+`ev > min_ev` (and `pred_return >= pred_return_min` when regressors are trained)
+are considered.
 
 ### EV gap selectivity
 
 After ranking, Vox requires the top candidate to lead the second-best by at
-least `ev_gap` in `entry_score`.  This controls **selectivity**, not trade
-validity: if the top EV is strongly positive and the second EV is nearly as
-good, both are acceptable trades — use a small `ev_gap` (or `0.0`) when you
-want the best available trade rather than holding out for a runaway winner.
+least `ev_gap` in `final_score`.  This controls **selectivity**, not trade
+validity.
 
-> **Important:** `ev_gap` is in **return-fraction units** (same as `entry_score`),
+> **Important:** `ev_gap` is in **return-fraction units** (same as `final_score`),
 > NOT probability units.  Using the probability gap threshold (`score_gap = 0.02`)
-> as an EV gap would require a 2 percentage-point EV advantage, which blocks
-> nearly all trades since typical EV scores are in the `0.001–0.02` range.
+> as an EV gap would require a 2 percentage-point EV advantage, blocking nearly
+> all trades since typical EV scores are in the `0.001–0.02` range.
 
 ### Parameters
 
 | Parameter / Constant | Default | Units | Description |
 |----------------------|---------|-------|-------------|
-| `COST_BPS` / `cost_bps` | `20` | basis points | Estimated round-trip fee+slippage |
-| `MIN_EV` / `min_ev` | `0.0005` | return fraction | Minimum EV after costs to enter (0.0005 = 0.05 %) |
-| `EV_GAP` / `ev_gap` | `0.00025` | return fraction | Required EV lead of top over second-best (0.00025 = 0.025 %) |
+| `COST_BPS` / `cost_bps` | `50` | basis points | Estimated round-trip fee+slippage (0.50 %) |
+| `MIN_EV` / `min_ev` | `0.004` | return fraction | Minimum EV after costs to enter (0.4 %) |
+| `EV_GAP` / `ev_gap` | `0.00025` | return fraction | Required score lead of top over second-best (0.025 %) |
+| `PRED_RETURN_MIN` / `pred_return_min` | `0.003` | return fraction | Minimum predicted return (0.3 %) |
 | `SCORE_GAP` / `score_gap` | `0.02` | probability (0–1) | Probability gap between top and runner-up — **not** used for EV comparisons |
 | `EXIT_QTY_BUFFER_LOTS` / `exit_qty_buffer_lots` | `1` | lots | Safety lot buffer on exits |
-
-**Tuning ranges:**
-
-| Parameter | Conservative | Aggressive | Notes |
-|-----------|-------------|------------|-------|
-| `min_ev` | `0.00025` – `0.001` | `0.0` | Lower allows more trades; raise if entering on noise |
-| `ev_gap` | `0.0000` – `0.001` | `0.0` | `0.0` = no gap required; raise only if top coin is often ambiguous |
-| `score_gap` | `0.01` – `0.05` | `0.005` | Probability gap only; `0.02` is a reasonable default |
 
 ### Diagnostics
 
 Every time candidates pass all gates the following is logged:
 
 ```
-[diag] candidates=3 top=OPUSD ev_score=0.00412 ev_gap=0.00201
-       mean_p=0.287 std_p=0.081 n_agree=3 tp=0.0245 sl=0.0147
+[diag] candidates=3 top=OPUSD final_score=0.00412 ev_score=0.00395
+       pred_ret=0.00441 gap=0.00201 class_proba=0.287 std_proba=0.081
+       n_agree=3 tp=0.0245 sl=0.0147
 ```
 
 When no candidate passes, the hourly diagnostic log shows how many failed
 each gate:
 
 ```
-[diag] eval=18 pass_disp=12 pass_agree=10 pass_score=3 pass_ev=0
-       best_mean=0.183 ... (thresh: score>=0.150 agree>=1 disp<=0.30 ev>0.00050 cost=0.0020)
+[diag] eval=18 pass_disp=12 pass_agree=10 pass_score=3 pass_ev=0 pass_pred_ret=0
+       best_proba=0.183 ... (thresh: score>=0.150 agree>=3 disp<=0.15
+       ev>0.00400 pred_ret>=0.00300 cost=0.0050)
 ```
 
 Routine skip messages (EV gap too small, regime block, risk block) are
 throttled to **at most once per hour** (`SKIP_DIAG_INTERVAL_SECS = 3600`) to
 prevent QuantConnect log rate-limiting during normal backtests.
 
-This helps tune `MIN_EV`, `EV_GAP`, `COST_BPS`, and the confidence gates without
+---
+
+## Tuning Guide and Overfitting Warnings
+
+### Metrics to validate
+
+Before declaring Vox "working", validate the following metrics on **out-of-sample**
+data (never tune to in-sample backtest results):
+
+| Metric | Target | How to compute |
+|--------|--------|----------------|
+| Total return | > 0 on OOS period | QuantConnect backtest |
+| Max drawdown | < 15 % | QuantConnect backtest |
+| Sharpe/Sortino | > 0.5 | QuantConnect backtest |
+| Profit factor | > 1.2 | `gross_wins / gross_losses` |
+| Win rate | > 45 % | `wins / total_trades` |
+| Average win/loss ratio | > 1.0 | `avg_win / abs(avg_loss)` |
+| Fee drag | < 3 % of equity over period | `total_fees / starting_equity` |
+| Turnover | < 20 % portfolio/day | QuantConnect backtest |
+| Calibration / Brier score | Brier < 0.25 | `sklearn.metrics.brier_score_loss` |
+| Realized EV by predicted EV bucket | Positive slope | Use `PersistenceManager` logs |
+
+### Overfitting warnings
+
+- **Do not tune parameters to a single backtest period.** Use at least 3 distinct
+  out-of-sample windows (e.g. 2023, 2024, 2025 separately).
+- **Tighter gates do not always mean better OOS performance.** Very tight EV
+  thresholds may select only 5–10 trades in a year — not enough for statistical
+  significance.
+- **Model weights are reasonable defaults, not optimized values.** Do not
+  auto-optimize the classifier/regressor weights to a specific backtest period.
+- **Cost estimates should be conservative.** Kraken fees are typically 0.10–0.26 %
+  per side; `COST_BPS = 50` (0.50 % round-trip) already includes slippage margin.
+  Lowering this aggressively may cause the model to learn trades that look
+  profitable in simulation but lose money live.
+- **The penalty cooldown is not a symbol blacklist.** It is a dynamic cooling
+  period that resets after 48 hours.  Do not tune `penalty_cooldown_losses` to
+  match a specific set of bad symbols in one backtest.
+
+### Recommended parameter validation sequence
+
+1. Run with default v2 parameters; observe diagnostics (`[diag]` lines).
+2. If trade count is < 10/month: lower `min_ev`, `pred_return_min`, or relax
+   `min_agree` / `max_dispersion`.
+3. If trade count is > 50/month with negative expectancy: raise `min_ev`,
+   `score_min`, `min_hold_minutes`.
+4. Enable `conservative_mode=True` for a simple "tighter" configuration.
+5. Compare OOS win rate, profit factor, and fee drag across 3 separate years.
+6. Only adjust parameters where the OOS distribution clearly supports the change.
 flooding logs.
 
 ### Overfitting warning
@@ -591,8 +783,8 @@ flooding logs.
 - **Online learning** — Use incremental model updates (e.g. `partial_fit` on
   PassiveAggressiveClassifier) to adapt to regime shifts without a full weekly
   retrain.
-- **Regression head** — A lightweight forward-return regressor combined with
-  the classifier EV could further improve entry quality.  The current EV
-  scoring layer (using classifier probability and ATR TP/SL) serves as the
-  profit-aware substitute until a regression head is feasible without a large
-  rewrite.
+- **Calibration evaluation** — Per-bucket realized win rate vs. predicted
+  `class_proba` using the trade logs from `PersistenceManager`.  If buckets
+  diverge significantly, re-calibrate or adjust the `score_min` gate.
+- **Regime-aware regressors** — Train separate regression ensembles for
+  bull/bear/sideways regimes identified by the BTC regime filter.

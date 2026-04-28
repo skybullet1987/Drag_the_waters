@@ -1,29 +1,23 @@
 # ── Vox Models ────────────────────────────────────────────────────────────────
 #
 # Consolidated module for feature engineering, triple-barrier labeling, the
-# voting-ensemble classifier, and the walk-forward training pipeline.
+# voting-ensemble classifier + regression ensemble, and the walk-forward
+# training pipeline.
 # Previously split across features.py, labeling.py, ensemble.py, training.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.ensemble import (
     RandomForestClassifier,
     ExtraTreesClassifier,
-    GradientBoostingClassifier,
+    ExtraTreesRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
     VotingClassifier,
 )
-from sklearn.naive_bayes import GaussianNB
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
-
-# Optional LightGBM — fall back to GradientBoostingClassifier if not installed
-try:
-    from lightgbm import LGBMClassifier as _LGBMClassifier
-    _LGBM_AVAILABLE = True
-except ImportError:
-    _LGBMClassifier  = None
-    _LGBM_AVAILABLE  = False
 
 # ── Module-level tuning constants ─────────────────────────────────────────────
 
@@ -55,6 +49,14 @@ CV_SPLITS = 3
 LABEL_TP           = 0.012   # take-profit fraction for training labels  (+1.2 %)
 LABEL_SL           = 0.010   # stop-loss fraction for training labels    (−1.0 %)
 LABEL_HORIZON_BARS = 72      # max bars to hold at train time (≈6h at 5-min bars)
+
+# Estimated round-trip cost used when generating cost-aware training labels.
+# Set lower than live COST_BPS to generate conservative-but-not-too-strict targets.
+# Overridable by passing cost_bps to build_training_data().
+LABEL_COST_BPS = 30          # basis points — 0.30 % round-trip for label generation
+
+# Minimum samples required to fit regressors (avoids degenerate fits).
+MIN_REGRESSOR_SAMPLES = 50
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -234,17 +236,87 @@ def triple_barrier_label(prices, tp, sl, timeout_bars):
     return 0   # vertical barrier reached
 
 
+def triple_barrier_outcome(prices, tp, sl, timeout_bars, cost_fraction=0.0):
+    """
+    Evaluate the triple-barrier outcome and return both a cost-aware binary
+    label and the realised net return.
+
+    Cost-aware label: ``1`` only if the TP barrier is hit **and** the net
+    return after estimated costs is positive (``tp - cost_fraction > 0``).
+
+    Parameters
+    ----------
+    prices        : array-like of float — price series from entry bar onward.
+    tp            : float — take-profit fraction (e.g. 0.012 for +1.2 %).
+    sl            : float — stop-loss fraction   (e.g. 0.010 for −1.0 %).
+    timeout_bars  : int   — maximum bars to hold.
+    cost_fraction : float — estimated round-trip fee/slippage fraction
+                    (e.g. 0.003 for 30 bps).
+
+    Returns
+    -------
+    tuple[int, float]
+        ``(label, realized_net_return)``
+
+        - ``label``              — 1 if TP hit and net profit is positive; 0 otherwise.
+        - ``realized_net_return``— return net of costs at the first barrier:
+            * TP hit: ``+tp − cost_fraction``
+            * SL hit: ``−sl − cost_fraction``
+            * Timeout: ``(final_price − entry) / entry − cost_fraction``
+    """
+    prices = np.asarray(prices, dtype=float)
+    if len(prices) < 2:
+        return 0, -cost_fraction
+
+    entry = prices[0]
+    if entry == 0.0:
+        return 0, -cost_fraction
+
+    upper = entry * (1.0 + tp)
+    lower = entry * (1.0 - sl)
+
+    limit = min(len(prices) - 1, timeout_bars)
+    for i in range(1, limit + 1):
+        px = prices[i]
+        if px >= upper:
+            net_ret = tp - cost_fraction
+            label = 1 if net_ret > 0 else 0
+            return label, net_ret
+        if px <= lower:
+            return 0, -sl - cost_fraction
+
+    # Vertical barrier: use actual price at the horizon
+    final_px = prices[min(len(prices) - 1, timeout_bars)]
+    net_ret = (final_px - entry) / entry - cost_fraction if entry > 0 else -cost_fraction
+    return 0, net_ret   # timeout is always label=0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOTING ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Vox v2 classifier weights (must match estimator order in _make_estimators).
+# HistGradientBoosting is the strongest model; LR is the lightest baseline.
+CLASSIFIER_WEIGHTS = [0.20, 0.35, 0.25, 0.20]  # lr, hgbc, et, rf
+
+# Vox v2 regressor weights (must match order in _make_regressors).
+REGRESSOR_WEIGHTS = [0.40, 0.35, 0.25]          # hgbr, etr, ridge
+
 
 def _make_estimators(logger=None, use_calibration=True):
     """
     Build the list of (name, estimator) tuples for the VotingClassifier.
 
-    Tree-based models are wrapped in CalibratedClassifierCV to obtain reliable
-    probability estimates.  Logistic regression and GaussianNB are inherently
-    probabilistic.
+    Vox v2 model stack (sklearn-native, no external dependencies):
+      - LogisticRegression (lr)              — linear baseline
+      - HistGradientBoostingClassifier (hgbc)— strong boosted trees, no calibration needed
+      - ExtraTreesClassifier (et)            — randomised trees, adds diversity
+      - RandomForestClassifier (rf)          — bagged trees
+
+    Tree models (ET, RF) are wrapped in CalibratedClassifierCV(isotonic, cv=2)
+    for reliable probability estimates.  HistGradientBoosting has good built-in
+    calibration and is used directly.  GaussianNB is removed (too naive for
+    crypto features and dominates ensembles at low positive rates).
 
     Parameters
     ----------
@@ -252,10 +324,6 @@ def _make_estimators(logger=None, use_calibration=True):
     use_calibration : bool — when False, return raw tree estimators without
                       CalibratedClassifierCV wrapping (halves inference cost).
     """
-    def _warn(msg):
-        if logger:
-            logger(msg)
-
     def _maybe_calibrate(est):
         if use_calibration:
             return CalibratedClassifierCV(est, method="isotonic", cv=2)
@@ -263,34 +331,22 @@ def _make_estimators(logger=None, use_calibration=True):
 
     lr = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
 
-    rf = _maybe_calibrate(
-        RandomForestClassifier(
-            n_estimators=100, max_depth=5, n_jobs=1, random_state=42,
-            class_weight="balanced",
+    # HistGradientBoostingClassifier: sklearn-native boosted trees, replaces
+    # LightGBM/GradientBoostingClassifier.  Well-calibrated by default;
+    # skip CalibratedClassifierCV to avoid cv-split issues on small datasets.
+    try:
+        hgbc = HistGradientBoostingClassifier(
+            max_iter=100, learning_rate=0.05, max_depth=4,
+            min_samples_leaf=20, l2_regularization=0.1,
+            random_state=42, class_weight="balanced",
         )
-    )
-
-    if _LGBM_AVAILABLE:
-        _base_lgbm = _LGBMClassifier(
-            n_estimators=100, learning_rate=0.05, max_depth=4, num_leaves=15,
-            min_child_samples=20, reg_alpha=0.1, reg_lambda=0.1,
-            subsample=0.8, colsample_bytree=0.8,
-            deterministic=True, force_row_wise=True,
-            n_jobs=1, verbose=-1, random_state=42,
-            class_weight="balanced",
+    except TypeError:
+        # Older sklearn may not support class_weight on HistGradientBoosting
+        hgbc = HistGradientBoostingClassifier(
+            max_iter=100, learning_rate=0.05, max_depth=4,
+            min_samples_leaf=20, l2_regularization=0.1,
+            random_state=42,
         )
-        lgbm_name = "lgbm"
-    else:
-        _warn(
-            "[ensemble] LightGBM not available; "
-            "falling back to GradientBoostingClassifier"
-        )
-        _base_lgbm = GradientBoostingClassifier(
-            n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42
-        )
-        lgbm_name = "lgbm_gb_fallback"
-
-    lgbm = _maybe_calibrate(_base_lgbm)
 
     et = _maybe_calibrate(
         ExtraTreesClassifier(
@@ -299,68 +355,127 @@ def _make_estimators(logger=None, use_calibration=True):
         )
     )
 
-    gnb = GaussianNB(priors=None)
+    rf = _maybe_calibrate(
+        RandomForestClassifier(
+            n_estimators=100, max_depth=5, n_jobs=1, random_state=42,
+            class_weight="balanced",
+        )
+    )
 
     return [
-        ("lr",       lr),
-        ("rf",       rf),
-        (lgbm_name,  lgbm),
-        ("et",       et),
-        ("gnb",      gnb),
+        ("lr",   lr),
+        ("hgbc", hgbc),
+        ("et",   et),
+        ("rf",   rf),
+    ]
+
+
+def _make_regressors():
+    """
+    Build the list of (name, estimator) tuples for the regression ensemble.
+
+    Vox v2 regression stack (predicts expected forward return net of costs):
+      - HistGradientBoostingRegressor (hgbr) — strong sklearn-native model
+      - ExtraTreesRegressor (etr)            — non-linear, diverse from HGBR
+      - Ridge (ridge)                        — linear baseline, stable on small data
+
+    Returns
+    -------
+    list[tuple[str, estimator]]
+    """
+    hgbr = HistGradientBoostingRegressor(
+        max_iter=100, learning_rate=0.05, max_depth=4,
+        min_samples_leaf=20, l2_regularization=0.1,
+        random_state=42,
+    )
+    etr = ExtraTreesRegressor(
+        n_estimators=100, max_depth=5, n_jobs=1, random_state=42,
+    )
+    ridge = Ridge(alpha=1.0)
+
+    return [
+        ("hgbr",  hgbr),
+        ("etr",   etr),
+        ("ridge", ridge),
     ]
 
 
 class VoxEnsemble:
     """
-    Heterogeneous soft-voting ensemble classifier for the Vox strategy.
+    Heterogeneous soft-voting ensemble for the Vox v2 strategy.
 
-    Models
-    ------
-    - **LogisticRegression** — linear baseline, fast and interpretable.
-    - **RandomForestClassifier** — bagged trees, handles non-linearity.
-    - **LGBMClassifier** (GradientBoostingClassifier fallback) — boosted
-      trees, high signal-to-noise on tabular data.
-    - **ExtraTreesClassifier** — extremely randomised trees, decorrelated
-      from RF, adds diversity.
-    - **GaussianNB** — probabilistic baseline, calibrated out-of-the-box.
+    Classifiers (weighted soft voting)
+    -----------------------------------
+    - **LogisticRegression** (weight 0.20) — linear baseline.
+    - **HistGradientBoostingClassifier** (weight 0.35) — strong sklearn-native booster.
+    - **ExtraTreesClassifier** (weight 0.25) — randomised trees, diverse.
+    - **RandomForestClassifier** (weight 0.20) — bagged trees.
 
-    All tree models are wrapped in CalibratedClassifierCV(method="isotonic")
-    to ensure well-calibrated predict_proba outputs.
+    GaussianNB is intentionally removed: at typical positive rates of 1–5 %
+    it dominates the soft vote with extreme probabilities and degrades calibration.
+
+    Regressors (weighted average of predicted return)
+    -------------------------------------------------
+    - **HistGradientBoostingRegressor** (weight 0.40)
+    - **ExtraTreesRegressor** (weight 0.35)
+    - **Ridge** (weight 0.25)
+
+    Trained on the cost-aware realised return from ``triple_barrier_outcome``.
+    Only used if ``y_return`` is provided to ``fit()``.
+
+    Tree classifiers are wrapped in CalibratedClassifierCV(method="isotonic", cv=2)
+    for reliable probability estimates.  HistGradientBoosting is well-calibrated
+    by design and is not additionally wrapped.
     """
 
     def __init__(self, logger=None, use_calibration=True):
         self._logger          = logger
         self._use_calibration = use_calibration
         self._estimators      = _make_estimators(logger, use_calibration=use_calibration)
+        self._classifier_weights = list(CLASSIFIER_WEIGHTS)
         self._model           = VotingClassifier(
-            estimators=self._estimators, voting="soft"
+            estimators=self._estimators,
+            voting="soft",
+            weights=self._classifier_weights,
         )
         self._fitted        = False
         self._positive_rate = 0.0   # updated on every fit(); persisted via pickle
 
+        # Regression ensemble (trained when y_return is provided to fit())
+        self._regressors        = _make_regressors()
+        self._regressor_weights = list(REGRESSOR_WEIGHTS)
+        self._reg_fitted        = False
+
     # ── Training ──────────────────────────────────────────────────────────────
 
-    def fit(self, X, y):
-        """Fit the ensemble on training data (X, y)."""
+    def fit(self, X, y_class, y_return=None):
+        """
+        Fit the ensemble on training data.
+
+        Parameters
+        ----------
+        X        : np.ndarray of shape (n_samples, n_features)
+        y_class  : np.ndarray of shape (n_samples,) — binary classification labels.
+        y_return : np.ndarray or None — float regression targets (net return).
+                   When provided, the regression ensemble is also trained.
+        """
         # Record positive rate before fitting so it's available immediately.
-        if len(y) > 0:
-            self._positive_rate = float(np.mean(y == 1))
+        if len(y_class) > 0:
+            self._positive_rate = float(np.mean(y_class == 1))
 
-        self._model.fit(X, y)
-
-        # GaussianNB does not support class_weight; re-fit it with per-sample
-        # weights derived from class frequencies so it isn't dominated by the
-        # majority class (positive_rate ≈ 1–5 % produces extreme imbalance).
-        if "gnb" in self._model.named_estimators_:
-            classes, counts = np.unique(y, return_counts=True)
-            sw = np.ones(len(y), dtype=float)
-            if len(classes) == 2:
-                n = float(len(y))
-                for cls, cnt in zip(classes, counts):
-                    sw[y == cls] = n / (2.0 * float(cnt))
-            self._model.named_estimators_["gnb"].fit(X, y, sample_weight=sw)
-
+        self._model.fit(X, y_class)
         self._fitted = True
+
+        # Train regression ensemble when return targets are available.
+        if y_return is not None and len(y_return) >= MIN_REGRESSOR_SAMPLES:
+            self._reg_fitted = False
+            for name, reg in self._regressors:
+                try:
+                    reg.fit(X, y_return)
+                except Exception as exc:
+                    if self._logger:
+                        self._logger(f"[ensemble] regressor {name} fit failed: {exc}")
+            self._reg_fitted = True
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -375,7 +490,7 @@ class VoxEnsemble:
 
     def predict_with_confidence(self, X):
         """
-        Return per-model and aggregate probability estimates for *X*.
+        Return per-model and aggregate probability and return estimates for *X*.
 
         Parameters
         ----------
@@ -384,10 +499,13 @@ class VoxEnsemble:
         Returns
         -------
         dict
-            ``mean_proba``  — float in [0, 1]: average P(class=1).
-            ``std_proba``   — float: standard deviation across models.
-            ``n_agree``     — int: models with P(class=1) >= 0.5.
-            ``per_model``   — dict[str, float]: model_name -> P(class=1).
+            ``class_proba``        — float in [0, 1]: weighted P(class=1) (alias: ``mean_proba``).
+            ``mean_proba``         — same as ``class_proba`` (backward-compatible alias).
+            ``std_proba``          — float: std-dev of per-model probabilities.
+            ``n_agree``            — int: models with P(class=1) >= agree_threshold.
+            ``pred_return``        — float: weighted-average predicted net return (0.0 if regressors not trained).
+            ``return_dispersion``  — float: std-dev of regressor predictions (0.0 if unavailable).
+            ``per_model``          — dict[str, float]: model_name -> P(class=1).
 
         Raises
         ------
@@ -397,6 +515,8 @@ class VoxEnsemble:
             raise RuntimeError("VoxEnsemble.fit() must be called before inference.")
 
         X_arr  = np.atleast_2d(X)
+
+        # ── Classifier probabilities ──────────────────────────────────────────
         probas = {}
         for name, est in self._model.named_estimators_.items():
             try:
@@ -405,16 +525,41 @@ class VoxEnsemble:
                 p = 0.5
             probas[name] = p
 
-        vals    = list(probas.values())
-        mean_p  = float(np.mean(vals))
-        std_p   = float(np.std(vals))
-        n_agree = int(sum(1 for p in vals if p >= self._agree_threshold()))
+        # Use VotingClassifier's weighted prediction for the aggregate.
+        try:
+            mean_p = float(self._model.predict_proba(X_arr)[0, 1])
+        except Exception:
+            mean_p = float(np.mean(list(probas.values())))
+
+        std_p   = float(np.std(list(probas.values())))
+        n_agree = int(sum(1 for p in probas.values() if p >= self._agree_threshold()))
+
+        # ── Regression predictions ────────────────────────────────────────────
+        pred_return       = 0.0
+        return_dispersion = 0.0
+        if self._reg_fitted:
+            reg_preds  = []
+            reg_ws     = []
+            for (name, reg), w in zip(self._regressors, self._regressor_weights):
+                try:
+                    p = float(reg.predict(X_arr)[0])
+                    reg_preds.append(p)
+                    reg_ws.append(w)
+                except Exception:
+                    pass
+            if reg_preds:
+                total_w       = sum(reg_ws)
+                pred_return   = sum(p * w for p, w in zip(reg_preds, reg_ws)) / total_w
+                return_dispersion = float(np.std(reg_preds)) if len(reg_preds) > 1 else 0.0
 
         return {
-            "mean_proba": mean_p,
-            "std_proba":  std_p,
-            "n_agree":    n_agree,
-            "per_model":  probas,
+            "class_proba":       mean_p,   # v2 primary key
+            "mean_proba":        mean_p,   # backward-compat alias
+            "std_proba":         std_p,
+            "n_agree":           n_agree,
+            "pred_return":       pred_return,
+            "return_dispersion": return_dispersion,
+            "per_model":         probas,
         }
 
     def predict_with_confidence_batch(self, X):
@@ -427,30 +572,67 @@ class VoxEnsemble:
         Returns
         -------
         list[dict]
-            One dict per row with keys: mean_proba, std_proba, n_agree, per_model.
+            One dict per row with keys:
+            class_proba, mean_proba, std_proba, n_agree,
+            pred_return, return_dispersion, per_model.
         """
         if not self._fitted:
             raise RuntimeError("VoxEnsemble.fit() must be called before inference.")
         X = np.atleast_2d(X)
+        N = len(X)
+
+        # ── Classifier probabilities ──────────────────────────────────────────
         proba_per_model = {}
         for name, est in self._model.named_estimators_.items():
             try:
                 proba_per_model[name] = est.predict_proba(X)[:, 1].astype(float)
             except Exception:
-                proba_per_model[name] = np.full(len(X), 0.5, dtype=float)
+                proba_per_model[name] = np.full(N, 0.5, dtype=float)
+
         model_names = list(proba_per_model.keys())
-        arr    = np.stack([proba_per_model[m] for m in model_names], axis=1)  # (N, M)
-        means  = arr.mean(axis=1)
-        stds   = arr.std(axis=1)
-        agree_thr = self._agree_threshold()
-        agrees = (arr >= agree_thr).sum(axis=1)
+        arr         = np.stack([proba_per_model[m] for m in model_names], axis=1)  # (N, M)
+        stds        = arr.std(axis=1)
+        agree_thr   = self._agree_threshold()
+        agrees      = (arr >= agree_thr).sum(axis=1)
+
+        # VotingClassifier weighted predictions
+        try:
+            means = self._model.predict_proba(X)[:, 1].astype(float)
+        except Exception:
+            means = arr.mean(axis=1)
+
+        # ── Regression predictions (batch) ────────────────────────────────────
+        reg_preds_list = []   # list of (array_of_length_N, weight)
+        if self._reg_fitted:
+            for (name, reg), w in zip(self._regressors, self._regressor_weights):
+                try:
+                    preds = reg.predict(X).astype(float)
+                    reg_preds_list.append((preds, w))
+                except Exception:
+                    pass
+
+        if reg_preds_list:
+            total_rw = sum(w for _, w in reg_preds_list)
+            pred_returns = sum(p * w for p, w in reg_preds_list) / total_rw
+            if len(reg_preds_list) > 1:
+                reg_arr       = np.stack([p for p, _ in reg_preds_list], axis=1)
+                ret_dispersions = reg_arr.std(axis=1)
+            else:
+                ret_dispersions = np.zeros(N)
+        else:
+            pred_returns    = np.zeros(N)
+            ret_dispersions = np.zeros(N)
+
         out = []
-        for i in range(len(X)):
+        for i in range(N):
             out.append({
-                "mean_proba": float(means[i]),
-                "std_proba":  float(stds[i]),
-                "n_agree":    int(agrees[i]),
-                "per_model":  {m: float(proba_per_model[m][i]) for m in model_names},
+                "class_proba":       float(means[i]),
+                "mean_proba":        float(means[i]),   # backward-compat
+                "std_proba":         float(stds[i]),
+                "n_agree":           int(agrees[i]),
+                "pred_return":       float(pred_returns[i]),
+                "return_dispersion": float(ret_dispersions[i]),
+                "per_model":         {m: float(proba_per_model[m][i]) for m in model_names},
             })
         return out
 
@@ -461,6 +643,11 @@ class VoxEnsemble:
         self._model         = saved._model
         self._fitted        = saved._fitted
         self._positive_rate = getattr(saved, "_positive_rate", 0.0)
+        # Load regression ensemble if it was saved (v2+).
+        # Older pickles without regressors default to unfitted state.
+        if getattr(saved, "_reg_fitted", False) and getattr(saved, "_regressors", None):
+            self._regressors    = saved._regressors
+            self._reg_fitted    = True
 
     def set_logger(self, logger):
         """Attach (or replace) the logger callable. Not persisted."""
@@ -506,9 +693,16 @@ def build_training_data(
     label_tp=None,
     label_sl=None,
     label_horizon_bars=None,
+    cost_bps=None,
 ):
     """
     Construct a labelled feature matrix from per-symbol state history.
+
+    Labels are **cost-aware**: a sample gets label 1 only if the TP barrier
+    is hit *and* the net return after estimated costs is positive.
+
+    Return targets (y_return) are the realised net-of-costs trade return at
+    each triple-barrier outcome — suitable for regression ensemble training.
 
     Parameters
     ----------
@@ -523,22 +717,29 @@ def build_training_data(
     label_tp              : float or None — TP fraction for labels; defaults to LABEL_TP.
     label_sl              : float or None — SL fraction for labels; defaults to LABEL_SL.
     label_horizon_bars    : int   or None — timeout bars for labels; defaults to LABEL_HORIZON_BARS.
+    cost_bps              : float or None — round-trip cost in basis points for label generation;
+                            defaults to LABEL_COST_BPS.
 
     Returns
     -------
-    tuple[np.ndarray, np.ndarray] or (None, None)
-        (X, y) arrays of shape (n_samples, n_features) and (n_samples,).
+    tuple[np.ndarray, np.ndarray, np.ndarray] or (None, None, None)
+        (X, y_class, y_return) arrays:
+        - X        : shape (n_samples, n_features)
+        - y_class  : shape (n_samples,) int — cost-aware binary labels
+        - y_return : shape (n_samples,) float — realised net return at barrier
     """
     # Use dedicated label params so training targets are decoupled from execution.
     _label_tp      = label_tp           if label_tp           is not None else LABEL_TP
     _label_sl      = label_sl           if label_sl           is not None else LABEL_SL
     _label_horizon = label_horizon_bars if label_horizon_bars is not None else LABEL_HORIZON_BARS
+    _cost_bps      = cost_bps           if cost_bps           is not None else LABEL_COST_BPS
+    cost_fraction  = _cost_bps * 1e-4
 
     btc_sym = next(
         (s for s in symbols if s.value.upper().startswith("BTC")), None
     )
 
-    X_rows, y_rows = [], []
+    X_rows, y_rows, r_rows = [], [], []
 
     for sym in symbols:
         st = state_dict.get(sym)
@@ -570,44 +771,60 @@ def build_training_data(
             if feat is None:
                 continue
 
-            label = triple_barrier_label(
-                prices       = closes[i : i + _label_horizon + 1],
-                tp           = _label_tp,
-                sl           = _label_sl,
-                timeout_bars = _label_horizon,
+            label, realized_return = triple_barrier_outcome(
+                prices        = closes[i : i + _label_horizon + 1],
+                tp            = _label_tp,
+                sl            = _label_sl,
+                timeout_bars  = _label_horizon,
+                cost_fraction = cost_fraction,
             )
             X_rows.append(feat)
             y_rows.append(label)
+            r_rows.append(realized_return)
 
     if not X_rows:
         algorithm.log("[training] build_training_data: no usable rows")
-        return None, None
+        return None, None, None
 
     if len(X_rows) > MAX_TRAIN_SAMPLES:
         rng = np.random.default_rng(42)
         idx = np.sort(rng.choice(len(X_rows), MAX_TRAIN_SAMPLES, replace=False))
         X_rows = np.array(X_rows, dtype=float)[idx]
         y_rows = np.array(y_rows, dtype=int)[idx]
+        r_rows = np.array(r_rows, dtype=float)[idx]
         algorithm.log(
             f"[training] Subsampled to {MAX_TRAIN_SAMPLES} rows (from larger pool)."
         )
 
-    X = np.array(X_rows, dtype=float)
-    y = np.array(y_rows, dtype=int)
+    X        = np.array(X_rows, dtype=float)
+    y_class  = np.array(y_rows, dtype=int)
+    y_return = np.array(r_rows, dtype=float)
     algorithm.log(
         f"[training] Dataset: {X.shape[0]} samples, "
         f"{X.shape[1]} features, "
-        f"positive_rate={float(y.mean()):.3f}"
+        f"positive_rate={float(y_class.mean()):.3f} "
+        f"mean_return={float(y_return.mean()):.4f} "
+        f"cost_bps={_cost_bps}"
     )
-    return X, y
+    return X, y_class, y_return
 
 
-def walk_forward_train(ensemble, X, y):
+def walk_forward_train(ensemble, X, y_class, y_return=None):
     """Fit *ensemble* on the full dataset.
+
+    Trains both the classifier ensemble and (when y_return is provided) the
+    regression ensemble.
 
     NOTE: the prior walk-forward CV scoring loop was removed because it
     multiplied training cost by ~5× and was diagnostic-only. To re-enable
     CV scoring during research, set VOX_ENABLE_CV=True at module level.
+
+    Parameters
+    ----------
+    ensemble  : VoxEnsemble
+    X         : np.ndarray of shape (n_samples, n_features)
+    y_class   : np.ndarray of shape (n_samples,) — binary classification labels.
+    y_return  : np.ndarray or None — float regression targets.
     """
     np.random.seed(42)
 
@@ -617,7 +834,7 @@ def walk_forward_train(ensemble, X, y):
             fold_scores = []
             for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
                 X_tr, X_te = X[train_idx], X[test_idx]
-                y_tr, y_te = y[train_idx], y[test_idx]
+                y_tr, y_te = y_class[train_idx], y_class[test_idx]
                 if len(np.unique(y_tr)) < 2:
                     continue
                 ensemble.fit(X_tr, y_tr)
@@ -634,6 +851,6 @@ def walk_forward_train(ensemble, X, y):
             if hasattr(ensemble, "_logger") and ensemble._logger:
                 ensemble._logger(f"[training] CV scoring failed: {exc}")
 
-    if len(np.unique(y)) >= 2:
-        ensemble.fit(X, y)
+    if len(np.unique(y_class)) >= 2:
+        ensemble.fit(X, y_class, y_return=y_return)
     return ensemble
