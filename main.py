@@ -44,6 +44,9 @@ MAX_DAILY_SL  = 2       # halt new entries for the day after this many SL hits
 COOLDOWN_MINS = 15      # minutes to wait after any exit before re-entering
 CASH_BUFFER   = 0.99   # keep 1 % cash headroom for fees/rounding at entry
 QTY_PRECISION = 6      # decimal places for lot-size flooring (Kraken min lots)
+# Safety buffer lots subtracted from the sell quantity to absorb fee/rounding
+# precision mismatch between portfolio.quantity and the CashBook balance.
+EXIT_QTY_BUFFER_LOTS = 1
 
 
 class KrakenTopCoinAlgorithm(QCAlgorithm):
@@ -263,8 +266,66 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
 
     # ── Exit logic ────────────────────────────────────────────────────────────
 
+    def _safe_sell_qty(self, sym):
+        """
+        Return a safe sell quantity that will not exceed the actual CashBook
+        balance for the base currency.
+
+        In Kraken cash mode, ``portfolio[sym].quantity`` can be slightly higher
+        than the exchangeable base-currency balance after fees/rounding.
+        Selling the raw portfolio quantity therefore causes an INVALID order.
+
+        This helper takes the minimum of the portfolio holding and the CashBook
+        amount, floors to ``QTY_PRECISION`` decimal places (as an approximation
+        of the exchange lot size), then subtracts one unit at that precision as
+        a safety buffer.
+
+        Returns 0.0 when the position is dust / non-actionable.
+        """
+        portfolio_qty = float(self.portfolio[sym].quantity)
+        if portfolio_qty <= 0:
+            return 0.0
+
+        # Determine base currency
+        base_ccy = None
+        try:
+            base_ccy = str(
+                self.securities[sym].symbol_properties.base_currency
+            )
+        except Exception:
+            pass
+
+        if not base_ccy:
+            sym_val = sym.value.upper()
+            for suffix in ("USDT", "USDC", "USD", "EUR", "BTC", "ETH"):
+                if sym_val.endswith(suffix):
+                    base_ccy = sym_val[: -len(suffix)]
+                    break
+
+        cash_qty = portfolio_qty   # default: trust portfolio
+        if base_ccy:
+            try:
+                cash_qty = float(
+                    self.portfolio.cash_book[base_ccy].amount
+                )
+            except Exception:
+                pass
+
+        # Sellable = min(portfolio, cash balance)
+        sellable = min(portfolio_qty, cash_qty)
+
+        # Floor to QTY_PRECISION decimal places and subtract one unit buffer
+        precision_factor = 10 ** QTY_PRECISION
+        sellable         = int(sellable * precision_factor) / precision_factor
+        safety_buffer_qty = 1.0 / precision_factor
+        sellable = sellable - safety_buffer_qty
+
+        if sellable <= 0:
+            return 0.0
+        return float(sellable)
+
     def _check_exit(self, price):
-        """Evaluate TP / SL / timeout; submit a market sell for actual qty."""
+        """Evaluate TP / SL / timeout; submit a market sell for safe qty."""
         # Capture local references BEFORE placing any order.
         # market_order() can fill synchronously in QuantConnect/LEAN and
         # on_order_event may clear self._pos_sym before this function returns,
@@ -290,8 +351,11 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if not reason:
             return
 
-        # Use the actual portfolio quantity — never an assumed target size
-        qty = self.portfolio[sym].quantity
+        # Safe sell quantity — guards against CashBook / portfolio precision
+        # mismatch in Kraken cash mode.  Submitting portfolio.quantity verbatim
+        # can cause an INVALID order when the CashBook balance is slightly lower
+        # after fees/rounding.
+        qty = self._safe_sell_qty(sym)
         if qty > 0:
             self._exiting = True   # suppress duplicate exit attempts
             # Log BEFORE market_order — fill may be synchronous.
@@ -303,10 +367,12 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
             if reason == "EXIT_SL":
                 self._daily_sl += 1
         else:
-            # Portfolio already flat; state was stale — clean it up
+            # Dust position or portfolio already flat — clear stale state
+            portfolio_qty = float(self.portfolio[sym].quantity)
             self.debug(
-                f"EXIT {sym.value}: portfolio qty=0,"
-                f" clearing stale state"
+                f"EXIT {sym.value}: safe sell qty=0 (dust/flat),"
+                f" portfolio_qty={portfolio_qty:.8f}  reason={reason}"
+                f" — clearing state"
             )
             self._pos_sym    = None
             self._entry_px   = 0.0
