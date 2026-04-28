@@ -19,26 +19,26 @@ STOP_LOSS            = 0.015   # −1.5 %  close long on loss  (wider to avoid n
 TIMEOUT_HOURS        = 6.0     # close after this many hours regardless
 ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
 ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.55    # minimum class_proba to open a position (upper clamp)
+SCORE_MIN            = 0.50    # minimum class_proba to open a position (upper clamp) — balanced default
 SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
 SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
 SCORE_GAP            = 0.02    # probability gap: required lead of top coin over runner-up (mean_proba units)
-MAX_DISPERSION       = 0.15    # max std_proba across models (tightened from 0.30)
-MIN_AGREE            = 3       # min models with proba >= agree_thr (3 of 4 models)
+MAX_DISPERSION       = 0.22    # max std_proba across models — relaxed default (was 0.15)
+MIN_AGREE            = 2       # min models with proba >= agree_thr — relaxed default (was 3)
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
 KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
 MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
 USE_KELLY            = True    # set False to use flat ALLOCATION
-MAX_DAILY_SL         = 1       # halt new entries after this many SL hits per day
-COOLDOWN_MINS        = 30      # minutes to wait after any exit before re-entering
+MAX_DAILY_SL         = 2       # halt new entries after this many SL hits per day — relaxed default (was 1)
+COOLDOWN_MINS        = 20      # minutes to wait after any exit before re-entering — relaxed default (was 30)
 SL_COOLDOWN_MINS     = 60      # per-coin cooldown specifically after an SL exit
 MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops > 8 %
 CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
 EXIT_QTY_BUFFER_LOTS = 1       # safety lots subtracted from sell qty to absorb fee/rounding
-COST_BPS             = 50      # estimated round-trip fee+slippage in basis points (0.50 %)
-MIN_EV               = 0.004   # minimum expected-value (return fraction) after costs: 0.004 = 0.4 %
-EV_GAP               = 0.00025 # required EV lead of top coin over second-best (return fraction units): 0.00025 = 0.025 %
-PRED_RETURN_MIN      = 0.003   # minimum predicted return from regression ensemble: 0.003 = 0.3 %
+COST_BPS             = 35      # estimated round-trip fee+slippage in basis points (0.35 %) — relaxed default (was 50)
+MIN_EV               = 0.001   # minimum expected-value (return fraction) after costs: 0.001 = 0.1 % — relaxed default (was 0.004)
+EV_GAP               = 0.0001  # required EV lead of top coin over second-best (return fraction units) — relaxed default (was 0.00025)
+PRED_RETURN_MIN      = -0.0005 # regression veto: block only clearly bad predicted returns — relaxed default (was 0.003)
 MIN_HOLD_MINUTES     = 15      # suppress ordinary TP/SL/timeout exits before this many minutes
 EMERGENCY_SL         = 0.030   # allow early exit (before min hold) only if loss exceeds this: 3.0 %
 CONSERVATIVE_MODE    = False   # when True, applies stricter gates without manual per-param override
@@ -49,7 +49,9 @@ RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
 DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
 WARMUP_DAYS          = 90      # bars of history needed before trading
 MAX_HISTORY_BARS     = 30000   # safety cap on history bars fetched per symbol (~104 days @ 5m)
-SKIP_DIAG_INTERVAL_SECS = 3600 # routine skip diagnostics logged at most once per hour
+SKIP_DIAG_INTERVAL_SECS = 21600 # routine skip diagnostics logged at most once per 6 hours
+DIAG_INTERVAL_HOURS  = 6       # no-candidate summary logged at most once every N hours
+MIN_RETRAIN_INTERVAL_HOURS = 20 # skip scheduled retrain if initial/last retrain was within this many hours
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vox — ML Ensemble Kraken Rotation Strategy
@@ -140,21 +142,28 @@ class VoxAlgorithm(QCAlgorithm):
         self._label_cost_bps = float(self.get_parameter("label_cost_bps")    or LABEL_COST_BPS)
 
         # ── Conservative mode: apply stricter gates in one switch ─────────────
-        # When enabled, overrides specific parameters to their conservative
+        # When enabled, overrides specific parameters to strict research-grade
         # values without requiring the user to set each one manually.
+        # Conservative overrides restore the original Vox v2 defaults
+        # (score_min=0.55, max_dispersion=0.15, min_agree=3, min_ev=0.004,
+        #  pred_return_min=0.003, cost_bps=50) which are deliberately relaxed
+        # in normal mode to allow trading under reasonable market conditions.
         _cm_raw = self.get_parameter("conservative_mode")
         self._conservative_mode = (
             str(_cm_raw).lower() in ("true", "1", "yes")
         ) if _cm_raw else CONSERVATIVE_MODE
         if self._conservative_mode:
-            self._s_min          = max(self._s_min,          0.60)
-            self._max_disp       = min(self._max_disp,        0.12)
-            self._min_agr        = max(self._min_agr,         4)
-            self._min_ev         = max(self._min_ev,          0.005)
-            self._tp             = max(self._tp,              0.035)
-            self._sl             = max(self._sl,              0.020)
-            self._min_hold_minutes = max(self._min_hold_minutes, 20)
-            self._pred_return_min  = max(self._pred_return_min,  0.005)
+            self._s_min            = max(self._s_min,            0.55)
+            self._max_disp         = min(self._max_disp,          0.15)
+            self._min_agr          = max(self._min_agr,           3)
+            self._min_ev           = max(self._min_ev,            0.004)
+            self._cost_bps         = max(self._cost_bps,          50.0)
+            self._pred_return_min  = max(self._pred_return_min,   0.003)
+            self._max_sl           = min(self._max_sl,            1)
+            self._cd_mins          = max(self._cd_mins,           30)
+            self._tp               = max(self._tp,                0.035)
+            self._sl               = max(self._sl,                0.020)
+            self._min_hold_minutes = max(self._min_hold_minutes,  20)
             self.log("[vox] Conservative mode enabled: stricter gate overrides applied.")
 
         # ── Universe ──────────────────────────────────────────────────────────
@@ -246,6 +255,11 @@ class VoxAlgorithm(QCAlgorithm):
         # suppressed unless at least SKIP_DIAG_INTERVAL_SECS have passed since the
         # last one, to prevent QuantConnect log rate-limiting.
         self._last_skip_diag_time = None
+        # No-candidate summary throttle (logged at most every DIAG_INTERVAL_HOURS).
+        self._last_nocandidate_diag_time = None
+        # Last completed retrain time (used to suppress duplicate retrains shortly
+        # after the initial train or a recent scheduled retrain).
+        self._last_retrain_time = None
 
         # ── Warm-up ───────────────────────────────────────────────────────────
         self.set_warm_up(timedelta(days=WARMUP_DAYS))
@@ -747,12 +761,13 @@ class VoxAlgorithm(QCAlgorithm):
         ))
         agree_thr     = self._ensemble._agree_threshold()
 
-        # Per-gate pass counters for diagnostics
+        # Per-gate pass counters and best-candidate values for diagnostics
         n_pass_disp     = 0
         n_pass_agree    = 0
         n_pass_score    = 0
         n_pass_ev       = 0
         n_pass_pred_ret = 0
+        _best_ev_diag   = float("-inf")   # best ev_after_costs seen (for diagnostics)
 
         for (sym, _), conf in zip(candidates, confs):
             class_proba   = conf["class_proba"]    # weighted VotingClassifier probability
@@ -793,6 +808,9 @@ class VoxAlgorithm(QCAlgorithm):
                 - (1.0 - class_proba) * sl_use
                 - cost_fraction
             )
+            # Track best EV seen (for no-candidate diagnostics)
+            if ev_after_costs > _best_ev_diag:
+                _best_ev_diag = ev_after_costs
 
             if ev_after_costs <= self._min_ev:
                 continue   # negative edge after costs — skip
@@ -836,12 +854,20 @@ class VoxAlgorithm(QCAlgorithm):
                 f" tp={top_tp:.4f} sl={top_sl:.4f}"
             )
         else:
-            # Throttle to once per hour to protect the log cap
-            if self.time.minute == 0:
+            # Throttle no-candidate summary to at most once per DIAG_INTERVAL_HOURS
+            # to protect QuantConnect's 100KB log cap during multi-year backtests.
+            _emit_diag = (
+                self._last_nocandidate_diag_time is None
+                or (self.time - self._last_nocandidate_diag_time).total_seconds()
+                   >= DIAG_INTERVAL_HOURS * 3600
+            )
+            if _emit_diag:
+                self._last_nocandidate_diag_time = self.time
                 best_proba  = max(c["class_proba"] for c in confs)
                 best_nagree = max(c["n_agree"]     for c in confs)
                 best_std    = min(c["std_proba"]   for c in confs)
                 best_pred   = max(c["pred_return"] for c in confs)
+                best_ev_str = f"{_best_ev_diag:.5f}" if _best_ev_diag > float("-inf") else "n/a"
                 self.log(
                     f"[diag] eval={len(candidates)} "
                     f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} "
@@ -849,6 +875,7 @@ class VoxAlgorithm(QCAlgorithm):
                     f"pass_pred_ret={n_pass_pred_ret} "
                     f"best_proba={best_proba:.3f} best_agree={best_nagree} "
                     f"best_disp={best_std:.3f} best_pred_ret={best_pred:.5f} "
+                    f"best_ev={best_ev_str} "
                     f"(thresh: score>={score_min_eff:.3f} "
                     f"agree>={self._min_agr} disp<={self._max_disp} "
                     f"ev>{self._min_ev:.5f} pred_ret>={self._pred_return_min:.5f} "
@@ -999,6 +1026,22 @@ class VoxAlgorithm(QCAlgorithm):
 
     def _retrain(self):
         """Weekly retrain on all accumulated history.  Saves model to ObjectStore."""
+        # Skip during warmup — _initial_train() handles the first fit after warmup.
+        if self.is_warming_up:
+            return
+
+        # Avoid duplicate retrain shortly after the initial train or a recent
+        # scheduled retrain.  Skip if the last retrain completed within
+        # MIN_RETRAIN_INTERVAL_HOURS hours.
+        if self._last_retrain_time is not None:
+            elapsed_h = (self.time - self._last_retrain_time).total_seconds() / 3600.0
+            if elapsed_h < MIN_RETRAIN_INTERVAL_HOURS:
+                self.debug(
+                    f"[vox] Scheduled retrain skipped: last retrain was"
+                    f" {elapsed_h:.1f}h ago (min={MIN_RETRAIN_INTERVAL_HOURS}h)"
+                )
+                return
+
         self.log("[vox] Starting scheduled retrain …")
         timeout_bars = int(self._toh * 60 / DECISION_INTERVAL_MIN)
 
@@ -1024,6 +1067,7 @@ class VoxAlgorithm(QCAlgorithm):
             self._model_ready = self._ensemble.is_fitted
             self._persistence.save_model(self._ensemble)
             reg_trained = getattr(self._ensemble, "_reg_fitted", False)
+            self._last_retrain_time = self.time
             self.log(
                 f"[vox] Retrain complete. Samples={len(X)}, fitted={self._model_ready}"
                 f", reg_fitted={reg_trained}"
