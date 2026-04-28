@@ -366,6 +366,178 @@ naive likelihood.
 
 ---
 
+## Safe Crypto Exit Quantity (CashBook Fix)
+
+### Problem
+
+In Kraken cash-mode backtests (and live), `portfolio[sym].quantity` can be
+**slightly larger** than the actual base-currency `CashBook` balance after
+fees and rounding (e.g. `portfolio.quantity = 202.509` while
+`cash_book["OP"].amount = 201.962`).  Selling the raw portfolio quantity
+submits an order larger than the exchangeable balance and QuantConnect rejects
+it with:
+
+```
+Order Error: Insufficient buying power to complete orders
+Reason: Your portfolio holds 201.96198993 OP … but your Sell order is for
+202.50936 OP.  Cash Modeling trading does not permit short holdings …
+```
+
+Without a fix, `on_order_event(INVALID)` clears `_exiting = False` and the
+algo retries every minute with the *same invalid quantity*, spamming order
+errors for the rest of the backtest.
+
+### Fix — `OrderHelper.safe_crypto_sell_qty()` (Vox/infra.py)
+
+```python
+qty = OrderHelper.safe_crypto_sell_qty(
+    self, sym, lot_size, min_order_size,
+    exit_qty_buffer_lots=1,
+)
+```
+
+Logic:
+1. Read `portfolio[sym].quantity` (the tracked holding).
+2. Determine the **base currency** — first from
+   `securities[sym].symbol_properties.base_currency`; if unavailable, strip
+   a known quote suffix (`USD`, `USDT`, `USDC`, `EUR`, `BTC`, `ETH`).
+3. Read the actual `portfolio.cash_book[base_ccy].amount` (the real balance).
+4. Take `min(portfolio_qty, cash_qty)` — never sell more than actually held.
+5. Floor to `lot_size`, then subtract `exit_qty_buffer_lots × lot_size` as an
+   extra precision/fee margin (default: 1 lot).
+6. If the result is zero or below `min_order_size`, return `0.0` (dust).
+
+When `safe_crypto_sell_qty` returns `0.0`, `_check_exit()` clears position
+state immediately (`_risk.record_exit()` is called so cooldowns apply) instead
+of submitting an invalid order.
+
+### INVALID exit retry throttling
+
+`on_order_event(INVALID)` for an EXIT order now:
+1. Increments `_exit_retry_count`.
+2. Recomputes `safe_crypto_sell_qty`.
+3. If `safe_qty == 0` **or** `retry_count >= MAX_EXIT_RETRY_COUNT (3)`,
+   records the exit via `_risk.record_exit()` and clears all position state.
+4. Otherwise clears `_exiting = False` to allow one more retry.
+
+This eliminates the unbounded retry/spam loop described in the problem report.
+
+The same `_safe_sell_qty()` helper is applied to the root `main.py`
+`_check_exit()` (inline, since `main.py` does not import `infra`).
+
+---
+
+## Profit-Aware EV Ranking
+
+### Why raw probability is insufficient
+
+A trade with `mean_proba = 0.30` but a large ATR-derived TP (`tp = 0.05`)
+and a tight SL (`sl = 0.015`) has **positive expected value** even though the
+classifier "expects" a loss 70 % of the time.  Conversely, a trade with
+`mean_proba = 0.55` but `tp < sl` can have *negative* edge.  Ranking purely
+on `mean_proba` ignores this asymmetry.
+
+### EV scoring formula
+
+For each candidate passing the confidence gates, Vox computes:
+
+```text
+gross_ev       = mean_proba × tp_use − (1 − mean_proba) × sl_use
+ev_after_costs = gross_ev − COST_BPS × 1e-4
+confidence_adj = max(0, 1 − std_proba)
+entry_score    = ev_after_costs × confidence_adj
+```
+
+where:
+
+| Term | Description |
+|------|-------------|
+| `tp_use`, `sl_use` | Per-candidate ATR-based TP/SL (or fixed fallback) |
+| `COST_BPS` | Estimated round-trip fee + slippage in basis points (default 20 bps) |
+| `confidence_adj` | Multiplier in [0, 1]: reduces score when models strongly disagree |
+
+Candidates are then **ranked by `entry_score`** rather than raw `mean_proba`,
+and only candidates with `ev_after_costs > MIN_EV` (default 0.0) are
+considered.
+
+### Parameters
+
+| Parameter / Constant | Default | Description |
+|----------------------|---------|-------------|
+| `COST_BPS` / `cost_bps` | `20` | Estimated round-trip fee+slippage in bps |
+| `MIN_EV` / `min_ev` | `0.0` | Minimum EV after costs to enter |
+| `EXIT_QTY_BUFFER_LOTS` / `exit_qty_buffer_lots` | `1` | Safety lot buffer on exits |
+
+### Diagnostics
+
+Every time candidates pass all gates the following is logged:
+
+```
+[diag] candidates=3 top=OPUSD ev_score=0.00412 ev_gap=0.00201
+       mean_p=0.287 std_p=0.081 n_agree=3 tp=0.0245 sl=0.0147
+```
+
+When no candidate passes, the hourly diagnostic log shows how many failed
+each gate:
+
+```
+[diag] eval=18 pass_disp=12 pass_agree=10 pass_score=3 pass_ev=0
+       best_mean=0.183 ... (thresh: score>=0.150 agree>=1 disp<=0.30 ev>0.00000 cost=0.0020)
+```
+
+This helps tune `MIN_EV`, `COST_BPS`, and the confidence gates without
+flooding logs.
+
+### Overfitting warning
+
+> **Maximising backtest profit can overfit.**  The EV scoring parameters
+> (`COST_BPS`, `MIN_EV`, `SCORE_GAP`) and the ensemble hyper-parameters
+> should be validated on **out-of-sample** data or via walk-forward testing.
+> Conservative defaults are provided; tighten them only when out-of-sample
+> metrics support it.
+
+---
+
+## Tuning Guidance and Validation Metrics
+
+### Recommended validation metrics
+
+| Metric | Target / Notes |
+|--------|---------------|
+| **Total return** | Primary objective; compare to buy-and-hold BTC |
+| **Maximum drawdown** | Keep below 15–20 % for comfort |
+| **Sharpe ratio** | > 1.0 is reasonable for crypto daily; annualised |
+| **Sortino ratio** | Penalises downside vol only; more relevant than Sharpe for skewed crypto returns |
+| **Profit factor** | Gross profit / gross loss; > 1.5 is healthy |
+| **Trade count / turnover** | Low trade count → unreliable stats; aim for > 30 trades per test window |
+| **Fees/slippage drag** | Compare net vs gross returns; if drag > 20 % of gross, reduce `COST_BPS` default |
+| **Precision @ top-K** | Fraction of entries that hit TP; should beat the positive_rate base-rate |
+| **Brier score / calibration** | If `mean_proba` is well-calibrated, 0.3 should mean ~30 % win rate |
+
+### Walk-forward validation
+
+1. Split the data: e.g. train on 2024, test on 2025.
+2. Re-train the ensemble on the train window only (set `VOX_ENABLE_CV=True`
+   for fold-level diagnostics).
+3. Run the full backtest on the test window with the pre-trained model
+   (load via ObjectStore or inline).
+4. Only accept parameter changes that improve **test-window** metrics.
+
+### Parameter tuning order
+
+1. `LABEL_TP`, `LABEL_SL`, `LABEL_HORIZON_BARS` — control the training
+   target.  Looser barriers increase positive rate but may not align with
+   live execution TP/SL.
+2. `SCORE_MIN`, `MIN_AGREE`, `MAX_DISPERSION` — confidence gates; loosen if
+   trade count is very low; tighten if precision is poor.
+3. `COST_BPS`, `MIN_EV` — EV filter; increase `COST_BPS` to account for
+   actual Kraken fees (0.16–0.26 % maker/taker per side = 32–52 bps round trip).
+4. `ATR_TP_MULT`, `ATR_SL_MULT` — trade geometry; a higher ratio improves
+   Kelly edge but reduces win rate.
+5. `KELLY_FRAC`, `MAX_ALLOC` — position sizing; use quarter-Kelly or lower.
+
+---
+
 ## Future Work
 
 - **Meta-labeling** — Train a secondary binary classifier on the primary
@@ -377,6 +549,8 @@ naive likelihood.
 - **Online learning** — Use incremental model updates (e.g. `partial_fit` on
   PassiveAggressiveClassifier) to adapt to regime shifts without a full weekly
   retrain.
-- **Transaction cost model** — Incorporate Kraken's maker/taker fee schedule
-  into the sizing calculation to avoid entering trades where expected value
-  is negative after fees.
+- **Regression head** — A lightweight forward-return regressor combined with
+  the classifier EV could further improve entry quality.  The current EV
+  scoring layer (using classifier probability and ATR TP/SL) serves as the
+  profit-aware substitute until a regression head is feasible without a large
+  rewrite.

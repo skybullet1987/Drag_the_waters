@@ -161,6 +161,84 @@ class OrderHelper:
         """Return False if *qty* is below the exchange minimum order size."""
         return qty >= min_order_size
 
+    @staticmethod
+    def safe_crypto_sell_qty(algorithm, sym, lot_size, min_order_size,
+                             exit_qty_buffer_lots=1):
+        """
+        Compute a safe sell quantity for a crypto cash-mode position.
+
+        In Kraken cash-mode the ``portfolio[sym].quantity`` can exceed the
+        actual base-currency ``CashBook`` balance after fees/rounding.
+        Submitting a sell for ``portfolio.quantity`` therefore causes an
+        ``INVALID`` order ("insufficient buying power / short not allowed").
+
+        This helper returns the *minimum* of the portfolio holding and the
+        CashBook balance, floored to ``lot_size``, then optionally reduced by
+        ``exit_qty_buffer_lots`` lots as a precision/fee safety margin.
+
+        Parameters
+        ----------
+        algorithm             : QCAlgorithm
+        sym                   : Symbol
+        lot_size              : float  — from OrderHelper.get_lot_size()
+        min_order_size        : float  — from OrderHelper.get_min_order_size()
+        exit_qty_buffer_lots  : int    — lot units reserved as dust buffer
+                                         (default 1).
+
+        Returns
+        -------
+        float
+            Safe sell quantity ≥ min_order_size, or 0.0 when the remaining
+            position is too small to sell (treated as non-actionable dust).
+        """
+        # Current portfolio holding
+        portfolio_qty = float(algorithm.portfolio[sym].quantity)
+        if portfolio_qty <= 0:
+            return 0.0
+
+        # ── Determine base currency ───────────────────────────────────────────
+        base_ccy = None
+        try:
+            base_ccy = str(
+                algorithm.securities[sym].symbol_properties.base_currency
+            )
+        except Exception:
+            pass
+
+        if not base_ccy:
+            # Fallback: strip well-known quote suffixes from the symbol value.
+            sym_val = sym.value.upper()
+            for suffix in ("USDT", "USDC", "USD", "EUR", "BTC", "ETH"):
+                if sym_val.endswith(suffix):
+                    base_ccy = sym_val[: -len(suffix)]
+                    break
+
+        # ── CashBook balance for the base currency ────────────────────────────
+        cash_qty = portfolio_qty   # default: trust portfolio qty
+        if base_ccy:
+            try:
+                cash_qty = float(
+                    algorithm.portfolio.cash_book[base_ccy].amount
+                )
+            except Exception:
+                pass   # CashBook lookup failed — fall back to portfolio qty
+
+        # Sellable = min(portfolio holding, actual cash balance)
+        sellable = min(portfolio_qty, cash_qty)
+
+        # ── Floor to lot_size ─────────────────────────────────────────────────
+        if lot_size > 0:
+            sellable = math.floor(sellable / lot_size) * lot_size
+            # Subtract safety buffer (one or more lots) to absorb fee/rounding
+            buffer   = exit_qty_buffer_lots * lot_size
+            sellable = sellable - buffer
+
+        # Must be actionable
+        if sellable <= 0 or sellable < min_order_size:
+            return 0.0
+
+        return float(sellable)
+
 
 class PartialFillTracker:
     """

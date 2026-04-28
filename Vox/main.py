@@ -34,6 +34,10 @@ COOLDOWN_MINS        = 15      # minutes to wait after any exit before re-enteri
 SL_COOLDOWN_MINS     = 60      # per-coin cooldown specifically after an SL exit
 MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops > 8 %
 CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
+EXIT_QTY_BUFFER_LOTS = 1       # safety lots subtracted from sell qty to absorb fee/rounding
+COST_BPS             = 20      # estimated round-trip fee+slippage in basis points (0.20 %)
+MIN_EV               = 0.0     # minimum expected-value score (after costs) required to enter
+MAX_EXIT_RETRY_COUNT = 3       # max consecutive INVALID exit retries before treating as dust
 RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
 DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
 WARMUP_DAYS          = 90      # bars of history needed before trading
@@ -109,6 +113,11 @@ class VoxAlgorithm(QCAlgorithm):
         self._sl_cd    = int(self.get_parameter("sl_cooldown_mins")   or SL_COOLDOWN_MINS)
         self._max_dd   = float(self.get_parameter("max_dd_pct")       or MAX_DD_PCT)
         self._cb       = float(self.get_parameter("cash_buffer")      or CASH_BUFFER)
+        self._exit_qty_buffer = int(
+            self.get_parameter("exit_qty_buffer_lots") or EXIT_QTY_BUFFER_LOTS
+        )
+        self._cost_bps = float(self.get_parameter("cost_bps")         or COST_BPS)
+        self._min_ev   = float(self.get_parameter("min_ev")           or MIN_EV)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
@@ -177,15 +186,16 @@ class VoxAlgorithm(QCAlgorithm):
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
 
         # ── Position state — updated ONLY via on_order_event ──────────────────
-        self._pos_sym     = None    # confirmed open position symbol
-        self._entry_px    = 0.0     # confirmed entry fill price
-        self._entry_time  = None    # confirmed entry fill time
-        self._tp_dyn      = 0.0     # ATR-derived TP fraction for current trade
-        self._sl_dyn      = 0.0     # ATR-derived SL fraction for current trade
-        self._pending_sym = None    # symbol of in-flight entry order
-        self._pending_oid = None    # order ID of in-flight entry order
-        self._exiting     = False   # True while an exit order is in flight
-        self._exit_time   = None    # time of most recent completed exit
+        self._pos_sym          = None    # confirmed open position symbol
+        self._entry_px         = 0.0     # confirmed entry fill price
+        self._entry_time       = None    # confirmed entry fill time
+        self._tp_dyn           = 0.0     # ATR-derived TP fraction for current trade
+        self._sl_dyn           = 0.0     # ATR-derived SL fraction for current trade
+        self._pending_sym      = None    # symbol of in-flight entry order
+        self._pending_oid      = None    # order ID of in-flight entry order
+        self._exiting          = False   # True while an exit order is in flight
+        self._exit_time        = None    # time of most recent completed exit
+        self._exit_retry_count = 0       # consecutive INVALID exit retry counter
 
         # ── Warm-up ───────────────────────────────────────────────────────────
         self.set_warm_up(timedelta(days=WARMUP_DAYS))
@@ -373,11 +383,45 @@ class VoxAlgorithm(QCAlgorithm):
                 self._entry_time = None
 
             elif tag.startswith("EXIT") and sym == self._pos_sym:
-                self.debug(
-                    f"EXIT order {oid} for {sym.value} — status={order_event.status},"
-                    f" will retry"
+                self._exit_retry_count += 1
+                # Before allowing a retry, check if we can actually submit a
+                # valid sell.  In Kraken cash mode the portfolio holding can
+                # exceed the actual CashBook balance after fees; if the safe
+                # qty is zero/dust, clear state immediately instead of looping.
+                _sec      = self.securities[sym]
+                _lot_size = OrderHelper.get_lot_size(_sec)
+                _min_ord  = OrderHelper.get_min_order_size(_sec)
+                _safe_qty = OrderHelper.safe_crypto_sell_qty(
+                    self, sym, _lot_size, _min_ord,
+                    exit_qty_buffer_lots=self._exit_qty_buffer,
                 )
-                self._exiting = False
+                if _safe_qty <= 0 or self._exit_retry_count >= MAX_EXIT_RETRY_COUNT:
+                    # Dust position or retry cap hit — treat as non-actionable
+                    self.debug(
+                        f"EXIT order {oid} for {sym.value} —"
+                        f" status={order_event.status},"
+                        f" safe_qty={_safe_qty:.8f}"
+                        f" retry={self._exit_retry_count}"
+                        f" — clearing as dust"
+                    )
+                    is_sl = (tag == "EXIT_SL")
+                    self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
+                    self._pos_sym          = None
+                    self._entry_px         = 0.0
+                    self._entry_time       = None
+                    self._tp_dyn           = 0.0
+                    self._sl_dyn           = 0.0
+                    self._exiting          = False
+                    self._exit_time        = self.time
+                    self._exit_retry_count = 0
+                else:
+                    self.debug(
+                        f"EXIT order {oid} for {sym.value} —"
+                        f" status={order_event.status},"
+                        f" safe_qty={_safe_qty:.8f}"
+                        f" retry={self._exit_retry_count} — will retry"
+                    )
+                    self._exiting = False
 
     # ── Reconciliation ────────────────────────────────────────────────────────
 
@@ -470,9 +514,22 @@ class VoxAlgorithm(QCAlgorithm):
         if not reason:
             return
 
-        qty = self.portfolio[sym].quantity
+        # ── Safe sell quantity — guards against CashBook / portfolio mismatch ──
+        # In Kraken cash mode, portfolio[sym].quantity can exceed the actual
+        # base-currency CashBook balance after fees/rounding.  Submitting a
+        # sell for the raw quantity causes an INVALID order and an unbounded
+        # retry loop.  Use the min(portfolio, CashBook) with a lot-sized buffer.
+        sec      = self.securities[sym]
+        lot_size = OrderHelper.get_lot_size(sec)
+        min_ord  = OrderHelper.get_min_order_size(sec)
+        qty = OrderHelper.safe_crypto_sell_qty(
+            self, sym, lot_size, min_ord,
+            exit_qty_buffer_lots=self._exit_qty_buffer,
+        )
+
         if qty > 0:
-            self._exiting = True
+            self._exiting          = True
+            self._exit_retry_count = 0
             # Log BEFORE market_order() so we never dereference self._pos_sym
             # after a potential synchronous fill clears it.
             self.debug(
@@ -481,17 +538,23 @@ class VoxAlgorithm(QCAlgorithm):
             )
             self.market_order(sym, -qty, tag=reason)
         else:
-            # Portfolio already flat — clear stale state
+            # Portfolio is flat or remaining position is non-actionable dust.
+            portfolio_qty = float(self.portfolio[sym].quantity)
             self.debug(
-                f"EXIT {sym.value}: portfolio qty=0,"
-                f" clearing stale state"
+                f"EXIT {sym.value}: safe sell qty=0 (dust/flat),"
+                f" portfolio_qty={portfolio_qty:.8f}  reason={reason}"
+                f" — clearing state"
             )
-            self._pos_sym    = None
-            self._entry_px   = 0.0
-            self._entry_time = None
-            self._tp_dyn     = 0.0
-            self._sl_dyn     = 0.0
-            self._exit_time  = self.time
+            is_sl = (reason == "EXIT_SL")
+            self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
+            self._pos_sym          = None
+            self._entry_px         = 0.0
+            self._entry_time       = None
+            self._tp_dyn           = 0.0
+            self._sl_dyn           = 0.0
+            self._exiting          = False
+            self._exit_time        = self.time
+            self._exit_retry_count = 0
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
@@ -501,16 +564,31 @@ class VoxAlgorithm(QCAlgorithm):
 
         Gate pipeline (in order):
           1. Sufficient feature history
-          2. Ensemble confidence: mean_proba >= SCORE_MIN
-          3. Confidence gap to runner-up >= SCORE_GAP
-          4. Ensemble dispersion: std_proba <= MAX_DISPERSION
-          5. Model agreement: n_agree >= MIN_AGREE
-          6. Regime filter: 4h BTC SMA + slope
-          7. Risk manager: cooldown, daily SL cap, drawdown CB
-          8. Pre-trade validation: price > 0, cash, lot-size, min-order
+          2. Ensemble confidence: mean_proba >= score_min_eff (base-rate-aware)
+          3. Ensemble dispersion: std_proba <= MAX_DISPERSION
+          4. Model agreement: n_agree >= MIN_AGREE
+          5. EV gate: expected_value_after_costs > MIN_EV
+          6. Score gap to runner-up >= SCORE_GAP (on EV-adjusted score)
+          7. Regime filter: 4h BTC SMA + slope
+          8. Risk manager: cooldown, daily SL cap, drawdown CB
+          9. Pre-trade validation: price > 0, cash, lot-size, min-order
+
+        Candidates passing the confidence gates are ranked by a
+        profit-aware expected-value score:
+
+            gross_ev       = mean_proba × tp_use − (1 − mean_proba) × sl_use
+            ev_after_costs = gross_ev − COST_BPS × 1e-4
+            confidence_adj = max(0, 1 − std_proba)
+            entry_score    = ev_after_costs × confidence_adj
+
+        This ensures the algo prioritises trades with positive edge AFTER
+        estimated fees/slippage, weighted down when models strongly disagree.
         """
-        scores    = {}
-        conf_data = {}
+        scores    = {}   # sym -> entry_score (EV-adjusted)
+        conf_data = {}   # sym -> confidence dict from ensemble
+        tp_sl_data = {}  # sym -> (tp_use, sl_use, atr, price) for re-use
+
+        cost = self._cost_bps * 1e-4   # e.g. 20 bps = 0.0020
 
         btc_closes = (
             list(self._state[self._btc_sym]["closes"])
@@ -564,6 +642,7 @@ class VoxAlgorithm(QCAlgorithm):
         n_pass_disp  = 0
         n_pass_agree = 0
         n_pass_score = 0
+        n_pass_ev    = 0
 
         for (sym, _), conf in zip(candidates, confs):
             passed_disp  = conf["std_proba"]  <= self._max_disp
@@ -572,17 +651,58 @@ class VoxAlgorithm(QCAlgorithm):
             if passed_disp:  n_pass_disp  += 1
             if passed_agree: n_pass_agree += 1
             if passed_score: n_pass_score += 1
-            if passed_disp and passed_agree and passed_score:
-                scores[sym]    = conf["mean_proba"]
-                conf_data[sym] = conf
+            if not (passed_disp and passed_agree and passed_score):
+                continue
+
+            # ── Per-candidate ATR-based TP/SL for EV computation ─────────────
+            price = float(self.securities[sym].price)
+            if price <= 0:
+                continue
+            st  = self._state[sym]
+            atr = compute_atr(
+                highs  = list(st["highs"]),
+                lows   = list(st["lows"]),
+                closes = list(st["closes"]),
+            )
+            if atr > 0:
+                tp_use = (atr * self._atr_tp) / price
+                sl_use = (atr * self._atr_sl) / price
+            else:
+                tp_use = self._tp
+                sl_use = self._sl
+
+            # ── Expected-value scoring ────────────────────────────────────────
+            mean_p = conf["mean_proba"]
+            std_p  = conf["std_proba"]
+            gross_ev       = mean_p * tp_use - (1.0 - mean_p) * sl_use
+            ev_after_costs = gross_ev - cost
+            confidence_adj = max(0.0, 1.0 - std_p)
+            entry_score    = ev_after_costs * confidence_adj
+
+            if ev_after_costs <= self._min_ev:
+                continue   # negative edge after costs — skip
+            n_pass_ev += 1
+
+            scores[sym]     = entry_score
+            conf_data[sym]  = conf
+            tp_sl_data[sym] = (tp_use, sl_use, atr, price)
 
         if scores:
             ranked    = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-            top_sc    = ranked[0][1]
-            second_sc = ranked[1][1] if len(ranked) > 1 else 0.0
+            top_sym_d = ranked[0][0]
+            top_sc_d  = ranked[0][1]
+            second_sc_d = ranked[1][1] if len(ranked) > 1 else 0.0
+            top_cd    = conf_data[top_sym_d]
+            top_tp, top_sl, top_atr, top_px = tp_sl_data[top_sym_d]
             self.log(
-                f"[diag] candidates={len(scores)} top={top_sc:.3f} "
-                f"second={second_sc:.3f} gap={top_sc-second_sc:.3f}"
+                f"[diag] candidates={len(scores)}"
+                f" top={top_sym_d.value}"
+                f" ev_score={top_sc_d:.5f}"
+                f" ev_gap={top_sc_d-second_sc_d:.5f}"
+                f" mean_p={top_cd['mean_proba']:.3f}"
+                f" std_p={top_cd['std_proba']:.3f}"
+                f" n_agree={top_cd['n_agree']}"
+                f" tp={top_tp:.4f} sl={top_sl:.4f}"
             )
         else:
             # Throttle to once per hour to protect the log cap
@@ -592,9 +712,13 @@ class VoxAlgorithm(QCAlgorithm):
                 best_std    = min(c["std_proba"]  for c in confs)
                 self.log(
                     f"[diag] eval={len(candidates)} "
-                    f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} pass_score={n_pass_score} "
-                    f"best_mean={best_mean:.3f} best_agree={best_nagree} best_disp={best_std:.3f} "
-                    f"(thresh: score>={score_min_eff:.3f} agree>={self._min_agr} disp<={self._max_disp})"
+                    f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} "
+                    f"pass_score={n_pass_score} pass_ev={n_pass_ev} "
+                    f"best_mean={best_mean:.3f} best_agree={best_nagree} "
+                    f"best_disp={best_std:.3f} "
+                    f"(thresh: score>={score_min_eff:.3f} "
+                    f"agree>={self._min_agr} disp<={self._max_disp} "
+                    f"ev>{self._min_ev:.5f} cost={cost:.4f})"
                 )
 
         if not scores:
@@ -604,10 +728,11 @@ class VoxAlgorithm(QCAlgorithm):
         top_sym, top_sc = ranked[0]
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
+        # Gap check on EV-adjusted score (not raw mean_proba)
         if (top_sc - second_sc) < self._s_gap:
             self.debug(
-                f"[vox] Gap too small: top={top_sc:.3f}"
-                f"  second={second_sc:.3f}  gap={top_sc-second_sc:.3f}"
+                f"[vox] EV gap too small: top={top_sc:.5f}"
+                f"  second={second_sc:.5f}  gap={top_sc-second_sc:.5f}"
             )
             return
 
@@ -626,28 +751,12 @@ class VoxAlgorithm(QCAlgorithm):
             return
 
         # ── Pre-trade validation ───────────────────────────────────────────────
-        price = float(self.securities[top_sym].price)
-        if price <= 0:
-            self.debug(f"[vox] ENTRY skip {top_sym.value}: price={price} invalid")
-            return
+        tp_use, sl_use, atr, price = tp_sl_data[top_sym]
+        mean_proba_top = conf_data[top_sym]["mean_proba"]
 
-        # ATR-based dynamic TP/SL (fall back to fixed if insufficient data)
-        st    = self._state[top_sym]
-        atr   = compute_atr(
-            highs  = list(st["highs"]),
-            lows   = list(st["lows"]),
-            closes = list(st["closes"]),
-        )
-        if atr > 0 and price > 0:
-            tp_use = (atr * self._atr_tp) / price
-            sl_use = (atr * self._atr_sl) / price
-        else:
-            tp_use = self._tp
-            sl_use = self._sl
-
-        # Kelly / flat sizing
+        # Kelly / flat sizing (uses mean_proba and ATR TP/SL for Kelly edge)
         qty, alloc = compute_qty(
-            mean_proba      = top_sc,
+            mean_proba      = mean_proba_top,
             tp              = tp_use,
             sl              = sl_use,
             price           = price,
@@ -701,25 +810,36 @@ class VoxAlgorithm(QCAlgorithm):
         self._pending_oid = order.order_id
         self._fill_tracker.start_order(order.order_id, qty)
 
+        cost_frac = self._cost_bps * 1e-4
+        gross_ev  = mean_proba_top * tp_use - (1.0 - mean_proba_top) * sl_use
         self.debug(
-            f"ENTRY order {top_sym.value}  score={top_sc:.3f}"
+            f"ENTRY order {top_sym.value}"
+            f"  ev_score={top_sc:.5f}"
+            f"  gross_ev={gross_ev:.5f}"
+            f"  cost={cost_frac:.4f}"
+            f"  mean_p={mean_proba_top:.3f}"
+            f"  std_p={conf_data[top_sym]['std_proba']:.3f}"
+            f"  n_agree={conf_data[top_sym]['n_agree']}"
             f"  price={price:.4f}  qty={qty:.6f}"
             f"  alloc={alloc:.3f}  tp={tp_use:.4f}  sl={sl_use:.4f}"
         )
 
         # Log trade attempt to persistence
         self._persistence.log_trade({
-            "event":      "entry_attempt",
-            "time":       str(self.time),
-            "symbol":     top_sym.value,
-            "price":      price,
-            "qty":        qty,
-            "alloc":      alloc,
-            "mean_proba": top_sc,
-            "n_agree":    conf_data[top_sym]["n_agree"],
-            "std_proba":  conf_data[top_sym]["std_proba"],
-            "tp":         tp_use,
-            "sl":         sl_use,
+            "event":        "entry_attempt",
+            "time":         str(self.time),
+            "symbol":       top_sym.value,
+            "price":        price,
+            "qty":          qty,
+            "alloc":        alloc,
+            "mean_proba":   mean_proba_top,
+            "n_agree":      conf_data[top_sym]["n_agree"],
+            "std_proba":    conf_data[top_sym]["std_proba"],
+            "tp":           tp_use,
+            "sl":           sl_use,
+            "ev_score":     top_sc,
+            "gross_ev":     gross_ev,
+            "cost_bps":     self._cost_bps,
         })
 
     # ── Retrain ───────────────────────────────────────────────────────────────
