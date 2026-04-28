@@ -456,17 +456,46 @@ where:
 | `COST_BPS` | Estimated round-trip fee + slippage in basis points (default 20 bps) |
 | `confidence_adj` | Multiplier in [0, 1]: reduces score when models strongly disagree |
 
+All EV-related values (`gross_ev`, `ev_after_costs`, `entry_score`) are
+**return fractions**, not probabilities.  A value of `0.001` means a 0.1 %
+expected return; `0.01` means 1 %.  This is important when setting the EV
+thresholds: `MIN_EV = 0.0005` requires only a 0.05 % expected return, while
+`SCORE_GAP = 0.02` in probability units represents a 2 percentage-point
+probability lead — a very different magnitude.
+
 Candidates are then **ranked by `entry_score`** rather than raw `mean_proba`,
-and only candidates with `ev_after_costs > MIN_EV` (default 0.0) are
-considered.
+and only candidates with `ev_after_costs > min_ev` are considered.
+
+### EV gap selectivity
+
+After ranking, Vox requires the top candidate to lead the second-best by at
+least `ev_gap` in `entry_score`.  This controls **selectivity**, not trade
+validity: if the top EV is strongly positive and the second EV is nearly as
+good, both are acceptable trades — use a small `ev_gap` (or `0.0`) when you
+want the best available trade rather than holding out for a runaway winner.
+
+> **Important:** `ev_gap` is in **return-fraction units** (same as `entry_score`),
+> NOT probability units.  Using the probability gap threshold (`score_gap = 0.02`)
+> as an EV gap would require a 2 percentage-point EV advantage, which blocks
+> nearly all trades since typical EV scores are in the `0.001–0.02` range.
 
 ### Parameters
 
-| Parameter / Constant | Default | Description |
-|----------------------|---------|-------------|
-| `COST_BPS` / `cost_bps` | `20` | Estimated round-trip fee+slippage in bps |
-| `MIN_EV` / `min_ev` | `0.0` | Minimum EV after costs to enter |
-| `EXIT_QTY_BUFFER_LOTS` / `exit_qty_buffer_lots` | `1` | Safety lot buffer on exits |
+| Parameter / Constant | Default | Units | Description |
+|----------------------|---------|-------|-------------|
+| `COST_BPS` / `cost_bps` | `20` | basis points | Estimated round-trip fee+slippage |
+| `MIN_EV` / `min_ev` | `0.0005` | return fraction | Minimum EV after costs to enter (0.0005 = 0.05 %) |
+| `EV_GAP` / `ev_gap` | `0.00025` | return fraction | Required EV lead of top over second-best (0.00025 = 0.025 %) |
+| `SCORE_GAP` / `score_gap` | `0.02` | probability (0–1) | Probability gap between top and runner-up — **not** used for EV comparisons |
+| `EXIT_QTY_BUFFER_LOTS` / `exit_qty_buffer_lots` | `1` | lots | Safety lot buffer on exits |
+
+**Tuning ranges:**
+
+| Parameter | Conservative | Aggressive | Notes |
+|-----------|-------------|------------|-------|
+| `min_ev` | `0.00025` – `0.001` | `0.0` | Lower allows more trades; raise if entering on noise |
+| `ev_gap` | `0.0000` – `0.001` | `0.0` | `0.0` = no gap required; raise only if top coin is often ambiguous |
+| `score_gap` | `0.01` – `0.05` | `0.005` | Probability gap only; `0.02` is a reasonable default |
 
 ### Diagnostics
 
@@ -482,16 +511,20 @@ each gate:
 
 ```
 [diag] eval=18 pass_disp=12 pass_agree=10 pass_score=3 pass_ev=0
-       best_mean=0.183 ... (thresh: score>=0.150 agree>=1 disp<=0.30 ev>0.00000 cost=0.0020)
+       best_mean=0.183 ... (thresh: score>=0.150 agree>=1 disp<=0.30 ev>0.00050 cost=0.0020)
 ```
 
-This helps tune `MIN_EV`, `COST_BPS`, and the confidence gates without
+Routine skip messages (EV gap too small, regime block, risk block) are
+throttled to **at most once per hour** (`SKIP_DIAG_INTERVAL_SECS = 3600`) to
+prevent QuantConnect log rate-limiting during normal backtests.
+
+This helps tune `MIN_EV`, `EV_GAP`, `COST_BPS`, and the confidence gates without
 flooding logs.
 
 ### Overfitting warning
 
 > **Maximising backtest profit can overfit.**  The EV scoring parameters
-> (`COST_BPS`, `MIN_EV`, `SCORE_GAP`) and the ensemble hyper-parameters
+> (`COST_BPS`, `MIN_EV`, `EV_GAP`, `SCORE_GAP`) and the ensemble hyper-parameters
 > should be validated on **out-of-sample** data or via walk-forward testing.
 > Conservative defaults are provided; tighten them only when out-of-sample
 > metrics support it.
@@ -530,8 +563,10 @@ flooding logs.
    live execution TP/SL.
 2. `SCORE_MIN`, `MIN_AGREE`, `MAX_DISPERSION` — confidence gates; loosen if
    trade count is very low; tighten if precision is poor.
-3. `COST_BPS`, `MIN_EV` — EV filter; increase `COST_BPS` to account for
+3. `COST_BPS`, `MIN_EV`, `EV_GAP` — EV filter; increase `COST_BPS` to account for
    actual Kraken fees (0.16–0.26 % maker/taker per side = 32–52 bps round trip).
+   `MIN_EV` and `EV_GAP` are **return fractions** — see the EV Ranking section for
+   units and tuning ranges.
 4. `ATR_TP_MULT`, `ATR_SL_MULT` — trade geometry; a higher ratio improves
    Kelly edge but reduces win rate.
 5. `KELLY_FRAC`, `MAX_ALLOC` — position sizing; use quarter-Kelly or lower.

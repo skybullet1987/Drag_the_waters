@@ -22,7 +22,7 @@ ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
 SCORE_MIN            = 0.25    # minimum mean_proba to open a position (upper clamp)
 SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
 SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
-SCORE_GAP            = 0.02    # required lead of top coin over runner-up
+SCORE_GAP            = 0.02    # probability gap: required lead of top coin over runner-up (mean_proba units)
 MAX_DISPERSION       = 0.30    # max std_proba across models
 MIN_AGREE            = 1       # min models with proba >= agree_thr
 ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
@@ -36,12 +36,14 @@ MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops 
 CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
 EXIT_QTY_BUFFER_LOTS = 1       # safety lots subtracted from sell qty to absorb fee/rounding
 COST_BPS             = 20      # estimated round-trip fee+slippage in basis points (0.20 %)
-MIN_EV               = 0.0     # minimum expected-value score (after costs) required to enter
+MIN_EV               = 0.0005  # minimum expected-value (return fraction) after costs: 0.0005 = 0.05 %
+EV_GAP               = 0.00025 # required EV lead of top coin over second-best (return fraction units): 0.00025 = 0.025 %
 MAX_EXIT_RETRY_COUNT = 3       # max consecutive INVALID exit retries before treating as dust
 RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
 DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
 WARMUP_DAYS          = 90      # bars of history needed before trading
 MAX_HISTORY_BARS     = 30000   # safety cap on history bars fetched per symbol (~104 days @ 5m)
+SKIP_DIAG_INTERVAL_SECS = 3600 # routine skip diagnostics logged at most once per hour
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Vox — ML Ensemble Kraken Rotation Strategy
@@ -100,7 +102,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._atr_sl   = float(self.get_parameter("atr_sl_mult")      or ATR_SL_MULT)
         self._s_min    = float(self.get_parameter("score_min")        or SCORE_MIN)
         self._s_min_floor = SCORE_MIN_FLOOR
-        self._s_gap    = float(self.get_parameter("score_gap")        or SCORE_GAP)
+        self._s_gap    = float(self.get_parameter("score_gap")        or SCORE_GAP)  # probability-gap threshold (mean_proba units)
         self._max_disp = float(self.get_parameter("max_dispersion")   or MAX_DISPERSION)
         self._min_agr  = int(self.get_parameter("min_agree")          or MIN_AGREE)
         self._alloc    = float(self.get_parameter("allocation")       or ALLOCATION)
@@ -118,6 +120,7 @@ class VoxAlgorithm(QCAlgorithm):
         )
         self._cost_bps = float(self.get_parameter("cost_bps")         or COST_BPS)
         self._min_ev   = float(self.get_parameter("min_ev")           or MIN_EV)
+        self._ev_gap   = float(self.get_parameter("ev_gap")           or EV_GAP)   # EV-gap threshold (return-fraction units, NOT probability units)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
@@ -196,6 +199,12 @@ class VoxAlgorithm(QCAlgorithm):
         self._exiting          = False   # True while an exit order is in flight
         self._exit_time        = None    # time of most recent completed exit
         self._exit_retry_count = 0       # consecutive INVALID exit retry counter
+
+        # ── Diagnostic throttling ──────────────────────────────────────────────
+        # Routine skip messages (EV gap too small, regime block, risk block) are
+        # suppressed unless at least SKIP_DIAG_INTERVAL_SECS have passed since the
+        # last one, to prevent QuantConnect log rate-limiting.
+        self._last_skip_diag_time = None
 
         # ── Warm-up ───────────────────────────────────────────────────────────
         self.set_warm_up(timedelta(days=WARMUP_DAYS))
@@ -303,7 +312,7 @@ class VoxAlgorithm(QCAlgorithm):
             sym=None, current_time=self.time, portfolio_value=pv
         )
         if not can:
-            self.debug(f"[vox] Entry blocked: {reason}")
+            self._throttled_skip_debug(f"[vox] Entry blocked: {reason}")
             return
 
         self._try_enter()
@@ -567,11 +576,16 @@ class VoxAlgorithm(QCAlgorithm):
           2. Ensemble confidence: mean_proba >= score_min_eff (base-rate-aware)
           3. Ensemble dispersion: std_proba <= MAX_DISPERSION
           4. Model agreement: n_agree >= MIN_AGREE
-          5. EV gate: expected_value_after_costs > MIN_EV
-          6. Score gap to runner-up >= SCORE_GAP (on EV-adjusted score)
+          5. EV gate: expected_value_after_costs > self._min_ev  (return-fraction units)
+          6. EV gap to runner-up >= self._ev_gap  (return-fraction units, NOT probability units)
           7. Regime filter: 4h BTC SMA + slope
           8. Risk manager: cooldown, daily SL cap, drawdown CB
           9. Pre-trade validation: price > 0, cash, lot-size, min-order
+
+        Note on gate 6: self._ev_gap uses EV_GAP (default 0.00025 = 0.025 %) while
+        self._s_gap uses SCORE_GAP (default 0.02 = 2 pp) for probability gaps only.
+        Mixing the two caused trades with strong positive EV to be blocked because
+        the probability-scale threshold is ~80× larger than typical EV scores.
 
         Candidates passing the confidence gates are ranked by a
         profit-aware expected-value score:
@@ -728,17 +742,25 @@ class VoxAlgorithm(QCAlgorithm):
         top_sym, top_sc = ranked[0]
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
-        # Gap check on EV-adjusted score (not raw mean_proba)
-        if (top_sc - second_sc) < self._s_gap:
-            self.debug(
+        # Gap check on EV-adjusted score — uses self._ev_gap (return-fraction units),
+        # NOT self._s_gap (probability units).  SCORE_GAP=0.02 was designed for
+        # probability differences (0–1 scale) and is far too large for EV scores
+        # which are typically in the 0.001–0.02 range.
+        # Skip the gap check when there is only one candidate: no second EV to
+        # compare against, so any positive EV qualifies.
+        ev_gap_actual = top_sc - second_sc
+        if len(ranked) > 1 and ev_gap_actual < self._ev_gap:
+            self._throttled_skip_debug(
                 f"[vox] EV gap too small: top={top_sc:.5f}"
-                f"  second={second_sc:.5f}  gap={top_sc-second_sc:.5f}"
+                f"  second={second_sc:.5f}"
+                f"  gap={ev_gap_actual:.5f}"
+                f"  required={self._ev_gap:.5f}"
             )
             return
 
         # ── Regime gate ───────────────────────────────────────────────────────
         if not self._regime.is_risk_on(self._btc_sym, sym=top_sym):
-            self.debug(f"[vox] Regime block for {top_sym.value}")
+            self._throttled_skip_debug(f"[vox] Regime block for {top_sym.value}")
             return
 
         # ── Risk manager gate ──────────────────────────────────────────────────
@@ -747,7 +769,7 @@ class VoxAlgorithm(QCAlgorithm):
             sym=top_sym, current_time=self.time, portfolio_value=pv
         )
         if not can:
-            self.debug(f"[vox] Risk block for {top_sym.value}: {reason}")
+            self._throttled_skip_debug(f"[vox] Risk block for {top_sym.value}: {reason}")
             return
 
         # ── Pre-trade validation ───────────────────────────────────────────────
@@ -880,6 +902,26 @@ class VoxAlgorithm(QCAlgorithm):
     def _reset_daily(self):
         """Reset daily counters at midnight UTC."""
         self._risk.reset_daily()
+
+    # ── Throttled diagnostic helper ───────────────────────────────────────────
+
+    def _throttled_skip_debug(self, message: str) -> None:
+        """
+        Emit a debug-level diagnostic message for routine trade skips, but only
+        if at least SKIP_DIAG_INTERVAL_SECS seconds have elapsed since the last
+        such message.  This prevents QuantConnect from rate-limiting the browser
+        log during normal backtests where skip conditions fire every 15 minutes.
+
+        Important events (fills, exits, errors) must NOT use this helper — call
+        self.debug() or self.log() directly for those.
+        """
+        now = self.time
+        if (
+            self._last_skip_diag_time is None
+            or (now - self._last_skip_diag_time).total_seconds() >= SKIP_DIAG_INTERVAL_SECS
+        ):
+            self._last_skip_diag_time = now
+            self.debug(message)
 
     # ── History hydration ─────────────────────────────────────────────────────
 
