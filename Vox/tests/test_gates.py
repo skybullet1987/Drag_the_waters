@@ -16,9 +16,9 @@ from models import VoxEnsemble, triple_barrier_outcome  # type: ignore  # noqa: 
 
 # Mirror constants from main.py (cannot import main.py without AlgorithmImports).
 # These must match the values in main.py.
-SCORE_MIN       = 0.55    # updated in Vox v2
+SCORE_MIN       = 0.50    # updated to balanced/tradable default (was 0.55 in v2)
 SCORE_MIN_FLOOR = 0.15
-MIN_AGREE       = 3       # updated in Vox v2 (3 of 4 models)
+MIN_AGREE       = 2       # updated to relaxed default (was 3 in v2)
 
 
 def _score_min_eff(positive_rate, s_min_floor=SCORE_MIN_FLOOR, s_min=SCORE_MIN):
@@ -70,7 +70,7 @@ class TestAgreeThreshold:
         assert agree_thr <= 0.20, (
             f"agree_thr={agree_thr} should be <= 0.20 for positive_rate=0.03"
         )
-        # With agree_thr=0.15, all 4 probas pass → n_agree=4 >= MIN_AGREE=3
+        # With agree_thr=0.15, all 4 probas pass → n_agree=4 >= MIN_AGREE=2
         assert n_agree >= MIN_AGREE, (
             f"n_agree={n_agree} < MIN_AGREE={MIN_AGREE} for agree_thr={agree_thr}"
         )
@@ -86,11 +86,11 @@ class TestScoreMinEff:
         assert _score_min_eff(0.03) == pytest.approx(SCORE_MIN_FLOOR)
 
     def test_medium_positive_rate(self):
-        """With positive_rate=0.06, effective score = clip(max(0.15, 0.18), 0.15, 0.55) = 0.18."""
+        """With positive_rate=0.06, effective score = clip(max(0.15, 0.18), 0.15, 0.50) = 0.18."""
         assert _score_min_eff(0.06) == pytest.approx(0.18)
 
     def test_high_positive_rate_clipped_to_score_min(self):
-        """With positive_rate=0.30, effective score is capped at SCORE_MIN=0.55."""
+        """With positive_rate=0.30, effective score is capped at SCORE_MIN=0.50."""
         assert _score_min_eff(0.30) == pytest.approx(SCORE_MIN)
 
     def test_always_within_bounds(self):
@@ -102,7 +102,7 @@ class TestScoreMinEff:
             )
 
     def test_score_min_constant_remains_upper_clamp(self):
-        """SCORE_MIN=0.55 is preserved as the upper bound, never exceeded."""
+        """SCORE_MIN is preserved as the upper bound, never exceeded."""
         assert _score_min_eff(1.0) == pytest.approx(SCORE_MIN)
 
 

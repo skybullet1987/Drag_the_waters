@@ -185,19 +185,34 @@ Penalty cooldown is independent of the shorter per-coin SL cooldown in
 
 ### Conservative mode
 
-Setting `conservative_mode=True` (QC parameter panel) applies stricter defaults
-in one switch, without requiring the user to set every parameter manually:
+Setting `conservative_mode=True` (QC parameter panel) applies stricter,
+research-grade defaults in one switch, without requiring the user to set every
+parameter manually.  These are the original Vox v2 default values, which have
+been relaxed in normal mode to ensure candidates can pass the gates under
+reasonable market conditions.
 
-| Parameter | Conservative override |
-|-----------|----------------------|
-| `score_min` | ≥ 0.60 |
-| `max_dispersion` | ≤ 0.12 |
-| `min_agree` | ≥ 4 |
-| `min_ev` | ≥ 0.005 |
-| `take_profit` | ≥ 0.035 |
-| `stop_loss` | ≥ 0.020 |
-| `min_hold_minutes` | ≥ 20 |
-| `pred_return_min` | ≥ 0.005 |
+| Parameter | Conservative override | Normal default |
+|-----------|-----------------------|----------------|
+| `score_min` | ≥ 0.55 | 0.50 |
+| `max_dispersion` | ≤ 0.15 | 0.22 |
+| `min_agree` | ≥ 3 | 2 |
+| `min_ev` | ≥ 0.004 (0.4 %) | 0.001 (0.1 %) |
+| `cost_bps` | ≥ 50 (0.50 %) | 35 (0.35 %) |
+| `pred_return_min` | ≥ 0.003 (+0.30 %) | −0.0005 (soft veto) |
+| `max_daily_sl` | ≤ 1 | 2 |
+| `cooldown_mins` | ≥ 30 | 20 |
+| `take_profit` | ≥ 0.035 | 0.030 |
+| `stop_loss` | ≥ 0.020 | 0.015 |
+| `min_hold_minutes` | ≥ 20 | 15 |
+
+**Use conservative mode for:**
+- Research validation where you want strict selectivity to ensure high quality.
+- Evaluating whether a smaller set of high-confidence trades is profitable.
+- Comparing filtered vs unfiltered trade sets.
+
+**Do not use conservative mode in normal operation** — it will block most trades
+because the regressor (`pred_return_min >= 0.003`) requires a strong positive
+predicted return, which the ensemble rarely exceeds in the first months of data.
 
 ### Realized EV logging
 
@@ -264,6 +279,11 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 
 ### Execution parameters (Vox v2 defaults)
 
+> **Normal mode is intentionally balanced/tradable.**  The defaults below allow
+> candidates to pass the gates under reasonable market conditions.  Set
+> `conservative_mode=True` to restore stricter research-grade thresholds — see
+> [Conservative mode](#conservative-mode) below.
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `take_profit` | `0.030` | Take-profit fraction (+3 %) — wider than v1 to reduce fee drag |
@@ -271,24 +291,24 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 | `timeout_hours` | `6.0` | Max hold time in hours |
 | `atr_tp_mult` | `2.0` | ATR multiplier for dynamic TP |
 | `atr_sl_mult` | `1.2` | ATR multiplier for dynamic SL |
-| `score_min` | `0.55` | Upper clamp on the effective score threshold (class_proba gate) |
+| `score_min` | `0.50` | Upper clamp on the effective score threshold (class_proba gate) |
 | `score_gap` | `0.02` | Required probability gap to runner-up (probability units) |
-| `max_dispersion` | `0.15` | Max std_proba across models (tightened from 0.30) |
-| `min_agree` | `3` | Min models with proba ≥ agree_thr (3 of 4 classifiers) |
+| `max_dispersion` | `0.22` | Max std_proba across models — relaxed to allow trading |
+| `min_agree` | `2` | Min models with proba ≥ agree_thr — relaxed to allow trading |
 | `allocation` | `0.50` | Flat allocation fallback fraction |
 | `kelly_frac` | `0.25` | Fractional-Kelly multiplier |
 | `max_alloc` | `0.80` | Hard ceiling on allocation |
 | `use_kelly` | `True` | Use Kelly sizing; False = flat |
 | `use_calibration` | `True` | Wrap tree models in CalibratedClassifierCV |
-| `max_daily_sl` | `1` | Daily SL cap (tightened from 2) |
-| `cooldown_mins` | `30` | Global post-exit cooldown (min) |
+| `max_daily_sl` | `2` | Daily SL cap |
+| `cooldown_mins` | `20` | Global post-exit cooldown (min) |
 | `sl_cooldown_mins` | `60` | Per-coin SL cooldown (min) |
 | `max_dd_pct` | `0.08` | Drawdown circuit-breaker (8 %) |
 | `cash_buffer` | `0.99` | Cash headroom multiplier |
-| `cost_bps` | `50` | Estimated round-trip cost in basis points (0.50 %) |
-| `min_ev` | `0.004` | Minimum EV after costs to enter (0.4 %) |
-| `ev_gap` | `0.00025` | Required final_score gap to runner-up (return-fraction units) |
-| `pred_return_min` | `0.003` | Minimum regression-predicted return (0.3 %) |
+| `cost_bps` | `35` | Estimated round-trip cost in basis points (0.35 %) |
+| `min_ev` | `0.001` | Minimum EV after costs to enter (0.1 %) — relaxed default |
+| `ev_gap` | `0.0001` | Required final_score gap to runner-up (return-fraction units) |
+| `pred_return_min` | `-0.0005` | Regression veto: blocks only clearly bad predicted returns (−0.05 %) |
 | `min_hold_minutes` | `15` | Suppress ordinary exits before this many minutes |
 | `emergency_sl` | `0.030` | Allow early exit during min-hold if loss exceeds this (3.0 %) |
 | `conservative_mode` | `False` | Apply stricter gate overrides in one switch |
@@ -639,12 +659,25 @@ validity.
 
 | Parameter / Constant | Default | Units | Description |
 |----------------------|---------|-------|-------------|
-| `COST_BPS` / `cost_bps` | `50` | basis points | Estimated round-trip fee+slippage (0.50 %) |
-| `MIN_EV` / `min_ev` | `0.004` | return fraction | Minimum EV after costs to enter (0.4 %) |
-| `EV_GAP` / `ev_gap` | `0.00025` | return fraction | Required score lead of top over second-best (0.025 %) |
-| `PRED_RETURN_MIN` / `pred_return_min` | `0.003` | return fraction | Minimum predicted return (0.3 %) |
+| `COST_BPS` / `cost_bps` | `35` | basis points | Estimated round-trip fee+slippage (0.35 %) |
+| `MIN_EV` / `min_ev` | `0.001` | return fraction | Minimum EV after costs to enter (0.1 %) — relaxed default |
+| `EV_GAP` / `ev_gap` | `0.0001` | return fraction | Required score lead of top over second-best (0.01 %) |
+| `PRED_RETURN_MIN` / `pred_return_min` | `-0.0005` | return fraction | Regression veto: blocks only clearly bad predicted returns (−0.05 %) |
 | `SCORE_GAP` / `score_gap` | `0.02` | probability (0–1) | Probability gap between top and runner-up — **not** used for EV comparisons |
 | `EXIT_QTY_BUFFER_LOTS` / `exit_qty_buffer_lots` | `1` | lots | Safety lot buffer on exits |
+
+#### `pred_return_min` tuning guidance
+
+`PRED_RETURN_MIN = -0.0005` means the regressor acts as a **soft veto** — it
+only blocks candidates where the regression ensemble predicts a clearly negative
+return (< −0.05 %).  This is intentional: early in the backtest, regression
+targets are sparse and predictions typically lie in the range `−0.002` to
+`+0.001`.  Requiring a positive predicted return at this stage would block
+*every* candidate.
+
+Use `pred_return_min = 0.003` (or higher) via `conservative_mode=True` when you
+want strict research validation and the regressors have sufficient training data
+(e.g. after several months of live data with realized returns logged).
 
 ### Diagnostics
 
@@ -656,18 +689,27 @@ Every time candidates pass all gates the following is logged:
        n_agree=3 tp=0.0245 sl=0.0147
 ```
 
-When no candidate passes, the hourly diagnostic log shows how many failed
-each gate:
+When no candidate passes, the diagnostic summary includes `best_ev` (the best
+EV-after-costs seen among candidates that passed the preliminary gates) so you
+can understand whether the EV gate or the pred_return gate is the binding
+constraint:
 
 ```
 [diag] eval=18 pass_disp=12 pass_agree=10 pass_score=3 pass_ev=0 pass_pred_ret=0
-       best_proba=0.183 ... (thresh: score>=0.150 agree>=3 disp<=0.15
-       ev>0.00400 pred_ret>=0.00300 cost=0.0050)
+       best_proba=0.183 best_agree=3 best_disp=0.073 best_pred_ret=-0.00203
+       best_ev=-0.00120 (thresh: score>=0.150 agree>=2 disp<=0.22
+       ev>0.00100 pred_ret>=-0.00050 cost=0.0035)
 ```
 
-Routine skip messages (EV gap too small, regime block, risk block) are
-throttled to **at most once per hour** (`SKIP_DIAG_INTERVAL_SECS = 3600`) to
-prevent QuantConnect log rate-limiting during normal backtests.
+**Diagnostic throttling** — routine skip messages are intentionally rate-limited
+to avoid QuantConnect's 100 KB log cap during multi-year backtests:
+
+| Log type | Throttle |
+|----------|---------|
+| No-candidate summary (`[diag]`) | At most once every **6 hours** (`DIAG_INTERVAL_HOURS = 6`) |
+| Routine skip (EV gap, regime, risk block) | At most once every **6 hours** (`SKIP_DIAG_INTERVAL_SECS = 21600`) |
+| Entry fills, exit fills, errors | **Unthrottled** — always logged |
+| Retrain summary | **Unthrottled** — always logged |
 
 ---
 
