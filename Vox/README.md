@@ -307,7 +307,7 @@ and can be overridden at runtime via the QuantConnect parameter panel.
 
 `LABEL_*` constants are defined in `models.py` and re-imported by `main.py`.
 The looser barriers increase the positive rate from ~1–5 % to a more balanced
-range, improving ensemble calibration without changing live execution behaviour.
+range, improving ensemble calibration without changing live execution behavior.
 
 ### Alignment Constraint
 

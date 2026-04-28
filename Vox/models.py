@@ -701,7 +701,7 @@ def build_training_data(
     Labels are **cost-aware**: a sample gets label 1 only if the TP barrier
     is hit *and* the net return after estimated costs is positive.
 
-    Return targets (y_return) are the realised net-of-costs trade return at
+    Return targets (y_return) are the realized net-of-costs trade return at
     each triple-barrier outcome — suitable for regression ensemble training.
 
     Parameters

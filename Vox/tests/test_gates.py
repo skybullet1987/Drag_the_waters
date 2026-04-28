@@ -57,7 +57,7 @@ class TestAgreeThreshold:
     def test_prob_vector_around_020_passes_agree_gate(self):
         """
         A 4-model ensemble with probas ~0.20 must pass the agree gate when
-        positive_rate=0.03 (reproces the reported zero-trade bug).
+        positive_rate=0.03 (reproduces the reported zero-trade bug).
         """
         ens = VoxEnsemble()
         ens._positive_rate = 0.03
