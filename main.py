@@ -47,6 +47,10 @@ QTY_PRECISION = 6      # decimal places for lot-size flooring (Kraken min lots)
 # Safety buffer lots subtracted from the sell quantity to absorb fee/rounding
 # precision mismatch between portfolio.quantity and the CashBook balance.
 EXIT_QTY_BUFFER_LOTS = 1
+# Quote suffixes for base-currency resolution (longest first).
+# QC SymbolProperties does not expose base_currency; we derive it by stripping
+# one of these suffixes from the symbol value.  Matches OrderHelper in Vox/infra.py.
+_CRYPTO_QUOTE_SUFFIXES = ("USDT", "USDC", "USD", "EUR", "GBP", "BTC", "ETH")
 
 
 class KrakenTopCoinAlgorithm(QCAlgorithm):
@@ -286,21 +290,29 @@ class KrakenTopCoinAlgorithm(QCAlgorithm):
         if portfolio_qty <= 0:
             return 0.0
 
-        # Determine base currency
+        # Determine base currency.
+        # QC SymbolProperties does not expose base_currency; derive it from
+        # quote_currency (which QC does expose) or by stripping known suffixes.
         base_ccy = None
+        sym_val  = sym.value.upper()
         try:
-            base_ccy = str(
-                self.securities[sym].symbol_properties.base_currency
-            )
+            quote = str(
+                self.securities[sym].symbol_properties.quote_currency
+            ).upper()
+            if quote and sym_val.endswith(quote):
+                cand = sym_val[: -len(quote)]
+                if cand:
+                    base_ccy = cand
         except Exception:
             pass
 
         if not base_ccy:
-            sym_val = sym.value.upper()
-            for suffix in ("USDT", "USDC", "USD", "EUR", "BTC", "ETH"):
+            for suffix in _CRYPTO_QUOTE_SUFFIXES:
                 if sym_val.endswith(suffix):
-                    base_ccy = sym_val[: -len(suffix)]
-                    break
+                    cand = sym_val[: -len(suffix)]
+                    if cand:
+                        base_ccy = cand
+                        break
 
         cash_qty = portfolio_qty   # default: trust portfolio
         if base_ccy:

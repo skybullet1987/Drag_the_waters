@@ -398,9 +398,16 @@ qty = OrderHelper.safe_crypto_sell_qty(
 
 Logic:
 1. Read `portfolio[sym].quantity` (the tracked holding).
-2. Determine the **base currency** — first from
-   `securities[sym].symbol_properties.base_currency`; if unavailable, strip
-   a known quote suffix (`USD`, `USDT`, `USDC`, `EUR`, `BTC`, `ETH`).
+2. Determine the **base currency** via `OrderHelper.get_crypto_base_currency()`:
+   - QuantConnect `SymbolProperties` does **not** expose `base_currency`, so
+     that attribute is never accessed.
+   - Instead, the resolver reads `symbol_properties.quote_currency` (which QC
+     does expose); if `sym.value` ends with that quote string, the leading
+     portion is the base (e.g. `OPUSD` with quote `USD` → `OP`).
+   - Fallback: strip the longest matching quote suffix from `sym.value` in
+     order `USDT`, `USDC`, `USD`, `EUR`, `GBP`, `BTC`, `ETH`.
+   - Returns `None` when the base cannot be determined; in that case the
+     CashBook lookup is skipped and the portfolio quantity is used directly.
 3. Read the actual `portfolio.cash_book[base_ccy].amount` (the real balance).
 4. Take `min(portfolio_qty, cash_qty)` — never sell more than actually held.
 5. Floor to `lot_size`, then subtract `exit_qty_buffer_lots × lot_size` as an
