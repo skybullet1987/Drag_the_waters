@@ -99,8 +99,47 @@ RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
 # Runner / trailing-profit parameters
 RUTHLESS_RUNNER_MODE             = True    # trailing stop instead of instant TP exit
-RUTHLESS_TRAIL_AFTER_TP          = 0.04   # activate trailing once return ≥ +4 %
-RUTHLESS_TRAIL_PCT               = 0.025  # exit if price drops 2.5 % from trailing high
+# Ruthless v4: delayed trailing activation (trail activates later, trails less tightly)
+RUTHLESS_TRAIL_AFTER_TP          = 0.07   # was 0.04: activate trailing once return >= +7%
+RUTHLESS_TRAIL_PCT               = 0.03   # was 0.025: trail 3% from high
+
+# ── Ruthless v4: breakeven stop ───────────────────────────────────────────────
+RUTHLESS_BREAKEVEN_AFTER         = 0.03   # move stop to entry after +3% return seen
+RUTHLESS_BREAKEVEN_BUFFER        = 0.003  # effective stop = entry + this buffer
+
+# ── Ruthless v4: momentum-failure early exit ──────────────────────────────────
+RUTHLESS_MOM_FAIL_ENABLED        = True
+RUTHLESS_MOM_FAIL_MIN_HOLD_MINUTES = 30   # must hold at least this long
+RUTHLESS_MOM_FAIL_LOSS           = -0.012 # exit if return <= this with broken momentum
+
+# ── Ruthless v4: smarter timeout extension ────────────────────────────────────
+RUTHLESS_TIMEOUT_MIN_PROFIT      = 0.03   # allow timeout exit if return >= this
+RUTHLESS_TIMEOUT_EXTEND_HOURS    = 12     # extend hold by this many hours
+RUTHLESS_MAX_TIMEOUT_HOURS       = 48     # hard cap on total hold time
+
+# ── Market mode detection ─────────────────────────────────────────────────────
+MARKET_MODE_ENABLED              = True
+RUTHLESS_ALLOWED_MODES           = ["risk_on_trend", "pump"]
+
+# ── Ruthless meta-filter ──────────────────────────────────────────────────────
+RUTHLESS_META_FILTER_ENABLED     = True
+RUTHLESS_META_MIN_PROBA          = 0.55
+
+# ── Optional entry limit orders ───────────────────────────────────────────────
+RUTHLESS_USE_ENTRY_LIMIT_ORDERS  = False  # disabled by default; enable to reduce slippage
+ENTRY_LIMIT_OFFSET               = 0.001  # buy limit at price * (1 - offset)
+ENTRY_LIMIT_TTL_MINUTES          = 3      # cancel unfilled limits after this many minutes
+
+# ── Optional exit limit orders (non-urgent only) ──────────────────────────────
+USE_EXIT_LIMIT_ORDERS            = False  # disabled by default
+EXIT_LIMIT_OFFSET                = 0.0005 # sell limit at price * (1 + offset)
+EXIT_LIMIT_TTL_MINUTES           = 1      # cancel unfilled exit limits after 1 minute
+EXIT_LIMIT_FALLBACK_TO_MARKET    = True   # fallback to market if limit not filled in TTL
+
+# ── Optional external ML models ───────────────────────────────────────────────
+USE_LIGHTGBM                     = False  # enable if lightgbm installed
+USE_XGBOOST                      = False  # enable if xgboost installed
+USE_CATBOOST                     = False  # keep disabled: QC may not support it
 
 # ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
 RUTHLESS_LOSS_WINDOW_HOURS       = 24     # rolling window for counting SL exits
@@ -271,6 +310,20 @@ def setup_risk_profile(algo):
         algo._label_tp      = RUTHLESS_LABEL_TP
         algo._label_sl      = RUTHLESS_LABEL_SL
         algo._label_horizon = RUTHLESS_LABEL_HORIZON_BARS
+        # Ruthless v4 new parameters
+        algo._breakeven_after         = RUTHLESS_BREAKEVEN_AFTER
+        algo._breakeven_buffer        = RUTHLESS_BREAKEVEN_BUFFER
+        algo._mom_fail_enabled        = RUTHLESS_MOM_FAIL_ENABLED
+        algo._mom_fail_min_hold       = RUTHLESS_MOM_FAIL_MIN_HOLD_MINUTES
+        algo._mom_fail_loss           = RUTHLESS_MOM_FAIL_LOSS
+        algo._timeout_min_profit      = RUTHLESS_TIMEOUT_MIN_PROFIT
+        algo._timeout_extend_hours    = RUTHLESS_TIMEOUT_EXTEND_HOURS
+        algo._max_timeout_hours       = RUTHLESS_MAX_TIMEOUT_HOURS
+        algo._use_entry_limit_orders  = RUTHLESS_USE_ENTRY_LIMIT_ORDERS
+        algo._market_mode_enabled     = MARKET_MODE_ENABLED
+        algo._ruthless_allowed_modes  = RUTHLESS_ALLOWED_MODES
+        algo._meta_filter_enabled     = RUTHLESS_META_FILTER_ENABLED
+        algo._meta_min_proba          = RUTHLESS_META_MIN_PROBA
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -319,7 +372,7 @@ def setup_risk_profile(algo):
     )
     if algo._risk_profile == "ruthless":
         algo.log(
-            f"[vox] RUTHLESS v3 ACTIVE:"
+            f"[vox] RUTHLESS v4 ACTIVE:"
             f"  sl_cooldown_mins={algo._sl_cd}"
             f"  loss_window_h={getattr(algo, '_ruthless_loss_window_hours', 24)}"
             f"  loss_limit={getattr(algo, '_ruthless_loss_limit', 2)}"

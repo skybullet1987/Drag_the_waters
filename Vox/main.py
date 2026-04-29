@@ -138,7 +138,7 @@ class VoxAlgorithm(QCAlgorithm):
         # ── Market mode detector (4h BTC consolidator) ────────────────────────
         _mm_enabled = getattr(self, "_market_mode_enabled", False)
         if _mm_enabled and self._btc_sym:
-            self._market_mode_det = MarketModeDetector(algorithm=self, btc_sym=self._btc_sym)
+            self._market_mode_det = MarketModeDetector()
 
         # ── Risk manager ──────────────────────────────────────────────────────
         self._risk = RiskManager(
@@ -164,36 +164,31 @@ class VoxAlgorithm(QCAlgorithm):
             self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
 
-        # ── Position state — updated ONLY via on_order_event ──────────────────
-        self._pos_sym          = None    # confirmed open position symbol
-        self._entry_px         = 0.0     # confirmed entry fill price
-        self._entry_time       = None    # confirmed entry fill time
-        self._tp_dyn           = 0.0     # ATR-derived TP fraction for current trade
-        self._sl_dyn           = 0.0     # ATR-derived SL fraction for current trade
-        self._pending_sym      = None    # symbol of in-flight entry order
-        self._pending_oid      = None    # order ID of in-flight entry order
-        self._exiting          = False   # True while an exit order is in flight
-        self._exit_time        = None    # time of most recent completed exit
-        self._exit_retry_count = 0       # consecutive INVALID exit retry counter
-        # Runner / trailing-profit state — reset on every entry and exit
-        self._trail_active     = False   # True once trailing stop has been activated
-        self._trail_high_px    = 0.0     # highest price seen since trail activation
+        # ── Position state ────────────────────────────────────────────────────
+        self._pos_sym          = None
+        self._entry_px         = 0.0
+        self._entry_time       = None
+        self._tp_dyn           = 0.0
+        self._sl_dyn           = 0.0
+        self._pending_sym      = None
+        self._pending_oid      = None
+        self._exiting          = False
+        self._exit_time        = None
+        self._exit_retry_count = 0
+        self._trail_active     = False
+        self._trail_high_px    = 0.0
 
         # ── Ruthless v4 position state ────────────────────────────────────────
-        self._max_return_seen   = 0.0    # high-water return for breakeven
-        self._breakeven_active  = False  # True when stop moved to entry
-        self._timeout_ext_hours = 0.0    # accumulated timeout extensions
-        self._timeout_ext_logged= False  # prevents duplicate extension logs
-        self._last_feat         = {}     # sym -> feat array (for exit logic)
-        self._entry_limit_tracker = None # LimitOrderTracker when enabled
+        self._max_return_seen     = 0.0
+        self._breakeven_active    = False
+        self._timeout_ext_hours   = 0.0
+        self._timeout_ext_logged  = False
+        self._last_feat           = {}
+        self._entry_limit_tracker = None
 
-        # ── Entry prediction store (for realized-EV logging at exit) ──────────
-        # sym -> {class_proba, pred_return, ev, final_score, tp, sl, time}
         self._entry_predictions = {}
 
-        # ── Per-symbol penalty cooldown ────────────────────────────────────────
-        # Tracks recent trade outcomes per symbol to apply extended cooldowns
-        # after repeated losses (independent of the per-coin SL cooldown in RiskManager).
+        # ── Per-symbol penalty cooldown ───────────────────────────────────────
         from collections import deque as _deque
         self._sym_outcomes     = {sym: _deque(maxlen=10) for sym in self._symbols}
         self._sym_penalty_until = {}
@@ -201,15 +196,9 @@ class VoxAlgorithm(QCAlgorithm):
         self._portfolio_loss_streak  = 0
         self._portfolio_pause_until  = None
 
-        # ── Diagnostic throttling ──────────────────────────────────────────────
-        # Routine skip messages (EV gap too small, regime block, risk block) are
-        # suppressed unless at least SKIP_DIAG_INTERVAL_SECS have passed since the
-        # last one, to prevent QuantConnect log rate-limiting.
+        # ── Diagnostic throttling ─────────────────────────────────────────────
         self._last_skip_diag_time = None
-        # No-candidate summary throttle (logged at most every DIAG_INTERVAL_HOURS).
         self._last_nocandidate_diag_time = None
-        # Last completed retrain time (used to suppress duplicate retrains shortly
-        # after the initial train or a recent scheduled retrain).
         self._last_retrain_time = None
 
         # ── Warm-up ───────────────────────────────────────────────────────────
@@ -813,26 +802,26 @@ class VoxAlgorithm(QCAlgorithm):
 
         _ruthless_allowed_modes = getattr(self, "_ruthless_allowed_modes", [])
         for (sym, feat), conf in zip(candidates, confs):
+            price = float(self.securities[sym].price)
+            if price <= 0:
+                continue
+            st  = self._state[sym]
+            atr = compute_atr(
+                highs  = list(st["highs"]),
+                lows   = list(st["lows"]),
+                closes = list(st["closes"]),
+            )
             result = evaluate_candidate(
-                sym=sym, feat=feat, conf=conf,
-                securities=self.securities,
-                state=self._state,
-                score_min_eff=score_min_eff,
-                max_disp=self._max_disp,
-                min_agr=self._min_agr,
-                momentum_override=self._momentum_override,
+                sym=sym, feat=feat, conf=conf, price=price, atr=atr,
+                risk_profile=self._risk_profile,
+                tp_base=self._tp, sl_base=self._sl,
+                atr_tp_mult=self._atr_tp, atr_sl_mult=self._atr_sl,
+                cost_fraction=cost_fraction,
+                momentum_override_enabled=self._momentum_override,
                 momentum_ret4_min=self._momentum_ret4_min,
                 momentum_ret16_min=self._momentum_ret16_min,
                 momentum_volume_min=self._momentum_volume_min,
                 momentum_btc_rel_min=self._momentum_btc_rel_min,
-                atr_tp=self._atr_tp, atr_sl=self._atr_sl,
-                tp=self._tp, sl=self._sl,
-                risk_profile=self._risk_profile,
-                min_ev=self._min_ev,
-                pred_return_min=self._pred_return_min,
-                reg_fitted=reg_fitted,
-                cost_fraction=cost_fraction,
-                use_momentum_score=self._use_momentum_score,
                 momentum_override_min_ev=self._momentum_override_min_ev,
                 ruthless_confirm_ev_min=getattr(self, "_ruthless_confirm_ev_min", 0.006),
                 ruthless_confirm_proba_min=getattr(self, "_ruthless_confirm_proba_min", 0.60),
@@ -840,23 +829,30 @@ class VoxAlgorithm(QCAlgorithm):
                 ruthless_confirm_ret4_min=getattr(self, "_ruthless_confirm_ret4_min", 0.010),
                 ruthless_confirm_ret16_min=getattr(self, "_ruthless_confirm_ret16_min", 0.020),
                 ruthless_confirm_volr_min=getattr(self, "_ruthless_confirm_volr_min", 1.5),
+                use_momentum_score=self._use_momentum_score,
+                reg_fitted=reg_fitted,
+                score_min_eff=score_min_eff,
+                max_disp=self._max_disp,
+                min_agr=self._min_agr,
+                min_ev=self._min_ev,
+                pred_return_min=self._pred_return_min,
+                compute_momentum_score_fn=compute_momentum_score,
+                counters=counters,
                 market_mode=_market_mode,
                 ruthless_allowed_modes=_ruthless_allowed_modes,
-                counters=counters,
-                logger=self.log,
             )
             if result is None:
                 continue
-            if ev_after_costs := result.get("ev_after_costs", float("-inf")):
-                if ev_after_costs > _best_ev_diag:
-                    _best_ev_diag = ev_after_costs
+            ev_cand = result.get("ev", float("-inf"))
+            if ev_cand > _best_ev_diag:
+                _best_ev_diag = ev_cand
             scores[sym]          = result["final_score"]
             conf_data[sym]       = conf
             tp_sl_data[sym]      = (
                 result["tp_use"], result["sl_use"], result["atr"], result["price"],
                 result["tp_floor_applied"], result["sl_floor_applied"],
             )
-            ev_data[sym]         = result["ev_after_costs"]
+            ev_data[sym]         = ev_cand
             entry_path_data[sym] = result["entry_path"]
             if not hasattr(self, "_ruthless_confirm_reasons"):
                 self._ruthless_confirm_reasons = {}
@@ -930,18 +926,25 @@ class VoxAlgorithm(QCAlgorithm):
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
         # ── Meta-filter check ─────────────────────────────────────────────────
-        _mf_approved, _mf_score = self._meta_filter.approve(conf_data.get(top_sym, {}))
+        _top_cd  = conf_data.get(top_sym, {})
+        _top_feat = next((f for s, f in candidates if s == top_sym), None)
+        _mf_approved, _mf_score = self._meta_filter.approve(
+            class_proba=_top_cd.get("class_proba", 0.0),
+            ev_score=ev_data.get(top_sym, 0.0),
+            n_agree=_top_cd.get("n_agree", 0),
+            std_proba=_top_cd.get("std_proba", 1.0),
+            pred_return=_top_cd.get("pred_return", 0.0),
+            feat=_top_feat,
+            market_mode=_market_mode,
+            ruthless_allowed_modes=getattr(self, "_ruthless_allowed_modes", []),
+        )
         if not _mf_approved:
             self._throttled_skip_debug(
                 f"[vox] Meta-filter rejected {top_sym.value} score={_mf_score:.3f}"
             )
             return
 
-        # Gap check on final score — uses self._ev_gap (return-fraction units),
-        # NOT self._s_gap (probability units).  SCORE_GAP=0.02 was designed for
-        # probability differences (0–1 scale) and is far too large for EV scores
-        # which are typically in the 0.001–0.02 range.
-        # Skip the gap check when there is only one candidate.
+        # Gap check on final score
         ev_gap_actual = top_sc - second_sc
         if len(ranked) > 1 and ev_gap_actual < self._ev_gap:
             self._throttled_skip_debug(

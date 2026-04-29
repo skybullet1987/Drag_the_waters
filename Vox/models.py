@@ -19,6 +19,25 @@ from sklearn.ensemble import (
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 
+# ── Optional external ML models with safe import guards ──────────────────────
+try:
+    from lightgbm import LGBMClassifier
+    HAS_LGBM = True
+except Exception:
+    HAS_LGBM = False
+
+try:
+    from xgboost import XGBClassifier
+    HAS_XGB = True
+except Exception:
+    HAS_XGB = False
+
+try:
+    from catboost import CatBoostClassifier
+    HAS_CATBOOST = True
+except Exception:
+    HAS_CATBOOST = False
+
 # ── Module-level tuning constants ─────────────────────────────────────────────
 
 # Step size for the label-generation loop in build_training_data.
@@ -39,6 +58,9 @@ VOX_ENABLE_CV = False
 
 # Number of CV folds used when VOX_ENABLE_CV is True.
 CV_SPLITS = 3
+
+# Current output dimension of build_features.
+FEATURE_COUNT = 20
 
 # ── Label-specific triple-barrier parameters ──────────────────────────────────
 #
@@ -98,8 +120,7 @@ def compute_atr(highs, lows, closes, period=14):
 
 
 def build_features(closes, volumes, btc_closes, hour):
-    """
-    Build the 10-element feature vector for one decision bar.
+    """Build the 20-element feature vector for one decision bar.
 
     Parameters
     ----------
@@ -110,21 +131,30 @@ def build_features(closes, volumes, btc_closes, hour):
 
     Returns
     -------
-    numpy.ndarray of shape (10,) or None when insufficient history.
+    numpy.ndarray of shape (20,) or None when insufficient history.
 
     Feature layout
     --------------
-    0  ret_1        — 1-bar return
-    1  ret_4        — 4-bar return
-    2  ret_8        — 8-bar return
-    3  ret_16       — 16-bar return
-    4  rsi_14       — RSI(14) normalised to [0, 1]
-    5  atr_n        — ATR(14) / close[-1]
-    6  vol_r        — volume ratio: current / 15-bar mean (capped at 10)
-    7  btc_rel      — 4-bar symbol return minus 4-bar BTC return
-    8  hour_of_day  — hour normalised to [0, 1]
-    9  sma_slope    — 8-bar SMA slope: (sma[-8:] - sma[-16:-8]) / sma[-16:-8], capped [-0.10, 0.10]
-                       Compares two non-overlapping 8-bar SMAs; positive = uptrend.
+    0  ret_1            — 1-bar return
+    1  ret_4            — 4-bar return
+    2  ret_8            — 8-bar return
+    3  ret_16           — 16-bar return
+    4  rsi_14           — RSI(14) normalised to [0, 1]
+    5  atr_n            — ATR(14) / close[-1]
+    6  vol_r            — volume ratio: current / 15-bar mean (capped at 10)
+    7  btc_rel          — 4-bar symbol return minus 4-bar BTC return
+    8  hour_of_day      — hour normalised to [0, 1]
+    9  sma_slope        — 8-bar SMA slope (non-overlapping windows), capped [-0.10, 0.10]
+    10 range_eff        — 16-bar range efficiency (trend purity)
+    11 sma_fast_slope   — 4-bar SMA slope (fast), capped [-0.10, 0.10]
+    12 price_vs_sma_fast — price relative to 4-bar SMA
+    13 price_vs_sma_slow — price relative to 8-bar SMA
+    14 recent_high_breakout — distance above 16-bar prior high, capped [-0.10, 0.10]
+    15 vol_zscore       — volume z-score over 16 bars, capped [-3, 3]
+    16 reversal_frac    — fraction of sign changes in last 8 bars [0, 1]
+    17 green_bar_ratio  — fraction of up-bars in last 8 bars [0, 1]
+    18 atr_expansion    — recent ATR vs lagged ATR ratio minus 1, capped [-1, 2]
+    19 btc_ret_1        — 1-bar BTC return
     """
     c  = np.asarray(closes,    dtype=float)
     v  = np.asarray(volumes,   dtype=float)
@@ -165,31 +195,90 @@ def build_features(closes, volumes, btc_closes, hour):
     # ── Volume ratio (capped to prevent explosion on low-liquidity spikes) ────
     prior_avg = float(np.mean(v[-16:-1]))
     vol_r     = (v[-1] / prior_avg) if prior_avg > 0 else 1.0
-    vol_r     = min(vol_r, 10.0)   # cap at 10× to avoid extreme values
+    vol_r     = min(vol_r, 10.0)
 
     # ── BTC-relative return (4-bar) ───────────────────────────────────────────
     btc_ret_4 = (bc[-1] - bc[-5]) / bc[-5] if len(bc) >= 5 and bc[-5] != 0 else 0.0
     btc_rel   = ret_4 - btc_ret_4
 
     # ── Short SMA slope (non-overlapping 8-bar windows) ──────────────────────
-    # Compare SMA of last 8 bars vs SMA of 8 bars before that.
-    # Positive = uptrend, negative = downtrend.  Capped at ±0.10.
-    sma_last = float(np.mean(c[-8:]))
-    sma_prev = float(np.mean(c[-16:-8]))
+    sma_last  = float(np.mean(c[-8:]))
+    sma_prev  = float(np.mean(c[-16:-8]))
     sma_slope = (sma_last - sma_prev) / sma_prev if sma_prev != 0 else 0.0
     sma_slope = float(np.clip(sma_slope, -0.10, 0.10))
+
+    # ── Range efficiency (trend purity) ──────────────────────────────────────
+    c16 = c[-17:]   # 16-bar window
+    net_move_16  = abs(c16[-1] - c16[0])
+    sum_moves_16 = float(np.sum(np.abs(np.diff(c16))))
+    range_eff = net_move_16 / sum_moves_16 if sum_moves_16 > 0 else 0.5
+
+    # ── Fast SMA slope (4-bar window) ─────────────────────────────────────────
+    sma_fast_now  = float(np.mean(c[-4:]))
+    sma_fast_prev = float(np.mean(c[-8:-4]))
+    sma_fast_slope = (sma_fast_now - sma_fast_prev) / sma_fast_prev if sma_fast_prev != 0 else 0.0
+    sma_fast_slope = float(np.clip(sma_fast_slope, -0.10, 0.10))
+
+    # ── Price vs SMA-fast and SMA-slow ────────────────────────────────────────
+    price_vs_sma_fast = (last - sma_fast_now) / sma_fast_now if sma_fast_now != 0 else 0.0
+    price_vs_sma_slow = (last - sma_last) / sma_last if sma_last != 0 else 0.0
+
+    # ── Recent high breakout ──────────────────────────────────────────────────
+    recent_high = float(np.max(c[-17:-1]))
+    recent_high_breakout = float(np.clip(
+        (last / recent_high - 1.0) if recent_high > 0 else 0.0, -0.10, 0.10
+    ))
+
+    # ── Volume z-score (normalised spike detection) ───────────────────────────
+    vol_mean   = float(np.mean(v[-16:]))
+    vol_std    = float(np.std(v[-16:]))
+    vol_zscore = float(np.clip(
+        (v[-1] - vol_mean) / vol_std if vol_std > 0 else 0.0, -3.0, 3.0
+    ))
+
+    # ── Reversal count (sign changes in last 8 bars) ──────────────────────────
+    bar_rets = np.diff(c[-9:])
+    signs = np.sign(bar_rets)
+    reversals = int(np.sum(signs[1:] != signs[:-1]))
+    reversal_frac = reversals / 7.0   # normalise to [0, 1]
+
+    # ── Green bar ratio (fraction of up-bars in last 8 bars) ──────────────────
+    green_bar_ratio = float(np.sum(bar_rets > 0)) / 8.0
+
+    # ── ATR expansion (current vs lagged) ─────────────────────────────────────
+    if len(c) >= 9:
+        atr_recent = float(np.mean(np.abs(np.diff(c[-5:]))))
+        atr_older  = float(np.mean(np.abs(np.diff(c[-9:-5]))))
+        atr_expansion = float(np.clip(
+            (atr_recent / atr_older - 1.0) if atr_older > 0 else 0.0, -1.0, 2.0
+        ))
+    else:
+        atr_expansion = 0.0
+
+    # ── 1-bar BTC return ──────────────────────────────────────────────────────
+    btc_ret_1 = (bc[-1] - bc[-2]) / bc[-2] if len(bc) >= 2 and bc[-2] != 0 else 0.0
 
     return np.array([
         ret_1,
         ret_4,
         ret_8,
         ret_16,
-        rsi / 100.0,          # normalise to [0, 1]
+        rsi / 100.0,
         atr_n,
         vol_r,
         btc_rel,
-        float(hour) / 23.0,   # normalise to [0, 1]
-        sma_slope,             # short SMA slope — replaces reserved zero slot
+        float(hour) / 23.0,
+        sma_slope,             # feature 9
+        range_eff,             # feature 10 (NEW)
+        sma_fast_slope,        # feature 11 (NEW)
+        price_vs_sma_fast,     # feature 12 (NEW)
+        price_vs_sma_slow,     # feature 13 (NEW)
+        recent_high_breakout,  # feature 14 (NEW)
+        vol_zscore,            # feature 15 (NEW)
+        reversal_frac,         # feature 16 (NEW)
+        green_bar_ratio,       # feature 17 (NEW)
+        atr_expansion,         # feature 18 (NEW)
+        btc_ret_1,             # feature 19 (NEW)
     ], dtype=float)
 
 
@@ -475,6 +564,8 @@ class VoxEnsemble:
 
         self._model.fit(X, y_class)
         self._fitted = True
+        # Store feature count so load_state can detect stale models after FEATURE_COUNT bumps.
+        self._feature_count = X.shape[1] if hasattr(X, "shape") else FEATURE_COUNT
 
         # Train regression ensemble when return targets are available.
         if y_return is not None and len(y_return) >= MIN_REGRESSOR_SAMPLES:
@@ -591,6 +682,19 @@ class VoxEnsemble:
         X = np.atleast_2d(X)
         N = len(X)
 
+        # ── Feature count guard: mark unfitted if shape mismatch ──────────────
+        if X.shape[1] != FEATURE_COUNT:
+            if self._logger:
+                self._logger(
+                    f"[VoxEnsemble] Feature count mismatch: got {X.shape[1]}, "
+                    f"expected {FEATURE_COUNT}. Clearing fitted state."
+                )
+            self._fitted = False
+            raise RuntimeError(
+                f"VoxEnsemble feature count mismatch: got {X.shape[1]}, "
+                f"expected {FEATURE_COUNT}. Model will retrain next cycle."
+            )
+
         # ── Classifier probabilities ──────────────────────────────────────────
         proba_per_model = {}
         for name, est in self._model.named_estimators_.items():
@@ -649,7 +753,20 @@ class VoxEnsemble:
     # ── State management ──────────────────────────────────────────────────────
 
     def load_state(self, saved):
-        """Copy fitted state from a previously serialised VoxEnsemble."""
+        """Copy fitted state from a previously serialised VoxEnsemble.
+
+        If the saved model was trained on a different feature count (i.e., before
+        FEATURE_COUNT was bumped from 10 → 20), the fitted state is rejected and
+        the caller will trigger a retrain on the next cycle.
+        """
+        saved_fc = getattr(saved, "_feature_count", None)
+        if saved_fc is not None and saved_fc != FEATURE_COUNT:
+            if self._logger:
+                self._logger(
+                    f"[VoxEnsemble] Stale model (trained on {saved_fc} features, "
+                    f"current FEATURE_COUNT={FEATURE_COUNT}). Discarding saved state."
+                )
+            return   # leave self._fitted = False so caller retrains
         self._model         = saved._model
         self._fitted        = saved._fitted
         self._positive_rate = getattr(saved, "_positive_rate", 0.0)
