@@ -324,7 +324,14 @@ class VoxAlgorithm(QCAlgorithm):
         self._try_enter()
 
     def _clear_position_state(self, include_retry=False):
-        """Reset all position state fields after an exit or cancellation."""
+        """Reset all position state fields after an exit or cancellation.
+
+        Note: _last_feat is intentionally NOT cleared here because it is a
+        per-symbol dict used for exit decisions (momentum-fail) and the
+        stale feature value is harmless — it will be overwritten on the next
+        entry bar.  Clearing it here would also risk a KeyError if _check_exit
+        reads it for the same symbol during the same tick.
+        """
         self._pos_sym           = None
         self._entry_px          = 0.0
         self._entry_time        = None

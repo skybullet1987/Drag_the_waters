@@ -1288,6 +1288,18 @@ class TestMarketModeDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFeatureCount:
+    def test_feature_count_constant_matches_build_features(self):
+        """FEATURE_COUNT should equal the actual output length of build_features."""
+        from models import build_features, FEATURE_COUNT as FC
+        closes  = list(np.linspace(100, 110, 25))
+        volumes = [1e6] * 20
+        btc     = list(np.linspace(50000, 51000, 10))
+        feat    = build_features(closes, volumes, btc, hour=12)
+        assert feat is not None
+        assert len(feat) == FC, (
+            f"FEATURE_COUNT={FC} but build_features returned {len(feat)} features"
+        )
+
     def test_feature_count_is_20(self):
         assert FEATURE_COUNT == 20
 

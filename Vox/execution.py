@@ -205,7 +205,12 @@ def evaluate_candidate(
             return None
         counters["n_pass_pred_ret"] += 1
 
-    # Ruthless confirmation gate
+    # Ruthless confirmation gate — priority order:
+    #   1. momentum_override (entry was already a momentum breakout)
+    #   2. strong_ml         (high EV + high class_proba + multi-model agreement)
+    #   3. trend_momentum    (short-term price momentum + volume expansion)
+    #   4. market_mode       (BTC regime aligned — lowest priority, fallback only)
+    # All four paths are checked; first match wins.  If none match, entry is skipped.
     confirm_reason = None
     if risk_profile == "ruthless":
         if entry_path == "momentum_override":
@@ -222,6 +227,8 @@ def evaluate_candidate(
             and float(feat[6]) >= ruthless_confirm_volr_min
         ):
             confirm_reason = "trend_momentum"
+        # market_mode is the lowest-priority confirmation path: only tried when
+        # momentum_override, strong_ml, and trend_momentum all fail.
         if confirm_reason is None and market_mode is not None:
             allowed = ruthless_allowed_modes or ["risk_on_trend", "pump"]
             if market_mode in allowed:

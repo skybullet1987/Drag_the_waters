@@ -450,6 +450,226 @@ min_alloc    = 0.75      # Kelly floor if re-enabling Kelly
 runner_mode  = true      # trailing stop — already default in ruthless
 ```
 
+---
+
+## Ruthless v4 Improvements
+
+### 1 — Delayed trailing activation
+
+Trailing now activates at **+7 %** (was +4 %) and trails **3 %** from the
+high-water mark (was 2.5 %).  This gives winners more room to develop before
+clipping, addressing the common pattern where the trailing stop was triggered
+at +1–3 % gains while losses ran to the full −3 %.
+
+```
+trail_after_tp = 0.07   # was 0.04
+trail_pct      = 0.03   # was 0.025
+```
+
+Balanced, conservative, and aggressive profiles are not affected.
+
+### 2 — Breakeven stop
+
+Once a ruthless trade reaches **+3 %** peak return, the effective stop is
+raised to entry **+0.3 %**.  If the price then falls back to that level the
+trade exits as **`EXIT_SL`** (keeping the minor profit) instead of running to
+the full −3 % stop-loss.
+
+```
+breakeven_after  = 0.03    # arm at +3 % peak return
+breakeven_buffer = 0.003   # effective stop = +0.3 %
+```
+
+The `breakeven_active` field is logged on every exit.  The breakeven state
+is fully reset on entry, exit, reconcile, and dust-clearing paths.
+
+### 3 — Momentum-failure early exit
+
+If a ruthless position has been held for at least **30 minutes**, is down
+**−1.2 %** or more, and **both** `ret_4` and `ret_16` are negative, the trade
+is cut immediately with tag **`EXIT_MOM_FAIL`**.
+
+```
+mom_fail_enabled          = true
+mom_fail_min_hold_minutes = 30
+mom_fail_loss             = -0.012   # -1.2%
+```
+
+This exits via **market order** to guarantee reliability.  Non-ruthless
+profiles are not affected.
+
+### 4 — Smarter timeout extension
+
+When the timeout is reached on a ruthless runner trade:
+
+| Condition | Action |
+|-----------|--------|
+| `ret >= +3 %` | Allow normal EXIT_TIMEOUT |
+| `ret > -1 %` AND `ret_4 > 0` AND extension budget remaining | Extend hold by 12 h |
+| All other cases | Exit immediately |
+
+```
+timeout_min_profit   = 0.03    # allow exit only if profitable
+timeout_extend_hours = 12      # extend window by 12 h
+max_timeout_hours    = 48      # hard cap on total hold time
+```
+
+The extension is logged once per position:
+```
+[ruthless] TIMEOUT EXTENDED: SOLUSD ret=1.5% new_timeout=36.0h
+```
+
+### 5 — Market mode / regime detection
+
+A lightweight `MarketModeDetector` (in `Vox/market_mode.py`) classifies the
+BTC 4-hour trend into one of five modes:
+
+| Mode | Description |
+|------|-------------|
+| `risk_on_trend` | BTC trending up, moderate volatility |
+| `pump` | BTC rising fast with volume expansion |
+| `chop` | Oscillating, low directional momentum |
+| `selloff` | BTC trending down |
+| `high_vol_reversal` | Extreme volatility, conflicting signals |
+
+Ruthless entries are permitted only in **`risk_on_trend`** and **`pump`**
+modes (configurable via `RUTHLESS_ALLOWED_MODES`).  If the BTC data detector
+detects a non-allowed mode, it becomes an additional `market_mode` confirmation
+path rather than a hard block — ensuring the confirmation gate logic still
+allows strong-ML or trend-momentum entries to proceed.
+
+```
+market_mode_enabled   = true
+ruthless_allowed_modes = ["risk_on_trend", "pump"]
+```
+
+### 6 — Ruthless-specific labels / horizon
+
+Label parameters for ruthless training are now wider, targeting larger 24–48 h
+moves instead of the default 6 h balanced labels:
+
+```
+ruthless_label_tp           = 0.06     # vs. balanced 1.2 %
+ruthless_label_sl           = 0.03     # vs. balanced 1.0 %
+ruthless_label_horizon_bars = 96       # 8 h at 5-min bars (≈24 h window)
+```
+
+When `risk_profile=ruthless`, the retrain pipeline uses these wider barriers
+so the model is optimised for the actual ruthless trade geometry.
+
+### 7 — Richer trend/chop features (20 total)
+
+`build_features()` now returns **20 features** (was 10).  Ten new
+dependency-free features distinguish clean trends from chop:
+
+| Feature | Description |
+|---------|-------------|
+| `range_efficiency` | Net move / sum of absolute moves; near 1.0 = clean trend |
+| `sma_fast_slope` | 4-bar SMA slope vs. prior 4 bars |
+| `price_vs_sma_fast` | Close relative to 4-bar SMA |
+| `price_vs_sma_slow` | Close relative to 8-bar SMA |
+| `recent_high_breakout` | Distance above 16-bar prior high |
+| `vol_zscore` | Volume z-score over 16 bars |
+| `reversal_frac` | Fraction of sign changes in last 8 bars |
+| `green_bar_ratio` | Fraction of up-bars in last 8 bars |
+| `atr_expansion` | Recent ATR / lagged ATR − 1 |
+| `btc_ret_1` | 1-bar BTC return |
+
+**Backward compatibility:** if an older 10-feature model is loaded from the
+ObjectStore and prediction fails due to feature count mismatch, the ensemble
+automatically marks itself as unfitted and retrains on the next cycle.
+
+### 8 — Meta-filter / veto model
+
+A rules-based `MetaFilter` (in `Vox/meta_model.py`) computes a conviction
+score from multiple signals and vetoes low-confidence ruthless entries:
+
+```
+meta_filter_enabled = true   (ruthless only)
+meta_min_proba      = 0.55
+```
+
+The meta-score combines model confidence, model agreement, EV, momentum,
+volume, and market mode alignment.  Entry logs show the meta decision:
+
+```
+[ruthless] META-FILTER VETO: INJUSD meta_score=0.42 < 0.55
+[ruthless] meta_filter approved SOLUSD score=0.73
+```
+
+Non-ruthless profiles are not affected.
+
+### 9 — Optional entry limit orders with TTL
+
+Entry limit orders can optionally reduce slippage by buying slightly below the
+current price.  Disabled by default.
+
+```
+ruthless_use_entry_limit_orders = false   # set true to enable
+entry_limit_offset              = 0.001   # buy limit at price × (1 − 0.001)
+entry_limit_ttl_minutes         = 3       # cancel unfilled limits after 3 min
+```
+
+Unfilled limits are always cancelled after the TTL — stale signals are never
+chased.  **Stop / emergency / momentum-failure exits always remain market orders
+regardless of this setting.**
+
+### 10 — Optional LightGBM / XGBoost ensemble members
+
+Import guards allow adding optional gradient boosting members if installed:
+
+```python
+try:
+    from lightgbm import LGBMClassifier
+    HAS_LGBM = True
+except Exception:
+    HAS_LGBM = False
+```
+
+Enable via config flags:
+```
+use_lightgbm = false   # set true if lightgbm is installed
+use_xgboost  = false   # set true if xgboost is installed
+use_catboost = false   # keep false: CatBoost may not be in QC cloud
+```
+
+The **sklearn-native fallback** (LogisticRegression, HistGradientBoosting,
+ExtraTreesClassifier, RandomForestClassifier) always works and is used by
+default.  The algorithm logs availability at startup.
+
+### 11 — Optional exit limit orders (non-urgent only)
+
+A scaffold for passive limit exits on non-urgent tags (`EXIT_TRAIL`,
+`EXIT_TIMEOUT`, `EXIT_TP`) is wired via config:
+
+```
+use_exit_limit_orders      = false   # disabled by default
+exit_limit_offset          = 0.0005
+exit_limit_ttl_minutes     = 1
+exit_limit_fallback_to_market = true
+```
+
+**`EXIT_SL`, `EXIT_EMERGENCY_SL`, and `EXIT_MOM_FAIL` always use market orders.**
+Exit limit orders are disabled by default since the risk of leaving a position
+open indefinitely outweighs the marginal slippage saving.
+
+### ⚠️ Ruthless remains high-risk
+
+Even with all v4 improvements, ruthless mode:
+- Takes near-full portfolio allocations on single positions
+- Can suffer large drawdowns during trend failures or black-swan events
+- Is **not suitable** as a primary strategy without careful out-of-sample validation
+- Requires robust anti-chop controls, breakeven protection, and meta-filtering
+  to avoid the "high-size chop scalping" failure mode
+
+### File-size constraint
+
+All Python files in the `Vox/` package must remain **under 63,000 characters**
+for QuantConnect compatibility.  Large new code is placed in dedicated modules
+(`execution.py`, `market_mode.py`, `meta_model.py`) rather than `main.py`.
+
+---
+
 ### Momentum breakout override (aggressive/ruthless)
 
 In aggressive and ruthless profiles, a candidate that fails normal ML gates

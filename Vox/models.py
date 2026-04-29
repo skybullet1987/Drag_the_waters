@@ -60,6 +60,9 @@ VOX_ENABLE_CV = False
 CV_SPLITS = 3
 
 # Current output dimension of build_features.
+# Changed from 10 (Vox v2) to 20 (Vox v4) by adding 10 trend/chop features.
+# Backward-compatibility: load_state() detects mismatches and leaves the
+# ensemble unfitted so the next cycle retrains on the new feature set.
 FEATURE_COUNT = 20
 
 # ── Label-specific triple-barrier parameters ──────────────────────────────────
