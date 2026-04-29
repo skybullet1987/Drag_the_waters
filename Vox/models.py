@@ -120,7 +120,7 @@ def compute_atr(highs, lows, closes, period=14):
 
 
 def build_features(closes, volumes, btc_closes, hour):
-    """Build the 20-element feature vector for one decision bar.
+    """Build the FEATURE_COUNT-element feature vector for one decision bar.
 
     Parameters
     ----------
@@ -131,7 +131,7 @@ def build_features(closes, volumes, btc_closes, hour):
 
     Returns
     -------
-    numpy.ndarray of shape (20,) or None when insufficient history.
+    numpy.ndarray of shape (FEATURE_COUNT,) or None when insufficient history.
 
     Feature layout
     --------------
@@ -565,7 +565,7 @@ class VoxEnsemble:
         self._model.fit(X, y_class)
         self._fitted = True
         # Store feature count so load_state can detect stale models after FEATURE_COUNT bumps.
-        self._feature_count = X.shape[1] if hasattr(X, "shape") else FEATURE_COUNT
+        self._feature_count = X.shape[1] if hasattr(X, "shape") and len(X.shape) > 1 else FEATURE_COUNT
 
         # Train regression ensemble when return targets are available.
         if y_return is not None and len(y_return) >= MIN_REGRESSOR_SAMPLES:

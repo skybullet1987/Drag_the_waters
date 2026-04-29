@@ -591,7 +591,9 @@ class VoxAlgorithm(QCAlgorithm):
         be_buffer = getattr(self, "_breakeven_buffer", 0.003)
         if not self._breakeven_active and self._max_return_seen >= be_after:
             self._breakeven_active = True
-        if self._breakeven_active and ret <= be_buffer:
+        if self._breakeven_active and apply_breakeven(
+            ret, self._max_return_seen, be_after, be_buffer
+        ):
             _be_qty = OrderHelper.safe_crypto_sell_qty(
                 self, sym,
                 OrderHelper.get_lot_size(self.securities[sym]),

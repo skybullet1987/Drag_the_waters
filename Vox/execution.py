@@ -6,10 +6,13 @@ from datetime import timedelta
 # ── Breakeven stop ──────────────────────────────────────────────────────────
 
 def apply_breakeven(ret, max_return_seen, breakeven_after, breakeven_buffer):
-    """Return True if breakeven stop should trigger (position reversing through entry
-    after having hit +breakeven_after)."""
+    """Return True if breakeven stop should trigger.
+
+    Triggers when the position has reached +breakeven_after and then pulled
+    back to at or below +breakeven_buffer (protecting most of the gain).
+    """
     if max_return_seen >= breakeven_after:
-        return ret < breakeven_buffer
+        return ret <= breakeven_buffer
     return False
 
 

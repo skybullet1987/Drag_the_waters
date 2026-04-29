@@ -99,9 +99,8 @@ RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
 # Runner / trailing-profit parameters
 RUTHLESS_RUNNER_MODE             = True    # trailing stop instead of instant TP exit
-# Ruthless v4: delayed trailing activation (trail activates later, trails less tightly)
-RUTHLESS_TRAIL_AFTER_TP          = 0.07   # was 0.04: activate trailing once return >= +7%
-RUTHLESS_TRAIL_PCT               = 0.03   # was 0.025: trail 3% from high
+RUTHLESS_TRAIL_AFTER_TP          = 0.07   # activate trailing once return >= +7%
+RUTHLESS_TRAIL_PCT               = 0.03   # trail 3% from high-water mark
 
 # ── Ruthless v4: breakeven stop ───────────────────────────────────────────────
 RUTHLESS_BREAKEVEN_AFTER         = 0.03   # move stop to entry after +3% return seen
@@ -139,7 +138,7 @@ EXIT_LIMIT_FALLBACK_TO_MARKET    = True   # fallback to market if limit not fill
 # ── Optional external ML models ───────────────────────────────────────────────
 USE_LIGHTGBM                     = False  # enable if lightgbm installed
 USE_XGBOOST                      = False  # enable if xgboost installed
-USE_CATBOOST                     = False  # keep disabled: QC may not support it
+USE_CATBOOST                     = False  # disabled: CatBoost is not available in the QC cloud environment
 
 # ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
 RUTHLESS_LOSS_WINDOW_HOURS       = 24     # rolling window for counting SL exits
