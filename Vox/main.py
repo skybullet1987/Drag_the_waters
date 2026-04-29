@@ -571,7 +571,10 @@ class VoxAlgorithm(QCAlgorithm):
                 else:
                     return   # still running — keep holding
             else:
-                # Check if we should activate the trailing stop
+                # Check if we should activate the trailing stop.
+                # Activate at whichever threshold is reached first: the
+                # configured trail_after_tp (e.g. +4%) or the ATR-derived
+                # tp_use (in case ATR produces a target below trail_after_tp).
                 trail_trigger = min(tp_use, self._trail_after_tp)
                 if ret >= trail_trigger:
                     self._trail_active  = True

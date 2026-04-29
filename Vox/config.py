@@ -200,14 +200,11 @@ def setup_risk_profile(algo):
         algo._kf               = RUTHLESS_KELLY_FRAC
         # Sizing floor + Kelly override — prevent Kelly from shrinking positions
         # below 75 % of portfolio.  Default: Kelly disabled for flat 90 % sizing.
-        if not hasattr(algo, "_min_alloc") or algo._min_alloc == 0.0:
+        if getattr(algo, "_min_alloc", 0.0) == 0.0:
             algo._min_alloc    = RUTHLESS_MIN_ALLOC
-        if not hasattr(algo, "_use_kelly"):
-            algo._use_kelly    = RUTHLESS_USE_KELLY
-        else:
-            _uk_raw = algo.get_parameter("use_kelly")
-            if not _uk_raw:   # no explicit QC override → use ruthless default
-                algo._use_kelly = RUTHLESS_USE_KELLY
+        _uk_raw = algo.get_parameter("use_kelly")
+        if not _uk_raw:   # no explicit QC override → use ruthless default
+            algo._use_kelly = RUTHLESS_USE_KELLY
         algo._tp               = RUTHLESS_TAKE_PROFIT
         algo._sl               = RUTHLESS_STOP_LOSS
         algo._toh              = RUTHLESS_TIMEOUT_HOURS
@@ -220,15 +217,15 @@ def setup_risk_profile(algo):
         algo._penalty_hours    = RUTHLESS_PENALTY_COOLDOWN_HOURS
         algo._max_dd           = RUTHLESS_MAX_DD_PCT
         # Runner mode — trailing stop replaces instant TP exit
-        if not hasattr(algo, "_runner_mode") or not algo._runner_mode:
+        if not getattr(algo, "_runner_mode", False):
             _rm_param = algo.get_parameter("runner_mode")
             algo._runner_mode = (
                 str(_rm_param).lower() in ("true", "1", "yes")
                 if _rm_param else RUTHLESS_RUNNER_MODE
             )
-        if not hasattr(algo, "_trail_after_tp"):
+        if not getattr(algo, "_trail_after_tp", None):
             algo._trail_after_tp = RUTHLESS_TRAIL_AFTER_TP
-        if not hasattr(algo, "_trail_pct"):
+        if not getattr(algo, "_trail_pct", None):
             algo._trail_pct      = RUTHLESS_TRAIL_PCT
 
     # ── Momentum override setup ───────────────────────────────────────────────

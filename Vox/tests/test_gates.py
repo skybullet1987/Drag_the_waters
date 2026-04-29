@@ -565,8 +565,8 @@ class TestRuthlessV2Constants:
         """Ruthless v2 pred_return_min must be lower than aggressive (very loose veto)."""
         assert RUTHLESS_PRED_RETURN_MIN < AGGRESSIVE_PRED_RETURN_MIN
 
-    def test_ruthless_v2_pred_return_min_is_minus_four_bps(self):
-        """Ruthless v2 pred_return_min should be -0.004 (40 bp loose veto)."""
+    def test_ruthless_v2_pred_return_min_is_minus_forty_bps(self):
+        """Ruthless v2 pred_return_min should be -0.004 (−40 bps = −0.40 % loose veto)."""
         assert RUTHLESS_PRED_RETURN_MIN == pytest.approx(-0.004)
 
     def test_ruthless_v2_min_alloc_defined(self):

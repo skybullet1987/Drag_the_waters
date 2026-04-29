@@ -185,7 +185,7 @@ def compute_qty(
     else:
         alloc = allocation
 
-    alloc        = min(alloc, max_alloc)   # honour hard ceiling after any floor
+    alloc        = min(alloc, max_alloc)   # honor hard ceiling after any floor
     dollar_value = portfolio_value * alloc * cash_buffer
     qty          = dollar_value / price if price > 0 else 0.0
     return qty, alloc
