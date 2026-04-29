@@ -71,6 +71,14 @@ class VoxAlgorithm(QCAlgorithm):
         self._penalty_hours  = float(self.get_parameter("penalty_cooldown_hours") or PENALTY_COOLDOWN_HOURS)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
+        # Minimum allocation floor — prevents Kelly from shrinking positions below
+        # this fraction.  Default 0.0 preserves existing balanced-mode behaviour.
+        self._min_alloc = float(self.get_parameter("min_alloc") or 0.0)
+        # Runner / trailing-profit mode — ruthless only by default.
+        # setup_risk_profile() will override these for the ruthless profile.
+        self._runner_mode    = False
+        self._trail_after_tp = 0.04    # activate trailing once return ≥ this
+        self._trail_pct      = 0.025   # trail stop: price drops this % from high
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
         self._label_sl      = float(self.get_parameter("label_sl")           or LABEL_SL)
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
@@ -153,6 +161,9 @@ class VoxAlgorithm(QCAlgorithm):
         self._exiting          = False   # True while an exit order is in flight
         self._exit_time        = None    # time of most recent completed exit
         self._exit_retry_count = 0       # consecutive INVALID exit retry counter
+        # Runner / trailing-profit state — reset on every entry and exit
+        self._trail_active     = False   # True once trailing stop has been activated
+        self._trail_high_px    = 0.0     # highest price seen since trail activation
 
         # ── Entry prediction store (for realized-EV logging at exit) ──────────
         # sym -> {class_proba, pred_return, ev, final_score, tp, sl, time}
@@ -352,13 +363,15 @@ class VoxAlgorithm(QCAlgorithm):
                 self._sym_outcomes[sym].append(ret)
                 self._update_penalty_cooldown(sym, is_sl)
 
-                self._pos_sym    = None
-                self._entry_px   = 0.0
-                self._entry_time = None
-                self._tp_dyn     = 0.0
-                self._sl_dyn     = 0.0
-                self._exiting    = False
-                self._exit_time  = self.time
+                self._pos_sym       = None
+                self._entry_px      = 0.0
+                self._entry_time    = None
+                self._tp_dyn        = 0.0
+                self._sl_dyn        = 0.0
+                self._exiting       = False
+                self._exit_time     = self.time
+                self._trail_active  = False
+                self._trail_high_px = 0.0
 
         elif order_event.status == OrderStatus.PARTIALLY_FILLED:
             self._fill_tracker.on_fill(oid, abs(float(order_event.fill_quantity)))
@@ -383,11 +396,13 @@ class VoxAlgorithm(QCAlgorithm):
                     f" clearing pending"
                 )
                 self._fill_tracker.clear(oid)
-                self._pending_sym = None
-                self._pending_oid = None
-                self._pos_sym    = None
-                self._entry_px   = 0.0
-                self._entry_time = None
+                self._pending_sym   = None
+                self._pending_oid   = None
+                self._pos_sym       = None
+                self._entry_px      = 0.0
+                self._entry_time    = None
+                self._trail_active  = False
+                self._trail_high_px = 0.0
 
             elif tag.startswith("EXIT") and sym == self._pos_sym:
                 self._exit_retry_count += 1
@@ -421,6 +436,8 @@ class VoxAlgorithm(QCAlgorithm):
                     self._exiting          = False
                     self._exit_time        = self.time
                     self._exit_retry_count = 0
+                    self._trail_active     = False
+                    self._trail_high_px    = 0.0
                 else:
                     self.debug(
                         f"EXIT order {oid} for {sym.value} —"
@@ -446,13 +463,15 @@ class VoxAlgorithm(QCAlgorithm):
                     f"RECONCILE: tracking {sym.value} but qty={qty:.6f}"
                     f" — clearing stale state"
                 )
-                self._pos_sym    = None
-                self._entry_px   = 0.0
-                self._entry_time = None
-                self._tp_dyn     = 0.0
-                self._sl_dyn     = 0.0
-                self._exiting    = False
-                self._exit_time  = self.time
+                self._pos_sym       = None
+                self._entry_px      = 0.0
+                self._entry_time    = None
+                self._tp_dyn        = 0.0
+                self._sl_dyn        = 0.0
+                self._exiting       = False
+                self._exit_time     = self.time
+                self._trail_active  = False
+                self._trail_high_px = 0.0
                 # Inform the risk manager so cooldown accounting is not bypassed.
                 self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
 
@@ -499,6 +518,14 @@ class VoxAlgorithm(QCAlgorithm):
           suppressed.  Only an emergency stop is allowed (loss > emergency_sl).
           This prevents the algo from entering and immediately being shaken out
           by microstructure noise within a few bars.
+
+        Runner mode (ruthless only):
+          When runner_mode=True the strategy does not immediately exit at the TP
+          trigger.  Instead it activates a trailing stop once the return crosses
+          trail_after_tp (or tp_use, whichever is lower).  The trailing stop
+          follows the highest price seen since activation and exits with tag
+          EXIT_TRAIL when price pulls back by trail_pct.  Hard SL, emergency SL,
+          and timeout remain active throughout.
         """
         # Capture immutable local references BEFORE placing any order.
         # market_order() can fill synchronously in QuantConnect/LEAN, meaning
@@ -527,7 +554,33 @@ class VoxAlgorithm(QCAlgorithm):
                 reason = "EXIT_SL"   # emergency stop — override min-hold
             else:
                 return               # hold — suppress normal TP/SL/timeout
+        elif self._runner_mode:
+            # ── Runner / trailing-profit mode ─────────────────────────────────
+            # Hard SL and timeout always take priority over trailing logic.
+            if ret <= -sl_use:
+                reason = "EXIT_SL"
+            elif elapsed_hours >= self._toh:
+                reason = "EXIT_TIMEOUT"
+            elif self._trail_active:
+                # Update the high-water mark in price space
+                if price > self._trail_high_px:
+                    self._trail_high_px = price
+                # Trail stop: exit if price falls trail_pct from the high
+                if price <= self._trail_high_px * (1.0 - self._trail_pct):
+                    reason = "EXIT_TRAIL"
+                else:
+                    return   # still running — keep holding
+            else:
+                # Check if we should activate the trailing stop
+                trail_trigger = min(tp_use, self._trail_after_tp)
+                if ret >= trail_trigger:
+                    self._trail_active  = True
+                    self._trail_high_px = price
+                    return   # don't exit yet — trail is now live
+                else:
+                    return   # below trigger — keep holding
         else:
+            # ── Normal (balanced / conservative / aggressive) exit logic ───────
             reason = None
             if ret >= tp_use:
                 reason = "EXIT_TP"
@@ -561,6 +614,7 @@ class VoxAlgorithm(QCAlgorithm):
                 f"EXIT order {sym.value}  reason={reason}"
                 f"  qty={qty:.6f}  ret={ret:.3%}"
                 f"  elapsed_min={elapsed_minutes:.1f}"
+                + (f"  trail_high={self._trail_high_px:.4f}" if self._trail_active else "")
             )
             self.market_order(sym, -qty, tag=reason)
         else:
@@ -581,6 +635,8 @@ class VoxAlgorithm(QCAlgorithm):
             self._exiting          = False
             self._exit_time        = self.time
             self._exit_retry_count = 0
+            self._trail_active     = False
+            self._trail_high_px    = 0.0
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
@@ -881,6 +937,7 @@ class VoxAlgorithm(QCAlgorithm):
             cash_buffer     = self._cb,
             use_kelly       = self._use_kelly,
             allocation      = self._alloc,
+            min_alloc       = self._min_alloc,
         )
 
         # Cash check
@@ -917,9 +974,11 @@ class VoxAlgorithm(QCAlgorithm):
         # market_order() before it returns.  If _pending_sym is still None when
         # that happens the ENTRY fill is silently ignored and the state machine
         # gets permanently stuck (_pending_sym stays set, _pos_sym never set).
-        self._pending_sym = top_sym
-        self._tp_dyn      = tp_use
-        self._sl_dyn      = sl_use
+        self._pending_sym   = top_sym
+        self._tp_dyn        = tp_use
+        self._sl_dyn        = sl_use
+        self._trail_active  = False   # reset trail state on every new entry
+        self._trail_high_px = 0.0
         order = self.market_order(top_sym, qty, tag="ENTRY")
         # order_id is only available on the returned ticket; assign after the call.
         self._pending_oid = order.order_id
