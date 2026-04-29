@@ -16,6 +16,13 @@ from risk    import RegimeFilter, RiskManager, compute_qty
 from config   import *                       # noqa: F401,F403  strategy constants
 from config   import setup_risk_profile
 from momentum import check_momentum_override_conditions, compute_momentum_score
+from execution import (
+    apply_breakeven, is_breakeven_active, should_exit_momentum_fail,
+    evaluate_timeout, LimitOrderTracker, evaluate_candidate,
+)
+from market_mode import MarketModeDetector
+from meta_model  import MetaFilter
+from infra import hydrate_state_from_history
 
 np.random.seed(42)
 random.seed(42)
@@ -45,7 +52,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._atr_sl   = float(self.get_parameter("atr_sl_mult")      or ATR_SL_MULT)
         self._s_min    = float(self.get_parameter("score_min")        or SCORE_MIN)
         self._s_min_floor = SCORE_MIN_FLOOR
-        self._s_gap    = float(self.get_parameter("score_gap")        or SCORE_GAP)  # probability-gap threshold (mean_proba units)
+        self._s_gap    = float(self.get_parameter("score_gap")        or SCORE_GAP)
         self._max_disp = float(self.get_parameter("max_dispersion")   or MAX_DISPERSION)
         self._min_agr  = int(self.get_parameter("min_agree")          or MIN_AGREE)
         self._alloc    = float(self.get_parameter("allocation")       or ALLOCATION)
@@ -63,7 +70,7 @@ class VoxAlgorithm(QCAlgorithm):
         )
         self._cost_bps = float(self.get_parameter("cost_bps")         or COST_BPS)
         self._min_ev   = float(self.get_parameter("min_ev")           or MIN_EV)
-        self._ev_gap   = float(self.get_parameter("ev_gap")           or EV_GAP)   # EV-gap threshold (return-fraction units, NOT probability units)
+        self._ev_gap   = float(self.get_parameter("ev_gap")           or EV_GAP)
         self._pred_return_min = float(self.get_parameter("pred_return_min") or PRED_RETURN_MIN)
         self._min_hold_minutes = int(self.get_parameter("min_hold_minutes") or MIN_HOLD_MINUTES)
         self._emergency_sl = float(self.get_parameter("emergency_sl") or EMERGENCY_SL)
@@ -71,14 +78,10 @@ class VoxAlgorithm(QCAlgorithm):
         self._penalty_hours  = float(self.get_parameter("penalty_cooldown_hours") or PENALTY_COOLDOWN_HOURS)
         _uc_raw        = self.get_parameter("use_calibration")
         self._use_calibration = (str(_uc_raw).lower() in ("true", "1", "yes")) if _uc_raw else True
-        # Minimum allocation floor — prevents Kelly from shrinking positions below
-        # this fraction.  Default 0.0 preserves existing balanced-mode behaviour.
         self._min_alloc = float(self.get_parameter("min_alloc") or 0.0)
-        # Runner / trailing-profit mode — ruthless only by default.
-        # setup_risk_profile() will override these for the ruthless profile.
         self._runner_mode    = False
-        self._trail_after_tp = 0.04    # activate trailing once return ≥ this
-        self._trail_pct      = 0.025   # trail stop: price drops this % from high
+        self._trail_after_tp = 0.04
+        self._trail_pct      = 0.025
         self._label_tp      = float(self.get_parameter("label_tp")           or LABEL_TP)
         self._label_sl      = float(self.get_parameter("label_sl")           or LABEL_SL)
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
@@ -88,6 +91,13 @@ class VoxAlgorithm(QCAlgorithm):
         # Resolves effective profile (ruthless/aggressive/conservative/balanced)
         # from QC parameters and applies gate/sizing overrides.  See config.py.
         setup_risk_profile(self)
+
+        # ── Ruthless v4: market mode detector + meta filter ───────────────────
+        self._market_mode_det  = None   # created after universe is ready
+        self._meta_filter      = MetaFilter(
+            enabled  = getattr(self, "_meta_filter_enabled", False),
+            min_proba= getattr(self, "_meta_min_proba", 0.55),
+        )
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -100,9 +110,8 @@ class VoxAlgorithm(QCAlgorithm):
             self.securities[sym].set_slippage_model(ConstantSlippageModel(0.001))
 
         # ── Per-symbol state deques ───────────────────────────────────────────
-        # Bars per day at the chosen resolution × WARMUP_DAYS × 1.2 safety margin.
         _bars_per_day = int(24 * 60 / RESOLUTION_MINUTES)
-        _state_max    = int(WARMUP_DAYS * _bars_per_day * 1.2)   # ~31k for 90d @ 5m
+        _state_max    = int(WARMUP_DAYS * _bars_per_day * 1.2)
         _dq = lambda n=_state_max: deque(maxlen=n)
         self._state = {}
         for sym in self._symbols:
@@ -125,6 +134,11 @@ class VoxAlgorithm(QCAlgorithm):
         self._regime = RegimeFilter()
         if self._btc_sym:
             self._regime.update_btc(self, self._btc_sym)
+
+        # ── Market mode detector (4h BTC consolidator) ────────────────────────
+        _mm_enabled = getattr(self, "_market_mode_enabled", False)
+        if _mm_enabled and self._btc_sym:
+            self._market_mode_det = MarketModeDetector(algorithm=self, btc_sym=self._btc_sym)
 
         # ── Risk manager ──────────────────────────────────────────────────────
         self._risk = RiskManager(
@@ -165,6 +179,14 @@ class VoxAlgorithm(QCAlgorithm):
         self._trail_active     = False   # True once trailing stop has been activated
         self._trail_high_px    = 0.0     # highest price seen since trail activation
 
+        # ── Ruthless v4 position state ────────────────────────────────────────
+        self._max_return_seen   = 0.0    # high-water return for breakeven
+        self._breakeven_active  = False  # True when stop moved to entry
+        self._timeout_ext_hours = 0.0    # accumulated timeout extensions
+        self._timeout_ext_logged= False  # prevents duplicate extension logs
+        self._last_feat         = {}     # sym -> feat array (for exit logic)
+        self._entry_limit_tracker = None # LimitOrderTracker when enabled
+
         # ── Entry prediction store (for realized-EV logging at exit) ──────────
         # sym -> {class_proba, pred_return, ev, final_score, tp, sl, time}
         self._entry_predictions = {}
@@ -174,12 +196,10 @@ class VoxAlgorithm(QCAlgorithm):
         # after repeated losses (independent of the per-coin SL cooldown in RiskManager).
         from collections import deque as _deque
         self._sym_outcomes     = {sym: _deque(maxlen=10) for sym in self._symbols}
-        self._sym_penalty_until = {}  # sym -> datetime when penalty ends
-        # Ruthless anti-chop: tracks SL exit timestamps per symbol for 2-in-24h block
-        self._sym_sl_times     = {}   # sym -> deque of SL exit datetimes (ruthless only)
-        # Ruthless portfolio loss-streak brake state
-        self._portfolio_loss_streak  = 0     # consecutive trade losses (any symbol)
-        self._portfolio_pause_until  = None  # datetime until which all entries are paused
+        self._sym_penalty_until = {}
+        self._sym_sl_times     = {}
+        self._portfolio_loss_streak  = 0
+        self._portfolio_pause_until  = None
 
         # ── Diagnostic throttling ──────────────────────────────────────────────
         # Routine skip messages (EV gap too small, regime block, risk block) are
@@ -313,6 +333,24 @@ class VoxAlgorithm(QCAlgorithm):
 
         self._try_enter()
 
+    def _clear_position_state(self, include_retry=False):
+        """Reset all position state fields after an exit or cancellation."""
+        self._pos_sym           = None
+        self._entry_px          = 0.0
+        self._entry_time        = None
+        self._tp_dyn            = 0.0
+        self._sl_dyn            = 0.0
+        self._exiting           = False
+        self._exit_time         = self.time
+        self._trail_active      = False
+        self._trail_high_px     = 0.0
+        self._max_return_seen   = 0.0
+        self._breakeven_active  = False
+        self._timeout_ext_hours = 0.0
+        self._timeout_ext_logged= False
+        if include_retry:
+            self._exit_retry_count = 0
+
     # ── Order-event state machine ──────────────────────────────────────────────
 
     def on_order_event(self, order_event):
@@ -428,20 +466,10 @@ class VoxAlgorithm(QCAlgorithm):
                     else:
                         self._portfolio_loss_streak = 0   # any win resets streak
 
-                self._pos_sym       = None
-                self._entry_px      = 0.0
-                self._entry_time    = None
-                self._tp_dyn        = 0.0
-                self._sl_dyn        = 0.0
-                self._exiting       = False
-                self._exit_time     = self.time
-                self._trail_active  = False
-                self._trail_high_px = 0.0
+                self._clear_position_state()
 
         elif order_event.status == OrderStatus.PARTIALLY_FILLED:
             self._fill_tracker.on_fill(oid, abs(float(order_event.fill_quantity)))
-            # For ENTRY: mark position active once we have any fill so we can
-            # track the position; full completion handled by is_complete check
             if tag == "ENTRY" and sym == self._pending_sym and self._pos_sym is None:
                 self._pos_sym    = sym
                 self._entry_px   = float(order_event.fill_price)
@@ -463,18 +491,10 @@ class VoxAlgorithm(QCAlgorithm):
                 self._fill_tracker.clear(oid)
                 self._pending_sym   = None
                 self._pending_oid   = None
-                self._pos_sym       = None
-                self._entry_px      = 0.0
-                self._entry_time    = None
-                self._trail_active  = False
-                self._trail_high_px = 0.0
+                self._clear_position_state()
 
             elif tag.startswith("EXIT") and sym == self._pos_sym:
                 self._exit_retry_count += 1
-                # Before allowing a retry, check if we can actually submit a
-                # valid sell.  In Kraken cash mode the portfolio holding can
-                # exceed the actual CashBook balance after fees; if the safe
-                # qty is zero/dust, clear state immediately instead of looping.
                 _sec      = self.securities[sym]
                 _lot_size = OrderHelper.get_lot_size(_sec)
                 _min_ord  = OrderHelper.get_min_order_size(_sec)
@@ -483,7 +503,6 @@ class VoxAlgorithm(QCAlgorithm):
                     exit_qty_buffer_lots=self._exit_qty_buffer,
                 )
                 if _safe_qty <= 0 or self._exit_retry_count >= MAX_EXIT_RETRY_COUNT:
-                    # Dust position or retry cap hit — treat as non-actionable
                     self.debug(
                         f"EXIT order {oid} for {sym.value} —"
                         f" status={order_event.status},"
@@ -493,16 +512,7 @@ class VoxAlgorithm(QCAlgorithm):
                     )
                     is_sl = (tag == "EXIT_SL")
                     self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
-                    self._pos_sym          = None
-                    self._entry_px         = 0.0
-                    self._entry_time       = None
-                    self._tp_dyn           = 0.0
-                    self._sl_dyn           = 0.0
-                    self._exiting          = False
-                    self._exit_time        = self.time
-                    self._exit_retry_count = 0
-                    self._trail_active     = False
-                    self._trail_high_px    = 0.0
+                    self._clear_position_state(include_retry=True)
                 else:
                     self.debug(
                         f"EXIT order {oid} for {sym.value} —"
@@ -528,35 +538,22 @@ class VoxAlgorithm(QCAlgorithm):
                     f"RECONCILE: tracking {sym.value} but qty={qty:.6f}"
                     f" — clearing stale state"
                 )
-                self._pos_sym       = None
-                self._entry_px      = 0.0
-                self._entry_time    = None
-                self._tp_dyn        = 0.0
-                self._sl_dyn        = 0.0
-                self._exiting       = False
-                self._exit_time     = self.time
-                self._trail_active  = False
-                self._trail_high_px = 0.0
+                self._clear_position_state()
                 # Inform the risk manager so cooldown accounting is not bypassed.
                 self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
 
         # Safety net for stale pending orders.
-        # If the entry order already settled but on_order_event missed the fill
-        # (synchronous fill race: market_order filled before _pending_sym was set),
-        # reconstruct position state here so the state machine can continue.
         if self._pending_oid is not None:
             order = self.transactions.get_order_by_id(self._pending_oid)
             if order is not None and order.status in (
                 OrderStatus.FILLED, OrderStatus.INVALID, OrderStatus.CANCELED
             ):
                 if order.status == OrderStatus.FILLED:
-                    # Recover from a missed synchronous fill.
                     if self._pos_sym is None and self._pending_sym is not None:
                         held_qty = self.portfolio[self._pending_sym].quantity
                         if held_qty > 0:
                             self._pos_sym    = self._pending_sym
                             self._entry_time = self.time
-                            # Fill price unavailable here; approximate with current price.
                             self._entry_px   = float(
                                 self.securities[self._pending_sym].price
                             )
@@ -576,26 +573,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Exit logic ────────────────────────────────────────────────────────────
 
     def _check_exit(self, price):
-        """Evaluate ATR-based (or fixed) TP / SL / timeout; submit market sell.
-
-        Minimum-hold protection:
-          If elapsed time < min_hold_minutes, ordinary TP/SL/timeout exits are
-          suppressed.  Only an emergency stop is allowed (loss > emergency_sl).
-          This prevents the algo from entering and immediately being shaken out
-          by microstructure noise within a few bars.
-
-        Runner mode (ruthless only):
-          When runner_mode=True the strategy does not immediately exit at the TP
-          trigger.  Instead it activates a trailing stop once the return crosses
-          trail_after_tp (or tp_use, whichever is lower).  The trailing stop
-          follows the highest price seen since activation and exits with tag
-          EXIT_TRAIL when price pulls back by trail_pct.  Hard SL, emergency SL,
-          and timeout remain active throughout.
-        """
-        # Capture immutable local references BEFORE placing any order.
-        # market_order() can fill synchronously in QuantConnect/LEAN, meaning
-        # on_order_event may clear self._pos_sym (and related fields) before
-        # this function returns.  Using locals throughout avoids NoneType errors.
+        """Evaluate TP / SL / timeout and submit market sell if triggered."""
         sym        = self._pos_sym
         entry_px   = self._entry_px
         entry_time = self._entry_time
@@ -610,6 +588,54 @@ class VoxAlgorithm(QCAlgorithm):
 
         tp_use = self._tp_dyn if self._tp_dyn > 0 else self._tp
         sl_use = self._sl_dyn if self._sl_dyn > 0 else self._sl
+        # Ruthless v4: effective timeout with extension
+        _ext   = getattr(self, "_timeout_ext_hours", 0.0)
+        toh_eff = self._toh + _ext
+
+        # ── Ruthless v4: update breakeven high-water mark ────────────────────
+        if ret > self._max_return_seen:
+            self._max_return_seen = ret
+
+        # ── Ruthless v4: breakeven stop ───────────────────────────────────────
+        be_after  = getattr(self, "_breakeven_after",  0.03)
+        be_buffer = getattr(self, "_breakeven_buffer", 0.003)
+        if not self._breakeven_active and self._max_return_seen >= be_after:
+            self._breakeven_active = True
+        if self._breakeven_active and ret <= be_buffer:
+            reason = "EXIT_SL"
+            is_sl  = True
+            self._risk.record_exit(sym, is_sl=True, exit_time=self.time)
+            self._clear_position_state(include_retry=True)
+            self.market_order(sym, -OrderHelper.safe_crypto_sell_qty(
+                self, sym,
+                OrderHelper.get_lot_size(self.securities[sym]),
+                OrderHelper.get_min_order_size(self.securities[sym]),
+                exit_qty_buffer_lots=self._exit_qty_buffer,
+            ), tag="EXIT_SL")
+            return
+
+        # ── Ruthless v4: momentum-fail early exit ────────────────────────────
+        if getattr(self, "_mom_fail_enabled", False):
+            feat_now = self._last_feat.get(sym)
+            if feat_now is not None and should_exit_momentum_fail(
+                feat=feat_now,
+                ret=ret,
+                elapsed_minutes=elapsed_minutes,
+                min_hold_minutes=getattr(self, "_mom_fail_min_hold", 30),
+                min_loss=getattr(self, "_mom_fail_loss", -0.012),
+            ):
+                reason = "EXIT_MOM_FAIL"
+                qty_mf = OrderHelper.safe_crypto_sell_qty(
+                    self, sym,
+                    OrderHelper.get_lot_size(self.securities[sym]),
+                    OrderHelper.get_min_order_size(self.securities[sym]),
+                    exit_qty_buffer_lots=self._exit_qty_buffer,
+                )
+                if qty_mf > 0:
+                    self._exiting = True
+                    self._exit_retry_count = 0
+                    self.market_order(sym, -qty_mf, tag="EXIT_MOM_FAIL")
+                    return
 
         # ── Minimum hold period ────────────────────────────────────────────────
         # During the minimum hold window, suppress ordinary exits.  Only the
@@ -624,7 +650,7 @@ class VoxAlgorithm(QCAlgorithm):
             # Hard SL and timeout always take priority over trailing logic.
             if ret <= -sl_use:
                 reason = "EXIT_SL"
-            elif elapsed_hours >= self._toh:
+            elif elapsed_hours >= toh_eff:
                 reason = "EXIT_TIMEOUT"
             elif self._trail_active:
                 # Update the high-water mark in price space
@@ -654,17 +680,12 @@ class VoxAlgorithm(QCAlgorithm):
                 reason = "EXIT_TP"
             elif ret <= -sl_use:
                 reason = "EXIT_SL"
-            elif elapsed_hours >= self._toh:
+            elif elapsed_hours >= toh_eff:
                 reason = "EXIT_TIMEOUT"
 
             if not reason:
                 return
 
-        # ── Safe sell quantity — guards against CashBook / portfolio mismatch ──
-        # In Kraken cash mode, portfolio[sym].quantity can exceed the actual
-        # base-currency CashBook balance after fees/rounding.  Submitting a
-        # sell for the raw quantity causes an INVALID order and an unbounded
-        # retry loop.  Use the min(portfolio, CashBook) with a lot-sized buffer.
         sec      = self.securities[sym]
         lot_size = OrderHelper.get_lot_size(sec)
         min_ord  = OrderHelper.get_min_order_size(sec)
@@ -676,8 +697,6 @@ class VoxAlgorithm(QCAlgorithm):
         if qty > 0:
             self._exiting          = True
             self._exit_retry_count = 0
-            # Log BEFORE market_order() so we never dereference self._pos_sym
-            # after a potential synchronous fill clears it.
             self.debug(
                 f"EXIT order {sym.value}  reason={reason}"
                 f"  qty={qty:.6f}  ret={ret:.3%}"
@@ -695,16 +714,7 @@ class VoxAlgorithm(QCAlgorithm):
             )
             is_sl = (reason == "EXIT_SL")
             self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
-            self._pos_sym          = None
-            self._entry_px         = 0.0
-            self._entry_time       = None
-            self._tp_dyn           = 0.0
-            self._sl_dyn           = 0.0
-            self._exiting          = False
-            self._exit_time        = self.time
-            self._exit_retry_count = 0
-            self._trail_active     = False
-            self._trail_high_px    = 0.0
+            self._clear_position_state(include_retry=True)
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
@@ -787,159 +797,78 @@ class VoxAlgorithm(QCAlgorithm):
         n_momentum_override = 0
         _best_ev_diag   = float("-inf")   # best ev_after_costs seen (for diagnostics)
 
+        _market_mode = None
+        if self._market_mode_det is not None:
+            try:
+                _btc_c = list(self._state[self._btc_sym]["closes"]) if self._btc_sym else []
+                _btc_v = list(self._state[self._btc_sym]["volumes"]) if self._btc_sym else []
+                _market_mode = self._market_mode_det.detect(_btc_c, _btc_v)
+            except Exception:
+                pass
+
+        counters = {
+            "n_pass_disp": 0, "n_pass_agree": 0, "n_pass_score": 0,
+            "n_pass_ev": 0, "n_pass_pred_ret": 0, "n_momentum_override": 0,
+        }
+
+        _ruthless_allowed_modes = getattr(self, "_ruthless_allowed_modes", [])
         for (sym, feat), conf in zip(candidates, confs):
-            class_proba   = conf["class_proba"]    # weighted VotingClassifier probability
-            std_proba     = conf["std_proba"]
-            n_agree       = conf["n_agree"]
-            pred_return   = conf["pred_return"]     # 0.0 if regressors not trained
-
-            passed_disp   = std_proba   <= self._max_disp
-            passed_agree  = n_agree     >= self._min_agr
-            passed_score  = class_proba >= score_min_eff
-            if passed_disp:   n_pass_disp  += 1
-            if passed_agree:  n_pass_agree += 1
-            if passed_score:  n_pass_score += 1
-
-            ml_gates_pass = passed_disp and passed_agree and passed_score
-            entry_path    = "ml"
-
-            if not ml_gates_pass:
-                # ── Momentum breakout override (aggressive/ruthless only) ─────
-                if not self._momentum_override:
-                    continue
-                if not check_momentum_override_conditions(
-                    feat,
-                    self._momentum_ret4_min,
-                    self._momentum_ret16_min,
-                    self._momentum_volume_min,
-                    self._momentum_btc_rel_min,
-                ):
-                    continue
-                entry_path = "momentum_override"
-
-            # ── Per-candidate ATR-based TP/SL for EV computation ─────────────
-            price = float(self.securities[sym].price)
-            if price <= 0:
+            result = evaluate_candidate(
+                sym=sym, feat=feat, conf=conf,
+                securities=self.securities,
+                state=self._state,
+                score_min_eff=score_min_eff,
+                max_disp=self._max_disp,
+                min_agr=self._min_agr,
+                momentum_override=self._momentum_override,
+                momentum_ret4_min=self._momentum_ret4_min,
+                momentum_ret16_min=self._momentum_ret16_min,
+                momentum_volume_min=self._momentum_volume_min,
+                momentum_btc_rel_min=self._momentum_btc_rel_min,
+                atr_tp=self._atr_tp, atr_sl=self._atr_sl,
+                tp=self._tp, sl=self._sl,
+                risk_profile=self._risk_profile,
+                min_ev=self._min_ev,
+                pred_return_min=self._pred_return_min,
+                reg_fitted=reg_fitted,
+                cost_fraction=cost_fraction,
+                use_momentum_score=self._use_momentum_score,
+                momentum_override_min_ev=self._momentum_override_min_ev,
+                ruthless_confirm_ev_min=getattr(self, "_ruthless_confirm_ev_min", 0.006),
+                ruthless_confirm_proba_min=getattr(self, "_ruthless_confirm_proba_min", 0.60),
+                ruthless_confirm_agree_min=getattr(self, "_ruthless_confirm_agree_min", 2),
+                ruthless_confirm_ret4_min=getattr(self, "_ruthless_confirm_ret4_min", 0.010),
+                ruthless_confirm_ret16_min=getattr(self, "_ruthless_confirm_ret16_min", 0.020),
+                ruthless_confirm_volr_min=getattr(self, "_ruthless_confirm_volr_min", 1.5),
+                market_mode=_market_mode,
+                ruthless_allowed_modes=_ruthless_allowed_modes,
+                counters=counters,
+                logger=self.log,
+            )
+            if result is None:
                 continue
-            st  = self._state[sym]
-            atr = compute_atr(
-                highs  = list(st["highs"]),
-                lows   = list(st["lows"]),
-                closes = list(st["closes"]),
-            )
-            if atr > 0:
-                tp_use = (atr * self._atr_tp) / price
-                sl_use = (atr * self._atr_sl) / price
-            else:
-                tp_use = self._tp
-                sl_use = self._sl
-
-            # ── Ruthless TP/SL floor enforcement ─────────────────────────────
-            # Prevent ATR-derived values from shrinking below configured ruthless
-            # targets (9% TP / 3% SL).  Non-ruthless modes retain existing ATR behavior.
-            tp_floor_applied = False
-            sl_floor_applied = False
-            if self._risk_profile == "ruthless":
-                if tp_use < self._tp:
-                    tp_use = self._tp
-                    tp_floor_applied = True
-                if sl_use < self._sl:
-                    sl_use = self._sl
-                    sl_floor_applied = True
-
-            # ── Vox v2 decision score ─────────────────────────────────────────
-            # ev = classifier probability × TP − (1−prob) × SL − costs
-            ev_after_costs = (
-                class_proba * tp_use
-                - (1.0 - class_proba) * sl_use
-                - cost_fraction
-            )
-            # Track best EV seen (for no-candidate diagnostics)
-            if ev_after_costs > _best_ev_diag:
-                _best_ev_diag = ev_after_costs
-
-            if entry_path == "momentum_override":
-                # Momentum override: EV must not be catastrophically negative
-                if ev_after_costs < self._momentum_override_min_ev:
-                    continue
-                self.log(
-                    f"[vox] MOMENTUM OVERRIDE candidate={sym.value}"
-                    f" ret4={feat[1]:.4f} ret16={feat[3]:.4f}"
-                    f" vol_r={feat[6]:.2f} btc_rel={feat[7]:.4f}"
-                    f" ev={ev_after_costs:.5f} pred_ret={pred_return:.5f}"
-                    f" proba={class_proba:.3f}"
-                )
-                n_momentum_override += 1
-                n_pass_ev += 1
-                n_pass_pred_ret += 1
-            else:
-                # Normal ML path
-                if ev_after_costs <= self._min_ev:
-                    continue   # negative edge after costs — skip
-                n_pass_ev += 1
-
-                # Predicted-return gate (only applied when regressors are trained).
-                if reg_fitted and pred_return < self._pred_return_min:
-                    continue
-                n_pass_pred_ret += 1
-
-            # ── Ruthless confirmation gate ────────────────────────────────────
-            # Ruthless only: candidates must pass at least one confirmation path
-            # to prevent entering huge positions in sideways chop.
-            if self._risk_profile == "ruthless":
-                _confirm_reason = None
-                if entry_path == "momentum_override":
-                    _confirm_reason = "momentum_override"
-                elif (
-                    ev_after_costs >= getattr(self, "_ruthless_confirm_ev_min", 0.006)
-                    and class_proba >= getattr(self, "_ruthless_confirm_proba_min", 0.60)
-                    and n_agree    >= getattr(self, "_ruthless_confirm_agree_min", 2)
-                ):
-                    _confirm_reason = "strong_ml"
-                elif (
-                    float(feat[1]) >= getattr(self, "_ruthless_confirm_ret4_min", 0.010)
-                    and float(feat[3]) >= getattr(self, "_ruthless_confirm_ret16_min", 0.020)
-                    and float(feat[6]) >= getattr(self, "_ruthless_confirm_volr_min", 1.5)
-                ):
-                    _confirm_reason = "trend_momentum"
-                if _confirm_reason is None:
-                    continue   # no confirmation — skip this candidate for ruthless
-                # Store confirm reason for entry logging
-                if not hasattr(self, "_ruthless_confirm_reasons"):
-                    self._ruthless_confirm_reasons = {}
-                self._ruthless_confirm_reasons[sym] = _confirm_reason
-
-            # ── Final score ───────────────────────────────────────────────────
-            if self._use_momentum_score:
-                # Aggressive/ruthless: momentum-boosted scoring formula.
-                momentum_score = compute_momentum_score(feat)
-                if reg_fitted and pred_return != 0.0:
-                    final_score = (
-                        0.50 * ev_after_costs
-                        + 0.25 * pred_return
-                        + 0.25 * momentum_score
-                    )
-                else:
-                    confidence_adj = max(0.0, 1.0 - std_proba)
-                    final_score    = (
-                        0.75 * ev_after_costs * confidence_adj
-                        + 0.25 * momentum_score
-                    )
-            else:
-                # Balanced/conservative: original Vox v2 scoring formula
-                if reg_fitted and pred_return != 0.0:
-                    final_score = 0.6 * ev_after_costs + 0.4 * pred_return
-                else:
-                    # Fallback when regressors not yet trained: EV × confidence adj
-                    confidence_adj = max(0.0, 1.0 - std_proba)
-                    final_score    = ev_after_costs * confidence_adj
-
-            scores[sym]          = final_score
+            if ev_after_costs := result.get("ev_after_costs", float("-inf")):
+                if ev_after_costs > _best_ev_diag:
+                    _best_ev_diag = ev_after_costs
+            scores[sym]          = result["final_score"]
             conf_data[sym]       = conf
-            tp_sl_data[sym]      = (tp_use, sl_use, atr, price,
-                                    tp_floor_applied, sl_floor_applied)
-            ev_data[sym]         = ev_after_costs
-            entry_path_data[sym] = entry_path
+            tp_sl_data[sym]      = (
+                result["tp_use"], result["sl_use"], result["atr"], result["price"],
+                result["tp_floor_applied"], result["sl_floor_applied"],
+            )
+            ev_data[sym]         = result["ev_after_costs"]
+            entry_path_data[sym] = result["entry_path"]
+            if not hasattr(self, "_ruthless_confirm_reasons"):
+                self._ruthless_confirm_reasons = {}
+            if result.get("confirm_reason"):
+                self._ruthless_confirm_reasons[sym] = result["confirm_reason"]
+
+        n_pass_disp     = counters["n_pass_disp"]
+        n_pass_agree    = counters["n_pass_agree"]
+        n_pass_score    = counters["n_pass_score"]
+        n_pass_ev       = counters["n_pass_ev"]
+        n_pass_pred_ret = counters["n_pass_pred_ret"]
+        n_momentum_override = counters["n_momentum_override"]
 
         if scores:
             ranked      = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -999,6 +928,14 @@ class VoxAlgorithm(QCAlgorithm):
         ranked   = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
         top_sym, top_sc = ranked[0]
         second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
+
+        # ── Meta-filter check ─────────────────────────────────────────────────
+        _mf_approved, _mf_score = self._meta_filter.approve(conf_data.get(top_sym, {}))
+        if not _mf_approved:
+            self._throttled_skip_debug(
+                f"[vox] Meta-filter rejected {top_sym.value} score={_mf_score:.3f}"
+            )
+            return
 
         # Gap check on final score — uses self._ev_gap (return-fraction units),
         # NOT self._s_gap (probability units).  SCORE_GAP=0.02 was designed for
@@ -1078,20 +1015,18 @@ class VoxAlgorithm(QCAlgorithm):
             )
             return
 
-        # Place entry order.
-        # IMPORTANT: set _pending_sym (and _tp_dyn/_sl_dyn) BEFORE calling
-        # market_order().  In QuantConnect/LEAN, market orders with the default
-        # ImmediateFillModel fill synchronously — on_order_event fires inside
-        # market_order() before it returns.  If _pending_sym is still None when
-        # that happens the ENTRY fill is silently ignored and the state machine
-        # gets permanently stuck (_pending_sym stays set, _pos_sym never set).
-        self._pending_sym   = top_sym
-        self._tp_dyn        = tp_use
-        self._sl_dyn        = sl_use
-        self._trail_active  = False   # reset trail state on every new entry
-        self._trail_high_px = 0.0
+        # Place entry order — set _pending_sym BEFORE market_order() (fills synchronously).
+        self._pending_sym        = top_sym
+        self._tp_dyn             = tp_use
+        self._sl_dyn             = sl_use
+        self._trail_active       = False
+        self._trail_high_px      = 0.0
+        self._max_return_seen    = 0.0
+        self._breakeven_active   = False
+        self._timeout_ext_hours  = 0.0
+        self._timeout_ext_logged = False
+        self._last_feat[top_sym] = next((f for s, f in candidates if s == top_sym), None)
         order = self.market_order(top_sym, qty, tag="ENTRY")
-        # order_id is only available on the returned ticket; assign after the call.
         self._pending_oid = order.order_id
         self._fill_tracker.start_order(order.order_id, qty)
 
@@ -1289,40 +1224,15 @@ class VoxAlgorithm(QCAlgorithm):
     # ── History hydration ─────────────────────────────────────────────────────
 
     def _hydrate_state_from_history(self, days):
-        """Fetch `days` of consolidated bars per symbol via self.history() and
-        populate the state deques. Used by _retrain to guarantee a full
-        training window regardless of consolidator timing."""
-        bars_needed = int(days * 24 * 60 / RESOLUTION_MINUTES)
-        bars_needed = min(bars_needed, MAX_HISTORY_BARS)   # safety cap (~104 days @ 5m)
-        for sym in self._symbols:
-            try:
-                hist = self.history(
-                    sym,
-                    bars_needed,
-                    Resolution.MINUTE,
-                )
-                if hist is None or hist.empty:
-                    continue
-                # If MultiIndex (symbol, time), select this symbol.
-                if hasattr(hist.index, "levels") and len(hist.index.levels) > 1:
-                    df = hist.loc[sym] if sym in hist.index.get_level_values(0) else hist
-                else:
-                    df = hist
-                # Resample 1-min bars to RESOLUTION_MINUTES (open not stored in state).
-                df = df.resample(f"{RESOLUTION_MINUTES}min").agg({
-                    "high": "max", "low": "min",
-                    "close": "last", "volume": "sum",
-                }).dropna()
-                st = self._state[sym]
-                st["closes"].clear(); st["highs"].clear()
-                st["lows"].clear();   st["volumes"].clear()
-                for _, row in df.iterrows():
-                    st["closes"].append(float(row["close"]))
-                    st["highs"].append(float(row["high"]))
-                    st["lows"].append(float(row["low"]))
-                    st["volumes"].append(float(row["volume"]))
-            except Exception as exc:
-                self.log(f"[vox] history hydrate failed for {sym.value}: {exc}")
+        """Delegate to infra.hydrate_state_from_history."""
+        hydrate_state_from_history(
+            algorithm=self,
+            state=self._state,
+            symbols=self._symbols,
+            days=days,
+            resolution_minutes=RESOLUTION_MINUTES,
+            max_history_bars=MAX_HISTORY_BARS,
+        )
 
     # ── End of algorithm ──────────────────────────────────────────────────────
 
