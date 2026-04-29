@@ -684,3 +684,409 @@ class TestComputeQtyMinAlloc:
         assert alloc == pytest.approx(RUTHLESS_ALLOCATION)
         expected_usd = self._PV * RUTHLESS_ALLOCATION
         assert qty * self._PRICE == pytest.approx(expected_usd)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — TP/SL floor enforcement (Issue 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mirror of ruthless TP/SL floor constants from config.py
+RUTHLESS_TAKE_PROFIT_FLOOR = 0.09
+RUTHLESS_STOP_LOSS_FLOOR   = 0.03
+
+
+def _apply_ruthless_floors(tp_atr, sl_atr, tp_floor, sl_floor, is_ruthless):
+    """Mirror of ruthless TP/SL floor logic in _try_enter()."""
+    tp_floor_applied = False
+    sl_floor_applied = False
+    if is_ruthless:
+        if tp_atr < tp_floor:
+            tp_atr = tp_floor
+            tp_floor_applied = True
+        if sl_atr < sl_floor:
+            sl_atr = sl_floor
+            sl_floor_applied = True
+    return tp_atr, sl_atr, tp_floor_applied, sl_floor_applied
+
+
+class TestRuthlessTpSlFloor:
+    """Ruthless mode must not allow ATR-derived TP/SL to shrink below configured floors."""
+
+    def test_ruthless_atr_below_floor_raises_tp(self):
+        """ATR TP of 2% must be raised to 9% floor in ruthless mode."""
+        tp, sl, tp_fl, sl_fl = _apply_ruthless_floors(
+            0.02, 0.03, RUTHLESS_TAKE_PROFIT_FLOOR, RUTHLESS_STOP_LOSS_FLOOR, True
+        )
+        assert tp == pytest.approx(RUTHLESS_TAKE_PROFIT_FLOOR)
+        assert tp_fl is True
+
+    def test_ruthless_atr_below_floor_raises_sl(self):
+        """ATR SL of 0.8% must be raised to 3% floor in ruthless mode."""
+        tp, sl, tp_fl, sl_fl = _apply_ruthless_floors(
+            0.09, 0.008, RUTHLESS_TAKE_PROFIT_FLOOR, RUTHLESS_STOP_LOSS_FLOOR, True
+        )
+        assert sl == pytest.approx(RUTHLESS_STOP_LOSS_FLOOR)
+        assert sl_fl is True
+
+    def test_ruthless_atr_above_floor_kept(self):
+        """ATR TP/SL above floor must not be changed; floor flags must be False."""
+        tp, sl, tp_fl, sl_fl = _apply_ruthless_floors(
+            0.12, 0.05, RUTHLESS_TAKE_PROFIT_FLOOR, RUTHLESS_STOP_LOSS_FLOOR, True
+        )
+        assert tp == pytest.approx(0.12)
+        assert sl == pytest.approx(0.05)
+        assert tp_fl is False
+        assert sl_fl is False
+
+    def test_balanced_mode_atr_not_modified(self):
+        """In balanced mode, ATR TP/SL must not be modified regardless of value."""
+        tp, sl, tp_fl, sl_fl = _apply_ruthless_floors(
+            0.01, 0.005, RUTHLESS_TAKE_PROFIT_FLOOR, RUTHLESS_STOP_LOSS_FLOOR, False
+        )
+        assert tp == pytest.approx(0.01)
+        assert sl == pytest.approx(0.005)
+        assert tp_fl is False
+        assert sl_fl is False
+
+    def test_ruthless_both_floors_applied(self):
+        """Both TP and SL below floor should both be raised."""
+        tp, sl, tp_fl, sl_fl = _apply_ruthless_floors(
+            0.005, 0.005, RUTHLESS_TAKE_PROFIT_FLOOR, RUTHLESS_STOP_LOSS_FLOOR, True
+        )
+        assert tp == pytest.approx(RUTHLESS_TAKE_PROFIT_FLOOR)
+        assert sl == pytest.approx(RUTHLESS_STOP_LOSS_FLOOR)
+        assert tp_fl is True
+        assert sl_fl is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — anti-chop same-symbol cooldown (Issue 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime as _dt, timedelta as _td
+
+# Constants mirrored from config.py
+RUTHLESS_SL_COOLDOWN_MINS  = 120
+RUTHLESS_LOSS_WINDOW_HOURS = 24
+RUTHLESS_LOSS_LIMIT        = 2
+RUTHLESS_LOSS_BLOCK_HOURS  = 24
+
+
+def _sl_times_exceeds_limit(sl_times, now, window_hours, limit):
+    """Mirror of anti-chop 2-in-24h check logic."""
+    cutoff = now - _td(hours=window_hours)
+    return sum(1 for t in sl_times if t >= cutoff) >= limit
+
+
+class TestRuthlessAntiChopCooldown:
+    """Same-symbol SL cooldown and 2-in-24h block for ruthless mode."""
+
+    def test_sl_cooldown_is_120_minutes(self):
+        """Ruthless per-coin SL cooldown must be 120 minutes."""
+        assert RUTHLESS_SL_COOLDOWN_MINS == 120
+
+    def test_two_sl_in_24h_triggers_block(self):
+        """2 SL exits within the 24h window must trigger an extended block."""
+        now = _dt(2024, 1, 7, 12, 0)
+        sl_times = [now - _td(hours=3), now - _td(hours=1)]  # 2 SLs within 24h
+        assert _sl_times_exceeds_limit(sl_times, now, RUTHLESS_LOSS_WINDOW_HOURS, RUTHLESS_LOSS_LIMIT)
+
+    def test_one_sl_in_24h_no_block(self):
+        """Only 1 SL exit within 24h must not trigger the extended block."""
+        now = _dt(2024, 1, 7, 12, 0)
+        sl_times = [now - _td(hours=3)]
+        assert not _sl_times_exceeds_limit(sl_times, now, RUTHLESS_LOSS_WINDOW_HOURS, RUTHLESS_LOSS_LIMIT)
+
+    def test_old_sl_outside_window_not_counted(self):
+        """SL exits older than 24h must not count toward the limit."""
+        now = _dt(2024, 1, 7, 12, 0)
+        # One SL 25 hours ago (outside window), one just now
+        sl_times = [now - _td(hours=25), now - _td(hours=1)]
+        assert not _sl_times_exceeds_limit(sl_times, now, RUTHLESS_LOSS_WINDOW_HOURS, RUTHLESS_LOSS_LIMIT)
+
+    def test_three_sl_in_window_also_triggers(self):
+        """3 SL exits in the window also triggers the block (>= limit)."""
+        now = _dt(2024, 1, 7, 12, 0)
+        sl_times = [now - _td(hours=10), now - _td(hours=5), now - _td(hours=1)]
+        assert _sl_times_exceeds_limit(sl_times, now, RUTHLESS_LOSS_WINDOW_HOURS, RUTHLESS_LOSS_LIMIT)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — portfolio loss-streak brake (Issue 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+RUTHLESS_PORTFOLIO_LOSS_STREAK = 4
+RUTHLESS_PORTFOLIO_PAUSE_HOURS = 6
+
+
+def _check_portfolio_pause(streak, streak_limit, pause_hours, now):
+    """Mirror of portfolio loss-streak brake logic."""
+    if streak >= streak_limit:
+        return now + _td(hours=pause_hours), 0   # (pause_until, reset_streak)
+    return None, streak
+
+
+class TestRuthlessPortfolioLossStreakBrake:
+    """Portfolio loss-streak brake for ruthless mode."""
+
+    def test_four_losses_triggers_pause(self):
+        """4 consecutive losses must trigger a 6-hour pause."""
+        now = _dt(2024, 1, 7, 12, 0)
+        pause_until, new_streak = _check_portfolio_pause(
+            4, RUTHLESS_PORTFOLIO_LOSS_STREAK, RUTHLESS_PORTFOLIO_PAUSE_HOURS, now
+        )
+        assert pause_until is not None
+        assert pause_until == now + _td(hours=RUTHLESS_PORTFOLIO_PAUSE_HOURS)
+        assert new_streak == 0
+
+    def test_three_losses_no_pause(self):
+        """3 consecutive losses must not trigger a pause."""
+        now = _dt(2024, 1, 7, 12, 0)
+        pause_until, new_streak = _check_portfolio_pause(
+            3, RUTHLESS_PORTFOLIO_LOSS_STREAK, RUTHLESS_PORTFOLIO_PAUSE_HOURS, now
+        )
+        assert pause_until is None
+        assert new_streak == 3
+
+    def test_streak_resets_on_trigger(self):
+        """Streak counter must reset to 0 after triggering the pause."""
+        now = _dt(2024, 1, 7, 12, 0)
+        _, new_streak = _check_portfolio_pause(
+            5, RUTHLESS_PORTFOLIO_LOSS_STREAK, RUTHLESS_PORTFOLIO_PAUSE_HOURS, now
+        )
+        assert new_streak == 0
+
+    def test_pause_duration_is_six_hours(self):
+        """Pause duration must be 6 hours."""
+        assert RUTHLESS_PORTFOLIO_PAUSE_HOURS == 6
+
+    def test_streak_limit_is_four(self):
+        """Streak limit must be 4 consecutive losses."""
+        assert RUTHLESS_PORTFOLIO_LOSS_STREAK == 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — confirmation gate (Issue 4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mirror confirmation gate constants from config.py
+RUTHLESS_CONFIRM_EV_MIN    = 0.006
+RUTHLESS_CONFIRM_PROBA_MIN = 0.60
+RUTHLESS_CONFIRM_AGREE_MIN = 2
+RUTHLESS_CONFIRM_RET4_MIN  = 0.010
+RUTHLESS_CONFIRM_RET16_MIN = 0.020
+RUTHLESS_CONFIRM_VOLR_MIN  = 1.5
+
+
+def _ruthless_confirmation(entry_path, ev, class_proba, n_agree, feat):
+    """Mirror of the ruthless confirmation gate logic in _try_enter()."""
+    if entry_path == "momentum_override":
+        return "momentum_override"
+    if (ev >= RUTHLESS_CONFIRM_EV_MIN
+            and class_proba >= RUTHLESS_CONFIRM_PROBA_MIN
+            and n_agree >= RUTHLESS_CONFIRM_AGREE_MIN):
+        return "strong_ml"
+    if (float(feat[1]) >= RUTHLESS_CONFIRM_RET4_MIN
+            and float(feat[3]) >= RUTHLESS_CONFIRM_RET16_MIN
+            and float(feat[6]) >= RUTHLESS_CONFIRM_VOLR_MIN):
+        return "trend_momentum"
+    return None
+
+
+class TestRuthlessConfirmationGate:
+    """Ruthless confirmation gate: must pass one of three confirmation paths."""
+
+    def _feat(self, ret_4=0.0, ret_16=0.0, vol_r=1.0):
+        f = np.zeros(10)
+        f[1] = ret_4; f[3] = ret_16; f[6] = vol_r
+        return f
+
+    def test_momentum_override_always_confirms(self):
+        """momentum_override entry path bypasses ML/trend conditions."""
+        result = _ruthless_confirmation(
+            "momentum_override", ev=0.001, class_proba=0.30, n_agree=1,
+            feat=self._feat()
+        )
+        assert result == "momentum_override"
+
+    def test_strong_ml_confirms(self):
+        """Strong ML (high ev + proba + n_agree) must confirm."""
+        result = _ruthless_confirmation(
+            "ml", ev=0.008, class_proba=0.65, n_agree=2,
+            feat=self._feat()
+        )
+        assert result == "strong_ml"
+
+    def test_trend_momentum_confirms(self):
+        """Clear trend/momentum (ret_4 + ret_16 + vol_r) must confirm."""
+        result = _ruthless_confirmation(
+            "ml", ev=0.001, class_proba=0.40, n_agree=1,
+            feat=self._feat(ret_4=0.015, ret_16=0.025, vol_r=2.0)
+        )
+        assert result == "trend_momentum"
+
+    def test_weak_signal_fails_confirmation(self):
+        """Weak signal (low ev, low proba, low momentum) must fail all gates."""
+        result = _ruthless_confirmation(
+            "ml", ev=0.001, class_proba=0.40, n_agree=1,
+            feat=self._feat(ret_4=0.005, ret_16=0.010, vol_r=1.2)
+        )
+        assert result is None
+
+    def test_strong_ml_just_at_threshold_passes(self):
+        """All strong_ml conditions at exact threshold must pass."""
+        result = _ruthless_confirmation(
+            "ml",
+            ev=RUTHLESS_CONFIRM_EV_MIN,
+            class_proba=RUTHLESS_CONFIRM_PROBA_MIN,
+            n_agree=RUTHLESS_CONFIRM_AGREE_MIN,
+            feat=self._feat()
+        )
+        assert result == "strong_ml"
+
+    def test_strong_ml_ev_below_threshold_falls_through(self):
+        """EV just below strong_ml threshold must fall through to trend check."""
+        result = _ruthless_confirmation(
+            "ml",
+            ev=RUTHLESS_CONFIRM_EV_MIN - 0.001,
+            class_proba=0.70, n_agree=3,
+            feat=self._feat()   # no trend either
+        )
+        assert result is None  # neither strong_ml nor trend passes
+
+    def test_balanced_mode_not_affected(self):
+        """Confirmation gate logic is only applied in ruthless mode (gate returns None for
+        non-ruthless in the real code).  Verify constants are profile-specific."""
+        # Ensure ruthless confirm thresholds are stricter than balanced gates
+        assert RUTHLESS_CONFIRM_PROBA_MIN > RUTHLESS_SCORE_MIN
+
+    def test_trend_momentum_vol_r_at_threshold(self):
+        """vol_r exactly at RUTHLESS_CONFIRM_VOLR_MIN must pass trend_momentum."""
+        result = _ruthless_confirmation(
+            "ml", ev=0.001, class_proba=0.40, n_agree=1,
+            feat=self._feat(
+                ret_4=RUTHLESS_CONFIRM_RET4_MIN,
+                ret_16=RUTHLESS_CONFIRM_RET16_MIN,
+                vol_r=RUTHLESS_CONFIRM_VOLR_MIN,
+            )
+        )
+        assert result == "trend_momentum"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — build_features SMA slope (Issue 6a)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from models import build_features  # type: ignore  # noqa: E402
+
+
+class TestBuildFeaturesSmaSlope:
+    """Verify the new sma_slope feature at index 9 in build_features."""
+
+    def _make_prices(self, n=20, trend="flat", base=100.0):
+        """Create a simple price series: flat, up, or down."""
+        if trend == "up":
+            return [base * (1 + 0.001 * i) for i in range(n)]
+        elif trend == "down":
+            return [base * (1 - 0.001 * i) for i in range(n)]
+        else:
+            return [base] * n
+
+    def _vols(self, n=20):
+        return [1000.0] * n
+
+    def _btc(self, n=5):
+        return [30000.0] * n
+
+    def test_feature_vector_length_is_ten(self):
+        """build_features must still return 10 features."""
+        feat = build_features(self._make_prices(), self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert len(feat) == 10
+
+    def test_sma_slope_index_nine(self):
+        """Feature at index 9 must be a float (sma_slope, not always 0.0)."""
+        feat = build_features(self._make_prices(trend="up"), self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert isinstance(float(feat[9]), float)
+
+    def test_sma_slope_positive_in_uptrend(self):
+        """SMA slope must be positive when prices are rising."""
+        feat = build_features(self._make_prices(trend="up"), self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert float(feat[9]) > 0.0
+
+    def test_sma_slope_negative_in_downtrend(self):
+        """SMA slope must be negative when prices are falling."""
+        feat = build_features(self._make_prices(trend="down"), self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert float(feat[9]) < 0.0
+
+    def test_sma_slope_near_zero_in_flat_market(self):
+        """SMA slope must be near zero for flat prices."""
+        feat = build_features(self._make_prices(trend="flat"), self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert abs(float(feat[9])) < 1e-10
+
+    def test_sma_slope_capped_at_ten_percent(self):
+        """SMA slope is capped at ±0.10 to prevent extreme values."""
+        # Very steep ramp
+        prices = [100.0 * (1 + 0.05 * i) for i in range(20)]  # 5% per bar
+        feat = build_features(prices, self._vols(), self._btc(), hour=12)
+        assert feat is not None
+        assert float(feat[9]) <= 0.10
+        assert float(feat[9]) >= -0.10
+
+    def test_vol_r_capped_at_ten(self):
+        """Volume ratio must be capped at 10× to prevent explosion."""
+        # 15 prior bars with volume 1000, then last bar with enormous spike
+        base_vols = [1000.0] * 19  # 19 bars of normal volume
+        spike_vols = base_vols[:-1] + [200_000.0]  # replace last with spike
+        feat = build_features(
+            self._make_prices(n=20), spike_vols, self._btc(), hour=12
+        )
+        if feat is not None:
+            assert float(feat[6]) <= 10.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v3 — label parameters (Issue 6b)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mirror label constants from config.py
+RUTHLESS_LABEL_TP           = 0.09
+RUTHLESS_LABEL_SL           = 0.03
+RUTHLESS_LABEL_HORIZON_BARS = 96
+
+
+class TestRuthlessLabelParameters:
+    """Ruthless label parameters must align with wider 24h trading targets."""
+
+    def test_ruthless_label_tp_matches_take_profit(self):
+        """Ruthless label TP must equal ruthless take_profit for barrier alignment."""
+        assert RUTHLESS_LABEL_TP == pytest.approx(RUTHLESS_TAKE_PROFIT)
+
+    def test_ruthless_label_sl_matches_stop_loss(self):
+        """Ruthless label SL must equal ruthless stop_loss for barrier alignment."""
+        assert RUTHLESS_LABEL_SL == pytest.approx(RUTHLESS_STOP_LOSS)
+
+    def test_ruthless_label_horizon_is_96_bars(self):
+        """Ruthless 24h horizon = 24 × 4 bars/h = 96 bars at 15-min decision intervals."""
+        assert RUTHLESS_LABEL_HORIZON_BARS == 96
+
+    def test_ruthless_label_horizon_wider_than_default(self):
+        """Ruthless label horizon must be wider than the default LABEL_HORIZON_BARS=72."""
+        from models import LABEL_HORIZON_BARS as DEFAULT_HORIZON
+        assert RUTHLESS_LABEL_HORIZON_BARS > DEFAULT_HORIZON
+
+    def test_ruthless_label_tp_wider_than_default(self):
+        """Ruthless label TP (0.09) must be wider than default LABEL_TP (0.012)."""
+        from models import LABEL_TP as DEFAULT_LABEL_TP
+        assert RUTHLESS_LABEL_TP > DEFAULT_LABEL_TP
+
+    def test_balanced_mode_label_params_unchanged(self):
+        """Default (balanced) label params must remain at their original values."""
+        from models import LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS
+        assert LABEL_TP == pytest.approx(0.012)
+        assert LABEL_SL == pytest.approx(0.010)
+        assert LABEL_HORIZON_BARS == 72

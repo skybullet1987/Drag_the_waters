@@ -175,6 +175,11 @@ class VoxAlgorithm(QCAlgorithm):
         from collections import deque as _deque
         self._sym_outcomes     = {sym: _deque(maxlen=10) for sym in self._symbols}
         self._sym_penalty_until = {}  # sym -> datetime when penalty ends
+        # Ruthless anti-chop: tracks SL exit timestamps per symbol for 2-in-24h block
+        self._sym_sl_times     = {}   # sym -> deque of SL exit datetimes (ruthless only)
+        # Ruthless portfolio loss-streak brake state
+        self._portfolio_loss_streak  = 0     # consecutive trade losses (any symbol)
+        self._portfolio_pause_until  = None  # datetime until which all entries are paused
 
         # ── Diagnostic throttling ──────────────────────────────────────────────
         # Routine skip messages (EV gap too small, regime block, risk block) are
@@ -283,6 +288,16 @@ class VoxAlgorithm(QCAlgorithm):
             self.log("[vox] Kill switch active — skipping entry.")
             return
 
+        # Ruthless portfolio loss-streak brake — pause all new entries briefly
+        if self._portfolio_pause_until is not None:
+            if self.time < self._portfolio_pause_until:
+                self._throttled_skip_debug(
+                    f"[vox] Portfolio loss-streak pause active until {self._portfolio_pause_until}"
+                )
+                return
+            else:
+                self._portfolio_pause_until = None   # pause expired
+
         # Model must be trained
         if not self._model_ready:
             return
@@ -328,18 +343,32 @@ class VoxAlgorithm(QCAlgorithm):
                     (order_event.fill_price - self._entry_px) / self._entry_px
                     if self._entry_px else 0.0
                 )
-                self.debug(
-                    f"FILL EXIT {sym.value}  px={order_event.fill_price:.4f}"
-                    f"  ret={ret:.3%}  tag={tag}"
-                )
                 is_sl = tag == "EXIT_SL"
+                is_loss = ret < 0.0
+
+                # ── Ruthless exit diagnostics ──────────────────────────────────
+                if self._risk_profile == "ruthless":
+                    _trail_info = (
+                        f"  trail_active={self._trail_active}"
+                        f"  trail_high={self._trail_high_px:.4f}"
+                        if self._trail_active else ""
+                    )
+                    self.log(
+                        f"[ruthless] EXIT {sym.value}  reason={tag}"
+                        f"  ret={ret:.3%}"
+                        f"  elapsed_min={(self.time - self._entry_time).total_seconds()/60:.1f}"
+                        + _trail_info
+                    )
+                else:
+                    self.debug(
+                        f"FILL EXIT {sym.value}  px={order_event.fill_price:.4f}"
+                        f"  ret={ret:.3%}  tag={tag}"
+                    )
+
                 self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
                 self._fill_tracker.clear(oid)
 
                 # ── Realized EV logging ────────────────────────────────────────
-                # Log predicted vs realized for each completed trade so the user
-                # can evaluate calibration and model quality out-of-sample.
-                # Retrieve the entry predictions stored at entry time.
                 entry_pred = self._entry_predictions.pop(sym, None)
                 self._persistence.log_trade({
                     "event":              "exit",
@@ -358,10 +387,46 @@ class VoxAlgorithm(QCAlgorithm):
 
                 # ── Per-symbol outcome tracking (penalty cooldown) ─────────────
                 if sym not in self._sym_outcomes:
-                    from collections import deque as _dq
-                    self._sym_outcomes[sym] = _dq(maxlen=10)
+                    self._sym_outcomes[sym] = deque(maxlen=10)
                 self._sym_outcomes[sym].append(ret)
                 self._update_penalty_cooldown(sym, is_sl)
+
+                # ── Ruthless anti-chop: per-symbol SL timestamp tracking ───────
+                if self._risk_profile == "ruthless" and is_sl:
+                    if sym not in self._sym_sl_times:
+                        self._sym_sl_times[sym] = deque(maxlen=20)
+                    self._sym_sl_times[sym].append(self.time)
+                    # Check if 2+ SLs occurred within the loss window → extended block
+                    _window_h   = getattr(self, "_ruthless_loss_window_hours", 24)
+                    _loss_limit = getattr(self, "_ruthless_loss_limit", 2)
+                    _block_h    = getattr(self, "_ruthless_loss_block_hours", 24)
+                    _cutoff     = self.time - timedelta(hours=_window_h)
+                    _recent_sls = sum(1 for t in self._sym_sl_times[sym] if t >= _cutoff)
+                    if _recent_sls >= _loss_limit:
+                        _block_end = self.time + timedelta(hours=_block_h)
+                        self._sym_penalty_until[sym] = _block_end
+                        self.log(
+                            f"[ruthless] ANTI-CHOP BLOCK: {sym.value} had"
+                            f" {_recent_sls} SL exits in {_window_h}h"
+                            f" — blocked until {_block_end}"
+                        )
+
+                # ── Ruthless portfolio loss-streak brake ───────────────────────
+                if self._risk_profile == "ruthless":
+                    _streak_limit = getattr(self, "_ruthless_portfolio_loss_streak", 4)
+                    _pause_h      = getattr(self, "_ruthless_portfolio_pause_hours", 6)
+                    if is_loss:
+                        self._portfolio_loss_streak += 1
+                        if self._portfolio_loss_streak >= _streak_limit:
+                            _pause_end = self.time + timedelta(hours=_pause_h)
+                            self._portfolio_pause_until = _pause_end
+                            self.log(
+                                f"[ruthless] LOSS-STREAK PAUSE: {self._portfolio_loss_streak}"
+                                f" consecutive losses — all entries paused until {_pause_end}"
+                            )
+                            self._portfolio_loss_streak = 0  # reset after triggering
+                    else:
+                        self._portfolio_loss_streak = 0   # any win resets streak
 
                 self._pos_sym       = None
                 self._entry_px      = 0.0
@@ -769,6 +834,19 @@ class VoxAlgorithm(QCAlgorithm):
                 tp_use = self._tp
                 sl_use = self._sl
 
+            # ── Ruthless TP/SL floor enforcement ─────────────────────────────
+            # Prevent ATR-derived values from shrinking below configured ruthless
+            # targets (9% TP / 3% SL).  Non-ruthless modes retain existing ATR behavior.
+            tp_floor_applied = False
+            sl_floor_applied = False
+            if self._risk_profile == "ruthless":
+                if tp_use < self._tp:
+                    tp_use = self._tp
+                    tp_floor_applied = True
+                if sl_use < self._sl:
+                    sl_use = self._sl
+                    sl_floor_applied = True
+
             # ── Vox v2 decision score ─────────────────────────────────────────
             # ev = classifier probability × TP − (1−prob) × SL − costs
             ev_after_costs = (
@@ -805,6 +883,32 @@ class VoxAlgorithm(QCAlgorithm):
                     continue
                 n_pass_pred_ret += 1
 
+            # ── Ruthless confirmation gate ────────────────────────────────────
+            # Ruthless only: candidates must pass at least one confirmation path
+            # to prevent entering huge positions in sideways chop.
+            if self._risk_profile == "ruthless":
+                _confirm_reason = None
+                if entry_path == "momentum_override":
+                    _confirm_reason = "momentum_override"
+                elif (
+                    ev_after_costs >= getattr(self, "_ruthless_confirm_ev_min", 0.006)
+                    and class_proba >= getattr(self, "_ruthless_confirm_proba_min", 0.60)
+                    and n_agree    >= getattr(self, "_ruthless_confirm_agree_min", 2)
+                ):
+                    _confirm_reason = "strong_ml"
+                elif (
+                    float(feat[1]) >= getattr(self, "_ruthless_confirm_ret4_min", 0.010)
+                    and float(feat[3]) >= getattr(self, "_ruthless_confirm_ret16_min", 0.020)
+                    and float(feat[6]) >= getattr(self, "_ruthless_confirm_volr_min", 1.5)
+                ):
+                    _confirm_reason = "trend_momentum"
+                if _confirm_reason is None:
+                    continue   # no confirmation — skip this candidate for ruthless
+                # Store confirm reason for entry logging
+                if not hasattr(self, "_ruthless_confirm_reasons"):
+                    self._ruthless_confirm_reasons = {}
+                self._ruthless_confirm_reasons[sym] = _confirm_reason
+
             # ── Final score ───────────────────────────────────────────────────
             if self._use_momentum_score:
                 # Aggressive/ruthless: momentum-boosted scoring formula.
@@ -832,7 +936,8 @@ class VoxAlgorithm(QCAlgorithm):
 
             scores[sym]          = final_score
             conf_data[sym]       = conf
-            tp_sl_data[sym]      = (tp_use, sl_use, atr, price)
+            tp_sl_data[sym]      = (tp_use, sl_use, atr, price,
+                                    tp_floor_applied, sl_floor_applied)
             ev_data[sym]         = ev_after_costs
             entry_path_data[sym] = entry_path
 
@@ -842,7 +947,7 @@ class VoxAlgorithm(QCAlgorithm):
             top_sc_d    = ranked[0][1]
             second_sc_d = ranked[1][1] if len(ranked) > 1 else 0.0
             top_cd      = conf_data[top_sym_d]
-            top_tp, top_sl, top_atr, top_px = tp_sl_data[top_sym_d]
+            top_tp, top_sl, top_atr, top_px, _tp_fl, _sl_fl = tp_sl_data[top_sym_d]
             self.log(
                 f"[diag] candidates={len(scores)}"
                 f" top={top_sym_d.value}"
@@ -855,6 +960,8 @@ class VoxAlgorithm(QCAlgorithm):
                 f" std_proba={top_cd['std_proba']:.3f}"
                 f" n_agree={top_cd['n_agree']}"
                 f" tp={top_tp:.4f} sl={top_sl:.4f}"
+                + (f" tp_floor={_tp_fl}" if _tp_fl else "")
+                + (f" sl_floor={_sl_fl}" if _sl_fl else "")
                 + (f" mo_overrides={n_momentum_override}" if n_momentum_override else "")
             )
         else:
@@ -923,10 +1030,11 @@ class VoxAlgorithm(QCAlgorithm):
             return
 
         # ── Pre-trade validation ───────────────────────────────────────────────
-        tp_use, sl_use, atr, price = tp_sl_data[top_sym]
+        tp_use, sl_use, atr, price, tp_floor_applied, sl_floor_applied = tp_sl_data[top_sym]
         class_proba_top  = conf_data[top_sym]["class_proba"]
         pred_return_top  = conf_data[top_sym]["pred_return"]
         ev_top           = ev_data[top_sym]
+        _top_confirm     = getattr(self, "_ruthless_confirm_reasons", {}).get(top_sym, "n/a")
 
         # Kelly / flat sizing (uses class_proba and ATR TP/SL for Kelly edge)
         qty, alloc = compute_qty(
@@ -1000,18 +1108,44 @@ class VoxAlgorithm(QCAlgorithm):
         }
 
         _top_entry_path = entry_path_data.get(top_sym, "ml")
-        self.debug(
-            f"ENTRY order {top_sym.value}"
-            f"  path={_top_entry_path}"
-            f"  final_score={top_sc:.5f}"
-            f"  ev={ev_top:.5f}"
-            f"  pred_ret={pred_return_top:.5f}"
-            f"  class_proba={class_proba_top:.3f}"
-            f"  std_proba={conf_data[top_sym]['std_proba']:.3f}"
-            f"  n_agree={conf_data[top_sym]['n_agree']}"
-            f"  price={price:.4f}  qty={qty:.6f}"
-            f"  alloc={alloc:.3f}  tp={tp_use:.4f}  sl={sl_use:.4f}"
-        )
+        if self._risk_profile == "ruthless":
+            # Ruthless: emit richer entry log at INFO level
+            _feat_top = next((f for s, f in candidates if s == top_sym), None)
+            _ret4_log  = f"{float(_feat_top[1]):.4f}" if _feat_top is not None else "n/a"
+            _ret16_log = f"{float(_feat_top[3]):.4f}" if _feat_top is not None else "n/a"
+            _volr_log  = f"{float(_feat_top[6]):.2f}"  if _feat_top is not None else "n/a"
+            _btcr_log  = f"{float(_feat_top[7]):.4f}"  if _feat_top is not None else "n/a"
+            self.log(
+                f"[ruthless] ENTRY {top_sym.value}"
+                f"  path={_top_entry_path}"
+                f"  confirm={_top_confirm}"
+                f"  proba={class_proba_top:.3f}"
+                f"  n_agree={conf_data[top_sym]['n_agree']}"
+                f"  std={conf_data[top_sym]['std_proba']:.3f}"
+                f"  ev={ev_top:.5f}"
+                f"  pred_ret={pred_return_top:.5f}"
+                f"  ret4={_ret4_log} ret16={_ret16_log}"
+                f"  vol_r={_volr_log} btc_rel={_btcr_log}"
+                f"  tp={tp_use:.4f}(floor={tp_floor_applied})"
+                f"  sl={sl_use:.4f}(floor={sl_floor_applied})"
+                f"  alloc={alloc:.3f}"
+                f"  min_alloc={self._min_alloc}"
+                f"  kelly={self._use_kelly}"
+                f"  price={price:.4f}  qty={qty:.6f}"
+            )
+        else:
+            self.debug(
+                f"ENTRY order {top_sym.value}"
+                f"  path={_top_entry_path}"
+                f"  final_score={top_sc:.5f}"
+                f"  ev={ev_top:.5f}"
+                f"  pred_ret={pred_return_top:.5f}"
+                f"  class_proba={class_proba_top:.3f}"
+                f"  std_proba={conf_data[top_sym]['std_proba']:.3f}"
+                f"  n_agree={conf_data[top_sym]['n_agree']}"
+                f"  price={price:.4f}  qty={qty:.6f}"
+                f"  alloc={alloc:.3f}  tp={tp_use:.4f}  sl={sl_use:.4f}"
+            )
 
         # Log trade attempt to persistence
         self._persistence.log_trade({

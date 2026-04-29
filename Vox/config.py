@@ -93,7 +93,7 @@ RUTHLESS_MIN_HOLD_MINUTES        = 10      # was 3; less instant chop
 RUTHLESS_EMERGENCY_SL            = 0.05    # was 0.040; 5 % catastrophic stop
 RUTHLESS_MAX_DAILY_SL            = 5
 RUTHLESS_COOLDOWN_MINS           = 0
-RUTHLESS_SL_COOLDOWN_MINS        = 5
+RUTHLESS_SL_COOLDOWN_MINS        = 120    # 120-min per-coin block after any SL exit
 RUTHLESS_PENALTY_COOLDOWN_LOSSES = 5
 RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
@@ -101,6 +101,32 @@ RUTHLESS_MAX_DD_PCT              = 0.35
 RUTHLESS_RUNNER_MODE             = True    # trailing stop instead of instant TP exit
 RUTHLESS_TRAIL_AFTER_TP          = 0.04   # activate trailing once return ≥ +4 %
 RUTHLESS_TRAIL_PCT               = 0.025  # exit if price drops 2.5 % from trailing high
+
+# ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
+RUTHLESS_LOSS_WINDOW_HOURS       = 24     # rolling window for counting SL exits
+RUTHLESS_LOSS_LIMIT              = 2      # SL exits in window that trigger long block
+RUTHLESS_LOSS_BLOCK_HOURS        = 24     # block duration when limit exceeded
+
+# ── Ruthless portfolio loss-streak brake ──────────────────────────────────────
+RUTHLESS_PORTFOLIO_LOSS_STREAK   = 4     # consecutive losses before pause
+RUTHLESS_PORTFOLIO_PAUSE_HOURS   = 6     # hours to pause all new entries
+
+# ── Ruthless confirmation gate thresholds ─────────────────────────────────────
+# Ruthless entries must pass one of three confirmation paths:
+#   momentum_override | strong_ml | trend_momentum
+RUTHLESS_CONFIRM_EV_MIN          = 0.006  # strong_ml: minimum ev_score
+RUTHLESS_CONFIRM_PROBA_MIN       = 0.60   # strong_ml: minimum class_proba
+RUTHLESS_CONFIRM_AGREE_MIN       = 2      # strong_ml: minimum n_agree
+RUTHLESS_CONFIRM_RET4_MIN        = 0.010  # trend_momentum: minimum ret_4
+RUTHLESS_CONFIRM_RET16_MIN       = 0.020  # trend_momentum: minimum ret_16
+RUTHLESS_CONFIRM_VOLR_MIN        = 1.5    # trend_momentum: minimum vol_r
+
+# ── Ruthless label parameters (for profile-aligned model training) ─────────────
+RUTHLESS_LABEL_TP                = 0.09   # wider TP barrier for ruthless training labels
+RUTHLESS_LABEL_SL                = 0.03   # wider SL barrier for ruthless training labels
+RUTHLESS_LABEL_HORIZON_HOURS     = 24     # 24h horizon aligns with ruthless timeout
+# Derived bars: horizon_hours × (60 / DECISION_INTERVAL_MIN) = 24×4 = 96 bars
+RUTHLESS_LABEL_HORIZON_BARS      = 96
 
 # ── Momentum breakout override ─────────────────────────────────────────────────
 # Enabled by default for aggressive/ruthless profiles; disabled otherwise.
@@ -227,6 +253,24 @@ def setup_risk_profile(algo):
             algo._trail_after_tp = RUTHLESS_TRAIL_AFTER_TP
         if not getattr(algo, "_trail_pct", None):
             algo._trail_pct      = RUTHLESS_TRAIL_PCT
+        # Anti-chop: per-symbol 2-SL-in-24h extended block
+        algo._ruthless_loss_window_hours = RUTHLESS_LOSS_WINDOW_HOURS
+        algo._ruthless_loss_limit        = RUTHLESS_LOSS_LIMIT
+        algo._ruthless_loss_block_hours  = RUTHLESS_LOSS_BLOCK_HOURS
+        # Portfolio loss-streak brake
+        algo._ruthless_portfolio_loss_streak = RUTHLESS_PORTFOLIO_LOSS_STREAK
+        algo._ruthless_portfolio_pause_hours = RUTHLESS_PORTFOLIO_PAUSE_HOURS
+        # Ruthless confirmation gate thresholds
+        algo._ruthless_confirm_ev_min    = RUTHLESS_CONFIRM_EV_MIN
+        algo._ruthless_confirm_proba_min = RUTHLESS_CONFIRM_PROBA_MIN
+        algo._ruthless_confirm_agree_min = RUTHLESS_CONFIRM_AGREE_MIN
+        algo._ruthless_confirm_ret4_min  = RUTHLESS_CONFIRM_RET4_MIN
+        algo._ruthless_confirm_ret16_min = RUTHLESS_CONFIRM_RET16_MIN
+        algo._ruthless_confirm_volr_min  = RUTHLESS_CONFIRM_VOLR_MIN
+        # Ruthless label parameters — override defaults for profile-aligned training
+        algo._label_tp      = RUTHLESS_LABEL_TP
+        algo._label_sl      = RUTHLESS_LABEL_SL
+        algo._label_horizon = RUTHLESS_LABEL_HORIZON_BARS
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -273,3 +317,19 @@ def setup_risk_profile(algo):
         f"  trail_after_tp={_trail_after_tp}"
         f"  trail_pct={_trail_pct}"
     )
+    if algo._risk_profile == "ruthless":
+        algo.log(
+            f"[vox] RUTHLESS v3 ACTIVE:"
+            f"  sl_cooldown_mins={algo._sl_cd}"
+            f"  loss_window_h={getattr(algo, '_ruthless_loss_window_hours', 24)}"
+            f"  loss_limit={getattr(algo, '_ruthless_loss_limit', 2)}"
+            f"  loss_block_h={getattr(algo, '_ruthless_loss_block_hours', 24)}"
+            f"  portfolio_loss_streak={getattr(algo, '_ruthless_portfolio_loss_streak', 4)}"
+            f"  portfolio_pause_h={getattr(algo, '_ruthless_portfolio_pause_hours', 6)}"
+            f"  confirm_ev>={getattr(algo, '_ruthless_confirm_ev_min', 0.006)}"
+            f"  confirm_proba>={getattr(algo, '_ruthless_confirm_proba_min', 0.60)}"
+            f"  confirm_ret4>={getattr(algo, '_ruthless_confirm_ret4_min', 0.010)}"
+            f"  label_tp={getattr(algo, '_label_tp', 0.09)}"
+            f"  label_sl={getattr(algo, '_label_sl', 0.03)}"
+            f"  label_horizon_bars={getattr(algo, '_label_horizon', 96)}"
+        )
