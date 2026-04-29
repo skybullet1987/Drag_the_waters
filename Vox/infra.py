@@ -452,3 +452,49 @@ class PersistenceManager:
                 f"[persistence] is_kill_switch_active check failed: {exc}"
             )
             return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HISTORY HYDRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def hydrate_state_from_history(algorithm, state, symbols,
+                               days, resolution_minutes, max_history_bars):
+    """Fetch history and populate per-symbol state deques.
+
+    Standalone so it can be called from main.py without duplicating logic.
+
+    Parameters
+    ----------
+    algorithm          : QCAlgorithm — provides .history() and .log()
+    state              : dict sym → {"closes", "highs", "lows", "volumes"}
+    symbols            : list[Symbol]
+    days               : int — calendar days of history to request
+    resolution_minutes : int — bar resolution (e.g. 5)
+    max_history_bars   : int — safety cap on bar count
+    """
+    bars_needed = int(days * 24 * 60 / resolution_minutes)
+    bars_needed = min(bars_needed, max_history_bars)
+    for sym in symbols:
+        try:
+            hist = algorithm.history(sym, bars_needed, Resolution.MINUTE)
+            if hist is None or hist.empty:
+                continue
+            if hasattr(hist.index, "levels") and len(hist.index.levels) > 1:
+                df = hist.loc[sym] if sym in hist.index.get_level_values(0) else hist
+            else:
+                df = hist
+            df = df.resample(f"{resolution_minutes}min").agg({
+                "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna()
+            st = state[sym]
+            st["closes"].clear(); st["highs"].clear()
+            st["lows"].clear();   st["volumes"].clear()
+            for _, row in df.iterrows():
+                st["closes"].append(float(row["close"]))
+                st["highs"].append(float(row["high"]))
+                st["lows"].append(float(row["low"]))
+                st["volumes"].append(float(row["volume"]))
+        except Exception as exc:
+            algorithm.log(f"[vox] history hydrate failed for {sym.value}: {exc}")
