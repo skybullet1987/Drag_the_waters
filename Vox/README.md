@@ -284,8 +284,23 @@ asymmetric, larger winners:
 - **Runner mode** — trailing stop replaces the instant TP exit (see below)
 - **Very loose pred_return gate** — regressor veto is nearly disabled
 
-| Parameter | Ruthless v2 | Balanced default |
-|-----------|------------|-----------------|
+Ruthless **v3** adds trend-confirmation and chop-protection mechanics:
+
+- **TP/SL floors** — ATR-derived exits cannot shrink below the configured ruthless
+  9 % TP and 3 % SL thresholds.
+- **Ruthless confirmation gate** — entries require passing one of three confirmation
+  paths (see below).
+- **Anti-chop same-symbol cooldown** — 120-min block after every SL exit;
+  24-hour block after 2 SL exits within any 24-hour window.
+- **Portfolio loss-streak brake** — all entries pause for 6 hours after 4
+  consecutive losing trades.
+- **Profile-aligned labels** — training labels use 9 % TP / 3 % SL / 96-bar
+  horizon for ruthless mode to align the model with actual ruthless targets.
+- **SMA slope feature** — feature index 9 now provides a short-SMA slope
+  proxy (trend direction) instead of the reserved zero slot.
+
+| Parameter | Ruthless v2/v3 | Balanced default |
+|-----------|---------------|-----------------|
 | `score_min` | 0.45 | 0.50 |
 | `max_dispersion` | 0.35 | 0.22 |
 | `min_agree` | 1 | 2 |
@@ -305,17 +320,94 @@ asymmetric, larger winners:
 | `emergency_sl` | 0.05 (−5.0 %) | 0.030 |
 | `max_daily_sl` | 5 | 2 |
 | `cooldown_mins` | 0 | 20 |
-| `sl_cooldown_mins` | 5 | 60 |
+| `sl_cooldown_mins` | **120** *(v3: was 5)* | 60 |
 | `penalty_cooldown_losses` | 5 | 3 |
 | `penalty_cooldown_hours` | 12 | 48 |
 | `max_dd_pct` | 0.35 (35 %) | 0.08 |
 | `runner_mode` | **True** | False |
 | `trail_after_tp` | **0.04 (+4 %)** | — |
 | `trail_pct` | **0.025 (2.5 %)** | — |
+| `label_tp` | **0.09** *(v3 override)* | 0.012 |
+| `label_sl` | **0.03** *(v3 override)* | 0.010 |
+| `label_horizon_bars` | **96** *(v3 override)* | 72 |
 
-Ruthless v2 also enables:
+Ruthless v2/v3 also enables:
 - **Momentum score boost** in the final ranking formula.
 - **Momentum breakout override** (see below).
+- **Ruthless confirmation gate** (see below).
+
+> ⚠️ **Warning**: Even with v3 improvements, **large drawdowns (up to 35 %)
+> are expected** in ruthless mode.  The strategy deliberately accepts large
+> losses in pursuit of large winners.  Ruthless mode is not appropriate for
+> production live trading without extensive validation.
+
+#### Ruthless TP/SL floors (v3)
+
+ATR-derived TP/SL are computed per-candidate, but in ruthless mode they
+cannot shrink below the profile's configured thresholds:
+
+```python
+tp_use = max(atr_tp, self._tp)   # at least 9%
+sl_use = max(atr_sl, self._sl)   # at least 3%
+```
+
+This prevents the common failure mode where tight ATR conditions produce
+0.7 %–1.5 % effective stops despite a 3 % configured SL.
+
+Entry logs indicate when floors are applied:
+```
+[ruthless] ENTRY BCHUSD  tp=0.0900(floor=True)  sl=0.0300(floor=True)  ...
+```
+
+#### Ruthless confirmation gate (v3)
+
+Ruthless mode requires candidates to pass at least one of three confirmation
+paths before a large (≈90 %) allocation entry is placed:
+
+| Path | Condition |
+|------|-----------|
+| `momentum_override` | Entry path already is `momentum_override` |
+| `strong_ml` | `ev_score >= 0.006 AND class_proba >= 0.60 AND n_agree >= 2` |
+| `trend_momentum` | `ret_4 >= 0.010 AND ret_16 >= 0.020 AND vol_r >= 1.5` |
+
+Candidates that fail all three paths are skipped.  Entry logs include the
+confirmation reason:
+```
+[ruthless] ENTRY SOLUSD  confirm=strong_ml  proba=0.65  n_agree=3  ev=0.00821  ...
+[ruthless] ENTRY ADAUSD  confirm=trend_momentum  ret4=0.0143  ret16=0.0261  vol_r=2.1 ...
+[ruthless] ENTRY INJUSD  confirm=momentum_override  ...
+```
+
+#### Anti-chop same-symbol cooldown (v3)
+
+After any SL exit, the same symbol is blocked for **120 minutes** (up from 5
+minutes in v2).
+
+Additionally, if the same symbol has **2 or more SL exits within any 24-hour
+window**, it is blocked for a full **24 hours**.  This prevents BCH/ARB/NEAR/INJ-
+style loss spirals where the same coin is re-entered minutes after a stop-out.
+
+```
+[ruthless] ANTI-CHOP BLOCK: BCHUSD had 2 SL exits in 24h — blocked until 2024-01-02 14:30:00
+```
+
+This cooldown is independent of the existing penalty cooldown mechanism.
+
+#### Portfolio loss-streak brake (v3)
+
+After **4 consecutive losing trades** (across all symbols), all new entries are
+paused for **6 hours**.
+
+```
+[ruthless] LOSS-STREAK PAUSE: 4 consecutive losses — all entries paused until 2024-01-07 18:00:00
+```
+
+The streak counter resets to zero:
+- When any trade is a **winner** (positive return), OR
+- When the pause is triggered (streak resets to prevent a second immediate pause)
+
+The pause only affects new entries.  Open positions are managed normally (exits
+still fire as usual).
 
 #### Runner / trailing-profit mode (`runner_mode=true`)
 
@@ -348,7 +440,7 @@ Price drops to $112 → EXIT_TRAIL at ~+12 %
 **`EXIT_TRAIL` exit tag** appears in order logs and trade records.  It is
 *not* treated as a stop-loss for penalty-cooldown accounting.
 
-**Recommended ruthless v2 setup:**
+**Recommended ruthless v3 setup:**
 
 ```text
 risk_profile = ruthless

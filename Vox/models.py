@@ -114,16 +114,17 @@ def build_features(closes, volumes, btc_closes, hour):
 
     Feature layout
     --------------
-    0  ret_1     — 1-bar return
-    1  ret_4     — 4-bar return
-    2  ret_8     — 8-bar return
-    3  ret_16    — 16-bar return
-    4  rsi_14    — RSI(14) normalised to [0, 1]
-    5  atr_n     — ATR(14) / close[-1]
-    6  vol_r     — volume ratio: current / 15-bar mean
-    7  btc_rel   — 4-bar symbol return minus 4-bar BTC return
-    8  hour_of_day — hour normalised to [0, 1]
-    9  (reserved — zero-padded for future use)
+    0  ret_1        — 1-bar return
+    1  ret_4        — 4-bar return
+    2  ret_8        — 8-bar return
+    3  ret_16       — 16-bar return
+    4  rsi_14       — RSI(14) normalised to [0, 1]
+    5  atr_n        — ATR(14) / close[-1]
+    6  vol_r        — volume ratio: current / 15-bar mean (capped at 10)
+    7  btc_rel      — 4-bar symbol return minus 4-bar BTC return
+    8  hour_of_day  — hour normalised to [0, 1]
+    9  sma_slope    — 8-bar SMA slope: (sma[-8:] - sma[-16:-8]) / sma[-16:-8], capped [-0.10, 0.10]
+                       Compares two non-overlapping 8-bar SMAs; positive = uptrend.
     """
     c  = np.asarray(closes,    dtype=float)
     v  = np.asarray(volumes,   dtype=float)
@@ -161,13 +162,22 @@ def build_features(closes, volumes, btc_closes, hour):
         atr_val = 0.0
     atr_n = atr_val / last if last != 0 else 0.0
 
-    # ── Volume ratio ──────────────────────────────────────────────────────────
+    # ── Volume ratio (capped to prevent explosion on low-liquidity spikes) ────
     prior_avg = float(np.mean(v[-16:-1]))
     vol_r     = (v[-1] / prior_avg) if prior_avg > 0 else 1.0
+    vol_r     = min(vol_r, 10.0)   # cap at 10× to avoid extreme values
 
     # ── BTC-relative return (4-bar) ───────────────────────────────────────────
     btc_ret_4 = (bc[-1] - bc[-5]) / bc[-5] if len(bc) >= 5 and bc[-5] != 0 else 0.0
     btc_rel   = ret_4 - btc_ret_4
+
+    # ── Short SMA slope (non-overlapping 8-bar windows) ──────────────────────
+    # Compare SMA of last 8 bars vs SMA of 8 bars before that.
+    # Positive = uptrend, negative = downtrend.  Capped at ±0.10.
+    sma_last = float(np.mean(c[-8:]))
+    sma_prev = float(np.mean(c[-16:-8]))
+    sma_slope = (sma_last - sma_prev) / sma_prev if sma_prev != 0 else 0.0
+    sma_slope = float(np.clip(sma_slope, -0.10, 0.10))
 
     return np.array([
         ret_1,
@@ -179,7 +189,7 @@ def build_features(closes, volumes, btc_closes, hour):
         vol_r,
         btc_rel,
         float(hour) / 23.0,   # normalise to [0, 1]
-        0.0,                   # reserved
+        sma_slope,             # short SMA slope — replaces reserved zero slot
     ], dtype=float)
 
 
