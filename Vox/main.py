@@ -139,6 +139,7 @@ class VoxAlgorithm(QCAlgorithm):
         _mm_enabled = getattr(self, "_market_mode_enabled", False)
         if _mm_enabled and self._btc_sym:
             self._market_mode_det = MarketModeDetector()
+            self._market_mode_det.update_btc(self, self._btc_sym)
 
         # ── Risk manager ──────────────────────────────────────────────────────
         self._risk = RiskManager(

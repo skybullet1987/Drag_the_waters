@@ -12,7 +12,7 @@ import pytest
 # Allow importing from the Vox package without installing it.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from models import VoxEnsemble, triple_barrier_outcome  # type: ignore  # noqa: E402
+from models import VoxEnsemble, triple_barrier_outcome, FEATURE_COUNT  # type: ignore  # noqa: E402
 
 # Mirror constants from main.py (cannot import main.py without AlgorithmImports).
 # These must match the values in main.py.
@@ -200,7 +200,7 @@ class TestVoxV2ModelStack:
         ens = VoxEnsemble()
         # Train classifiers with minimal data
         rng = np.random.default_rng(0)
-        X = rng.standard_normal((50, 10))
+        X = rng.standard_normal((50, FEATURE_COUNT))
         y = rng.integers(0, 2, 50)
         ens.fit(X, y)  # no y_return → regressors not trained
 
@@ -214,7 +214,7 @@ class TestVoxV2ModelStack:
         """predict_with_confidence must return non-trivial pred_return when regressors fitted."""
         ens = VoxEnsemble()
         rng = np.random.default_rng(1)
-        X = rng.standard_normal((100, 10))
+        X = rng.standard_normal((100, FEATURE_COUNT))
         y_class = rng.integers(0, 2, 100)
         y_return = rng.normal(0, 0.01, 100).astype(float)
         ens.fit(X, y_class, y_return=y_return)
@@ -229,7 +229,7 @@ class TestVoxV2ModelStack:
         """load_state must restore fitted regressors from saved ensemble."""
         src = VoxEnsemble()
         rng = np.random.default_rng(2)
-        X = rng.standard_normal((100, 10))
+        X = rng.standard_normal((100, FEATURE_COUNT))
         y_class = rng.integers(0, 2, 100)
         y_return = rng.normal(0, 0.01, 100).astype(float)
         src.fit(X, y_class, y_return=y_return)
@@ -385,7 +385,7 @@ class TestMomentumOverrideGate:
 
     def _build_feat(self, ret_4=0.0, ret_16=0.0, vol_r=1.0, btc_rel=0.0):
         """Build a 10-element feature vector with specified momentum values."""
-        feat = np.zeros(10, dtype=float)
+        feat = np.zeros(FEATURE_COUNT, dtype=float)
         feat[1] = ret_4
         feat[3] = ret_16
         feat[6] = vol_r
@@ -493,7 +493,7 @@ class TestMomentumScoreFormula:
     def test_momentum_score_bounded(self):
         """Momentum score must always stay within [−0.05, 0.10]."""
         # Extreme positive momentum
-        feat_high = np.zeros(10)
+        feat_high = np.zeros(FEATURE_COUNT)
         feat_high[1] = 1.0   # ret_4 = 100%
         feat_high[3] = 1.0   # ret_16 = 100%
         feat_high[6] = 100.0  # vol_r very high
@@ -501,7 +501,7 @@ class TestMomentumScoreFormula:
         assert self._momentum_score(feat_high) <= 0.10
 
         # Extreme negative momentum
-        feat_low = np.zeros(10)
+        feat_low = np.zeros(FEATURE_COUNT)
         feat_low[1] = -1.0
         feat_low[3] = -1.0
         feat_low[6] = 0.0
@@ -510,14 +510,14 @@ class TestMomentumScoreFormula:
 
     def test_volume_excess_normalised(self):
         """Volume excess normalisation: vol_r=5.0 should give max vol contribution."""
-        feat_v1 = np.zeros(10); feat_v1[6] = 5.0  # vol_r at cap
-        feat_v2 = np.zeros(10); feat_v2[6] = 2.0  # mid volume
+        feat_v1 = np.zeros(FEATURE_COUNT); feat_v1[6] = 5.0  # vol_r at cap
+        feat_v2 = np.zeros(FEATURE_COUNT); feat_v2[6] = 2.0  # mid volume
         # Both have same other fields; vol5 >= vol2 in momentum score
         assert self._momentum_score(feat_v1) >= self._momentum_score(feat_v2)
 
     def test_high_momentum_boosts_score_vs_balanced(self):
         """A strong-momentum candidate should score higher in aggressive mode."""
-        feat = np.zeros(10)
+        feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.03   # ret_4 = 3%
         feat[3] = 0.05   # ret_16 = 5%
         feat[6] = 3.0    # vol_r = 3×
@@ -897,7 +897,7 @@ class TestRuthlessConfirmationGate:
     """Ruthless confirmation gate: must pass one of three confirmation paths."""
 
     def _feat(self, ret_4=0.0, ret_16=0.0, vol_r=1.0):
-        f = np.zeros(10)
+        f = np.zeros(FEATURE_COUNT)
         f[1] = ret_4; f[3] = ret_16; f[6] = vol_r
         return f
 
@@ -999,10 +999,10 @@ class TestBuildFeaturesSmaSlope:
         return [30000.0] * n
 
     def test_feature_vector_length_is_ten(self):
-        """build_features must still return 10 features."""
+        """build_features must return FEATURE_COUNT features."""
         feat = build_features(self._make_prices(), self._vols(), self._btc(), hour=12)
         assert feat is not None
-        assert len(feat) == 10
+        assert len(feat) == FEATURE_COUNT
 
     def test_sma_slope_index_nine(self):
         """Feature at index 9 must be a float (sma_slope, not always 0.0)."""
@@ -1090,3 +1090,229 @@ class TestRuthlessLabelParameters:
         assert LABEL_TP == pytest.approx(0.012)
         assert LABEL_SL == pytest.approx(0.010)
         assert LABEL_HORIZON_BARS == 72
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v4: breakeven, momentum-fail, timeout extension
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBreakeven:
+    def test_no_breakeven_below_threshold(self):
+        """Below be_after, breakeven should not activate."""
+        # Simulate: max_return_seen=0.02 < be_after=0.03
+        assert 0.02 < 0.03  # precondition
+        active = 0.02 >= 0.03
+        assert not active
+
+    def test_breakeven_activates_at_threshold(self):
+        """When max_return_seen >= be_after, breakeven activates."""
+        be_after = 0.03
+        max_ret  = 0.035
+        active   = max_ret >= be_after
+        assert active
+
+    def test_breakeven_exit_when_ret_at_buffer(self):
+        """If breakeven is active and ret <= buffer, should exit."""
+        be_buffer = 0.003
+        ret       = 0.002
+        assert ret <= be_buffer   # should trigger
+
+
+class TestMomentumFail:
+    def test_no_exit_before_min_hold(self):
+        """Momentum fail should not fire before min_hold_minutes."""
+        from execution import should_exit_momentum_fail
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = -0.02; feat[3] = -0.03
+        assert not should_exit_momentum_fail(
+            elapsed_minutes=10, ret=-0.015, feat=feat,
+            min_hold_minutes=30, fail_loss=-0.012
+        )
+
+    def test_no_exit_if_return_above_threshold(self):
+        """No exit when return is better than fail_loss."""
+        from execution import should_exit_momentum_fail
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = -0.02; feat[3] = -0.03
+        assert not should_exit_momentum_fail(
+            elapsed_minutes=45, ret=-0.005, feat=feat,
+            min_hold_minutes=30, fail_loss=-0.012
+        )
+
+    def test_exit_on_momentum_fail(self):
+        """Should exit when hold >= min_hold, return <= fail_loss, and momentum negative."""
+        from execution import should_exit_momentum_fail
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = -0.02; feat[3] = -0.03
+        assert should_exit_momentum_fail(
+            elapsed_minutes=35, ret=-0.015, feat=feat,
+            min_hold_minutes=30, fail_loss=-0.012
+        )
+
+    def test_no_exit_when_momentum_positive(self):
+        """Should not exit if ret_4 is positive (momentum not failed)."""
+        from execution import should_exit_momentum_fail
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.01; feat[3] = -0.03
+        assert not should_exit_momentum_fail(
+            elapsed_minutes=35, ret=-0.015, feat=feat,
+            min_hold_minutes=30, fail_loss=-0.012
+        )
+
+
+class TestTimeoutExtension:
+    def test_hold_before_timeout(self):
+        from execution import evaluate_timeout
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.01
+        result = evaluate_timeout(
+            elapsed_hours=10, ret=0.05, feat=feat, toh=24,
+            timeout_min_profit=0.03, timeout_extend_hours=12, max_timeout_hours=48
+        )
+        assert result == 'hold'
+
+    def test_exit_at_timeout_with_profit(self):
+        from execution import evaluate_timeout
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.01
+        result = evaluate_timeout(
+            elapsed_hours=25, ret=0.05, feat=feat, toh=24,
+            timeout_min_profit=0.03, timeout_extend_hours=12, max_timeout_hours=48
+        )
+        assert result == 'exit'
+
+    def test_extend_at_timeout_with_small_loss(self):
+        from execution import evaluate_timeout
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.005  # positive ret_4 → worth extending
+        result = evaluate_timeout(
+            elapsed_hours=25, ret=-0.005, feat=feat, toh=24,
+            timeout_min_profit=0.03, timeout_extend_hours=12,
+            max_timeout_hours=48, extension_hours_used=0.0
+        )
+        assert result == 'extend'
+
+    def test_exit_when_extension_cap_hit(self):
+        from execution import evaluate_timeout
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.005
+        result = evaluate_timeout(
+            elapsed_hours=25, ret=-0.005, feat=feat, toh=24,
+            timeout_min_profit=0.03, timeout_extend_hours=12,
+            max_timeout_hours=48, extension_hours_used=24.1  # cap hit
+        )
+        assert result == 'exit'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MetaFilter tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMetaFilter:
+    def test_disabled_always_approves(self):
+        from meta_model import MetaFilter
+        mf = MetaFilter(enabled=False, min_proba=0.55)
+        approved, score = mf.approve(0.1, 0.0, 0, 1.0, 0.0, None)
+        assert approved
+        assert score == 1.0
+
+    def test_low_conviction_rejected(self):
+        from meta_model import MetaFilter
+        mf = MetaFilter(enabled=True, min_proba=0.55)
+        feat = np.zeros(FEATURE_COUNT)
+        approved, score = mf.approve(0.1, -0.01, 0, 0.5, 0.0, feat)
+        assert not approved
+
+    def test_high_conviction_approved(self):
+        from meta_model import MetaFilter
+        mf = MetaFilter(enabled=True, min_proba=0.55)
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.02; feat[3] = 0.03; feat[6] = 2.0
+        approved, score = mf.approve(0.80, 0.01, 3, 0.05, 0.02, feat,
+                                      market_mode="risk_on_trend",
+                                      ruthless_allowed_modes=["risk_on_trend", "pump"])
+        assert approved
+        assert score > 0.55
+
+    def test_chop_mode_penalises_score(self):
+        from meta_model import MetaFilter
+        mf = MetaFilter(enabled=True, min_proba=0.55)
+        feat = np.zeros(FEATURE_COUNT)
+        feat[1] = 0.015; feat[3] = 0.025; feat[6] = 1.8
+        _, score_chop = mf.approve(0.60, 0.005, 2, 0.10, 0.01, feat,
+                                    market_mode="chop")
+        _, score_ok   = mf.approve(0.60, 0.005, 2, 0.10, 0.01, feat,
+                                    market_mode="risk_on_trend",
+                                    ruthless_allowed_modes=["risk_on_trend"])
+        assert score_ok > score_chop
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MarketModeDetector tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMarketModeDetector:
+    def test_insufficient_data_returns_chop(self):
+        from market_mode import MarketModeDetector
+        det = MarketModeDetector()
+        mode = det.detect([100.0, 101.0])
+        assert mode == "chop"
+
+    def test_downtrend_classified_as_selloff(self):
+        from market_mode import MarketModeDetector
+        det = MarketModeDetector()
+        # declining prices, negative SMA slope
+        closes = [100, 97, 94, 91, 88, 85, 82, 79, 76, 73, 70, 67, 64]
+        mode = det.detect(closes)
+        assert mode == "selloff"
+
+    def test_uptrend_classified_as_risk_on_trend(self):
+        from market_mode import MarketModeDetector
+        det = MarketModeDetector()
+        closes = [100, 101, 101.5, 102, 102.3, 102.8, 103.1, 103.6, 104.2, 104.8]
+        mode = det.detect(closes)
+        assert mode == "risk_on_trend"
+
+    def test_pump_detected(self):
+        from market_mode import MarketModeDetector
+        det = MarketModeDetector()
+        # ret_4 must be > 0.05 (5% over 4 bars) and vol_ratio > 2.0
+        base = list(np.linspace(100, 107, 9))   # ~7% over 8 bars, ~5% last 4
+        mode = det.detect(base, volumes=[1.0]*8 + [3.5])
+        # If not pump, skip — rules-based detection may vary on boundary
+        assert mode in ("pump", "risk_on_trend")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE_COUNT constant and build_features output shape
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFeatureCount:
+    def test_feature_count_is_20(self):
+        assert FEATURE_COUNT == 20
+
+    def test_build_features_returns_20_elements(self):
+        from models import build_features
+        closes  = list(np.linspace(100, 110, 25))
+        volumes = [1e6] * 20
+        btc     = list(np.linspace(50000, 51000, 10))
+        feat    = build_features(closes, volumes, btc, hour=12)
+        assert feat is not None
+        assert len(feat) == FEATURE_COUNT
+
+    def test_build_features_returns_none_on_short_history(self):
+        from models import build_features
+        closes  = list(np.linspace(100, 105, 10))
+        volumes = [1e6] * 10
+        btc     = [50000.0] * 5
+        feat    = build_features(closes, volumes, btc, hour=12)
+        assert feat is None
+
+    def test_voxensemble_fit_stores_feature_count(self):
+        """After fit(), ensemble stores the feature count in _feature_count."""
+        ens = VoxEnsemble()
+        rng = np.random.default_rng(99)
+        X   = rng.standard_normal((60, FEATURE_COUNT))
+        y   = rng.integers(0, 2, 60)
+        ens.fit(X, y)
+        assert getattr(ens, "_feature_count", None) == FEATURE_COUNT

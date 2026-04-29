@@ -24,7 +24,15 @@ before ML scoring is layered back in.
 
 | File | Purpose |
 |---|---|
-| `main.py` | Complete algorithm — all strategy logic in one file |
+| `main.py` | Core algorithm — initialization, data handling, order state machine |
+| `config.py` | Strategy constants and `setup_risk_profile()` |
+| `models.py` | Feature engineering (20 features), VoxEnsemble, training pipeline |
+| `execution.py` | Breakeven, momentum-fail, timeout extension, `evaluate_candidate()` |
+| `market_mode.py` | Rules-based BTC market mode detection |
+| `meta_model.py` | Meta-filter veto for low-conviction ruthless entries |
+| `infra.py` | Universe management, order helpers, persistence |
+| `risk.py` | Regime filter, risk manager, Kelly sizing |
+| `momentum.py` | Momentum override conditions and score |
 | `README.md` | This document |
 
 ## Strategy overview
@@ -115,4 +123,53 @@ All constants can be overridden via the QC parameter panel without editing code:
 - **Upgrade path**: once execution is confirmed clean, replace `_score()` with
   an ensemble of trained classifiers (logistic regression, gradient boosting,
   random forest) built in QC Research.
+
+## Ruthless v4 improvements
+
+The `ruthless` risk profile activates a suite of aggressive trade-management
+features targeting high-conviction breakout setups.
+
+### New in v4
+
+| Feature | Config constant | Default | Description |
+|---|---|---|---|
+| Breakeven stop | `RUTHLESS_BREAKEVEN_AFTER` | `0.03` | Move stop to entry+buffer once return ≥ 3% |
+| Momentum-fail exit | `RUTHLESS_MOM_FAIL_ENABLED` | `True` | Cut early if return ≤ −1.2% with broken momentum |
+| Timeout extension | `RUTHLESS_TIMEOUT_EXTEND_HOURS` | `12h` | Extend hold by 12h when in profit at timeout |
+| Market mode gate | `MARKET_MODE_ENABLED` | `True` | Only enter in `risk_on_trend` / `pump` regimes |
+| Meta-filter veto | `RUTHLESS_META_FILTER_ENABLED` | `True` | Block low-conviction signals via meta-score |
+| 20-feature model | `FEATURE_COUNT = 20` in `models.py` | — | Extended feature set for better signal separation |
+| Delayed trail | `RUTHLESS_TRAIL_AFTER_TP` | `0.07` | Trailing stop activates at +7% (was +4%) |
+| Wider trail | `RUTHLESS_TRAIL_PCT` | `0.03` | Trail 3% from high-water mark (was 2.5%) |
+
+### New modules
+
+- **`execution.py`** — `evaluate_candidate()` (replaces inline scoring loop),
+  `apply_breakeven()`, `should_exit_momentum_fail()`, `evaluate_timeout()`,
+  `LimitOrderTracker`
+- **`market_mode.py`** — `MarketModeDetector`: rules-based BTC regime
+  classifier feeding off 4h bars (selloff / high_vol_reversal / pump /
+  risk_on_trend / chop)
+- **`meta_model.py`** — `MetaFilter`: rules-based meta-score that vetos
+  low-conviction entries (disabled by default; enable with
+  `RUTHLESS_META_FILTER_ENABLED = True`)
+
+### New features in `build_features` (indices 10–19)
+
+| Index | Name | Description |
+|---|---|---|
+| 10 | `range_eff` | 16-bar range efficiency (trend purity) |
+| 11 | `sma_fast_slope` | 4-bar SMA slope |
+| 12 | `price_vs_sma_fast` | Price relative to 4-bar SMA |
+| 13 | `price_vs_sma_slow` | Price relative to 8-bar SMA |
+| 14 | `recent_high_breakout` | Distance above 16-bar prior high |
+| 15 | `vol_zscore` | Volume z-score over 16 bars |
+| 16 | `reversal_frac` | Fraction of sign changes in last 8 bars |
+| 17 | `green_bar_ratio` | Fraction of up-bars in last 8 bars |
+| 18 | `atr_expansion` | Current ATR vs lagged ATR ratio |
+| 19 | `btc_ret_1` | 1-bar BTC return |
+
+> **Migration note**: saved models trained on 10 features will be automatically
+> discarded on load (via `load_state` feature-count mismatch check) and a full
+> retrain will be scheduled.
 
