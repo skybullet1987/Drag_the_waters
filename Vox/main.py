@@ -591,27 +591,27 @@ class VoxAlgorithm(QCAlgorithm):
         if not self._breakeven_active and self._max_return_seen >= be_after:
             self._breakeven_active = True
         if self._breakeven_active and ret <= be_buffer:
-            reason = "EXIT_SL"
-            is_sl  = True
-            self._risk.record_exit(sym, is_sl=True, exit_time=self.time)
-            self._clear_position_state(include_retry=True)
-            self.market_order(sym, -OrderHelper.safe_crypto_sell_qty(
+            _be_qty = OrderHelper.safe_crypto_sell_qty(
                 self, sym,
                 OrderHelper.get_lot_size(self.securities[sym]),
                 OrderHelper.get_min_order_size(self.securities[sym]),
                 exit_qty_buffer_lots=self._exit_qty_buffer,
-            ), tag="EXIT_SL")
+            )
+            self._risk.record_exit(sym, is_sl=True, exit_time=self.time)
+            self._clear_position_state(include_retry=True)
+            if _be_qty > 0:
+                self.market_order(sym, -_be_qty, tag="EXIT_SL")
             return
 
         # ── Ruthless v4: momentum-fail early exit ────────────────────────────
         if getattr(self, "_mom_fail_enabled", False):
             feat_now = self._last_feat.get(sym)
             if feat_now is not None and should_exit_momentum_fail(
-                feat=feat_now,
-                ret=ret,
                 elapsed_minutes=elapsed_minutes,
+                ret=ret,
+                feat=feat_now,
                 min_hold_minutes=getattr(self, "_mom_fail_min_hold", 30),
-                min_loss=getattr(self, "_mom_fail_loss", -0.012),
+                fail_loss=getattr(self, "_mom_fail_loss", -0.012),
             ):
                 reason = "EXIT_MOM_FAIL"
                 qty_mf = OrderHelper.safe_crypto_sell_qty(
