@@ -13,150 +13,18 @@ from models  import (
 from risk    import RegimeFilter, RiskManager, compute_qty
 # endregion
 
-# ── Strategy constants (all overridable via the QC parameter panel) ───────────
-TAKE_PROFIT          = 0.030   # +3.0 %  close long on gain  (wider to reduce fee drag)
-STOP_LOSS            = 0.015   # −1.5 %  close long on loss  (wider to avoid noise chop)
-TIMEOUT_HOURS        = 6.0     # close after this many hours regardless
-ATR_TP_MULT          = 2.0     # TP = entry + ATR_TP_MULT × ATR
-ATR_SL_MULT          = 1.2     # SL = entry − ATR_SL_MULT × ATR
-SCORE_MIN            = 0.50    # minimum class_proba to open a position (upper clamp) — balanced default
-SCORE_MIN_FLOOR      = 0.15    # floor for the effective base-rate-aware score threshold
-SCORE_MIN_MULT       = 3.0     # adaptive multiplier: eff_score_min = SCORE_MIN_MULT * base_rate
-SCORE_GAP            = 0.02    # probability gap: required lead of top coin over runner-up (mean_proba units)
-MAX_DISPERSION       = 0.22    # max std_proba across models — relaxed default (was 0.15)
-MIN_AGREE            = 2       # min models with proba >= agree_thr — relaxed default (was 3)
-ALLOCATION           = 0.50    # fallback fraction of portfolio if Kelly disabled
-KELLY_FRAC           = 0.25    # fractional-Kelly multiplier
-MAX_ALLOC            = 0.80    # hard ceiling on any single trade allocation
-USE_KELLY            = True    # set False to use flat ALLOCATION
-MAX_DAILY_SL         = 2       # halt new entries after this many SL hits per day — relaxed default (was 1)
-COOLDOWN_MINS        = 20      # minutes to wait after any exit before re-entering — relaxed default (was 30)
-SL_COOLDOWN_MINS     = 60      # per-coin cooldown specifically after an SL exit
-MAX_DD_PCT           = 0.08    # drawdown circuit-breaker: halt if equity drops > 8 %
-CASH_BUFFER          = 0.99    # keep 1 % cash headroom for fees/rounding
-EXIT_QTY_BUFFER_LOTS = 1       # safety lots subtracted from sell qty to absorb fee/rounding
-COST_BPS             = 35      # estimated round-trip fee+slippage in basis points (0.35 %) — relaxed default (was 50)
-MIN_EV               = 0.001   # minimum expected-value (return fraction) after costs: 0.001 = 0.1 % — relaxed default (was 0.004)
-EV_GAP               = 0.0001  # required EV lead of top coin over second-best (return fraction units) — relaxed default (was 0.00025)
-PRED_RETURN_MIN      = -0.0005 # regression veto: block only clearly bad predicted returns — relaxed default (was 0.003)
-MIN_HOLD_MINUTES     = 15      # suppress ordinary TP/SL/timeout exits before this many minutes
-EMERGENCY_SL         = 0.030   # allow early exit (before min hold) only if loss exceeds this: 3.0 %
-CONSERVATIVE_MODE    = False   # when True, applies stricter gates without manual per-param override
-PENALTY_COOLDOWN_LOSSES = 3    # consecutive SL exits on a symbol before penalty cooldown triggers
-PENALTY_COOLDOWN_HOURS  = 48   # hours a symbol is blocked after repeated losses
-MAX_EXIT_RETRY_COUNT = 3       # max consecutive INVALID exit retries before treating as dust
-RESOLUTION_MINUTES   = 5       # subscribe at 5-min bars, consolidate internally
-DECISION_INTERVAL_MIN = 15     # only evaluate entries at 15-min boundaries
-WARMUP_DAYS          = 90      # bars of history needed before trading
-MAX_HISTORY_BARS     = 30000   # safety cap on history bars fetched per symbol (~104 days @ 5m)
-SKIP_DIAG_INTERVAL_SECS = 21600 # routine skip diagnostics logged at most once per 6 hours
-DIAG_INTERVAL_HOURS  = 6       # no-candidate summary logged at most once every N hours
-MIN_RETRAIN_INTERVAL_HOURS = 20 # skip scheduled retrain if initial/last retrain was within this many hours
-
-# ── Risk profile ───────────────────────────────────────────────────────────────
-# Selects the risk/reward tradeoff of the strategy.
-# Values: "balanced" (default), "conservative", "aggressive", "ruthless"
-# Convenience aliases: aggressive_mode=true, ruthless_mode=true
-RISK_PROFILE             = "balanced"
-
-# ── Aggressive profile defaults ───────────────────────────────────────────────
-# Intermediate profile between balanced and ruthless: looser gates, larger
-# sizing, wider TP/SL, faster re-entry.
-AGGRESSIVE_SCORE_MIN               = 0.48
-AGGRESSIVE_MIN_EV                  = 0.0005
-AGGRESSIVE_PRED_RETURN_MIN         = -0.0010
-AGGRESSIVE_MAX_DISPERSION          = 0.28
-AGGRESSIVE_MIN_AGREE               = 1
-AGGRESSIVE_EV_GAP                  = 0.0
-AGGRESSIVE_COST_BPS                = 25
-AGGRESSIVE_ALLOCATION              = 0.75
-AGGRESSIVE_MAX_ALLOC               = 0.95
-AGGRESSIVE_KELLY_FRAC              = 0.50
-AGGRESSIVE_TAKE_PROFIT             = 0.045
-AGGRESSIVE_STOP_LOSS               = 0.020
-AGGRESSIVE_TIMEOUT_HOURS           = 8
-AGGRESSIVE_MIN_HOLD_MINUTES        = 5
-AGGRESSIVE_EMERGENCY_SL            = 0.025
-AGGRESSIVE_MAX_DAILY_SL            = 3
-AGGRESSIVE_COOLDOWN_MINS           = 5
-AGGRESSIVE_SL_COOLDOWN_MINS        = 20
-AGGRESSIVE_PENALTY_COOLDOWN_LOSSES = 3
-AGGRESSIVE_PENALTY_COOLDOWN_HOURS  = 24
-AGGRESSIVE_MAX_DD_PCT              = 0.20
-
-# ── Ruthless profile defaults ─────────────────────────────────────────────────
-# Maximum aggression: very loose signal gates, maximum sizing, wide TP/SL,
-# minimal cooldowns, and high drawdown tolerance.
-# WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.
-RUTHLESS_SCORE_MIN               = 0.45
-RUTHLESS_MIN_EV                  = 0.0000
-RUTHLESS_PRED_RETURN_MIN         = -0.0020
-RUTHLESS_MAX_DISPERSION          = 0.35
-RUTHLESS_MIN_AGREE               = 1
-RUTHLESS_EV_GAP                  = 0.0
-RUTHLESS_COST_BPS                = 20
-RUTHLESS_ALLOCATION              = 0.90
-RUTHLESS_MAX_ALLOC               = 1.00
-RUTHLESS_KELLY_FRAC              = 0.75
-RUTHLESS_TAKE_PROFIT             = 0.060
-RUTHLESS_STOP_LOSS               = 0.025
-RUTHLESS_TIMEOUT_HOURS           = 12
-RUTHLESS_MIN_HOLD_MINUTES        = 3
-RUTHLESS_EMERGENCY_SL            = 0.040
-RUTHLESS_MAX_DAILY_SL            = 5
-RUTHLESS_COOLDOWN_MINS           = 0
-RUTHLESS_SL_COOLDOWN_MINS        = 5
-RUTHLESS_PENALTY_COOLDOWN_LOSSES = 5
-RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
-RUTHLESS_MAX_DD_PCT              = 0.35
-
-# ── Momentum breakout override ─────────────────────────────────────────────────
-# Enabled by default for aggressive/ruthless profiles; disabled otherwise.
-# When active, a candidate that fails normal ML gates may still be entered if
-# strong momentum conditions are met (ret_4, ret_16, volume_ratio, btc_rel).
-MOMENTUM_RET4_MIN          = 0.015   # minimum 4-bar return for override
-MOMENTUM_RET16_MIN         = 0.025   # minimum 16-bar return for override
-MOMENTUM_VOLUME_MIN        = 2.0     # minimum volume ratio (current / 15-bar avg)
-MOMENTUM_BTC_REL_MIN       = 0.005   # minimum BTC-relative 4-bar outperformance
-MOMENTUM_OVERRIDE_MIN_EV   = -0.002  # momentum override blocked if EV < this threshold
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Vox — ML Ensemble Kraken Rotation Strategy
-#
-# Architecture (see README.md for full diagram):
-#   Data → 5-min consolidator → feature deques
-#        → 15-min decision tick
-#        → VoxEnsemble (5-model soft vote)
-#        → confidence gate (score_min / score_gap / dispersion / n_agree)
-#        → regime gate (4h BTC SMA + slope)
-#        → Kelly sizer
-#        → pre-trade validation (price, cash, lot-size, min-order)
-#        → market_order
-#        → fill-driven state machine in on_order_event
-#
-# Key design decisions (inherited from main.py):
-#   1. Position state updated ONLY via on_order_event confirmed fills.
-#   2. Exits use actual portfolio quantity (never assumed target).
-#   3. Pre-trade validation guards against Price=0 / insufficient cash.
-#   4. _reconcile() corrects state drift on every bar.
-# ─────────────────────────────────────────────────────────────────────────────
+from config   import *                       # noqa: F401,F403  strategy constants
+from config   import setup_risk_profile
+from momentum import check_momentum_override_conditions, compute_momentum_score
 
 np.random.seed(42)
 random.seed(42)
 
 
 class VoxAlgorithm(QCAlgorithm):
-    """
-    Execution-first ML ensemble strategy for Kraken spot crypto.
+    """Execution-first ML ensemble strategy for Kraken spot crypto.
 
-    Inherits the fill-driven state machine from KrakenTopCoinAlgorithm and
-    layers on:
-      • A 5-model heterogeneous ensemble (LogReg / RF / LGBM / ET / GNB).
-      • Triple-barrier labeling for supervised training.
-      • Fractional-Kelly position sizing.
-      • 4h BTC regime filter.
-      • Full risk management (drawdown CB, per-coin SL cooldown, daily cap).
-      • ObjectStore persistence for model and trade log.
+    See README.md for architecture details and risk-profile documentation.
     """
 
     # ── Initialisation ────────────────────────────────────────────────────────
@@ -208,131 +76,10 @@ class VoxAlgorithm(QCAlgorithm):
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
         self._label_cost_bps = float(self.get_parameter("label_cost_bps")    or LABEL_COST_BPS)
 
-        # ── Risk profile: resolve effective profile and apply gate overrides ────
-        #
-        # Priority (highest wins):
-        #   ruthless_mode=true  >  aggressive_mode=true  >  conservative_mode=true
-        #   > risk_profile parameter  >  RISK_PROFILE constant default
-        #
-        # Convenience boolean aliases ruthless_mode / aggressive_mode are provided
-        # in addition to the explicit risk_profile string so users can switch
-        # profiles from the QC parameter panel with a single flag.
-        _rp_raw          = self.get_parameter("risk_profile")
-        _rm_raw          = self.get_parameter("ruthless_mode")
-        _am_raw          = self.get_parameter("aggressive_mode")
-        _cm_raw          = self.get_parameter("conservative_mode")
-        _ruthless_mode   = (str(_rm_raw).lower() in ("true", "1", "yes")) if _rm_raw else False
-        _aggressive_mode = (str(_am_raw).lower() in ("true", "1", "yes")) if _am_raw else False
-        self._conservative_mode = (
-            str(_cm_raw).lower() in ("true", "1", "yes")
-        ) if _cm_raw else CONSERVATIVE_MODE
-
-        # Determine effective risk profile
-        if _ruthless_mode:
-            self._risk_profile = "ruthless"
-        elif _aggressive_mode:
-            self._risk_profile = "aggressive"
-        elif self._conservative_mode:
-            self._risk_profile = "conservative"
-        elif _rp_raw:
-            _rp_val = _rp_raw.lower().strip()
-            if _rp_val in ("conservative", "balanced", "aggressive", "ruthless"):
-                self._risk_profile = _rp_val
-                if _rp_val == "conservative":
-                    self._conservative_mode = True
-            else:
-                self._risk_profile = RISK_PROFILE
-        else:
-            self._risk_profile = RISK_PROFILE
-
-        if self._risk_profile == "conservative":
-            # Conservative: restore strict research-grade defaults
-            self._conservative_mode = True
-            self._s_min            = max(self._s_min,            0.55)
-            self._max_disp         = min(self._max_disp,          0.15)
-            self._min_agr          = max(self._min_agr,           3)
-            self._min_ev           = max(self._min_ev,            0.004)
-            self._cost_bps         = max(self._cost_bps,          50.0)
-            self._pred_return_min  = max(self._pred_return_min,   0.003)
-            self._max_sl           = min(self._max_sl,            1)
-            self._cd_mins          = max(self._cd_mins,           30)
-            self._tp               = max(self._tp,                0.035)
-            self._sl               = max(self._sl,                0.020)
-            self._min_hold_minutes = max(self._min_hold_minutes,  20)
-            self.log("[vox] Conservative mode enabled: stricter gate overrides applied.")
-
-        elif self._risk_profile == "aggressive":
-            # Aggressive: looser gates, larger sizing, wider TP/SL, faster re-entry
-            self._s_min            = AGGRESSIVE_SCORE_MIN
-            self._min_ev           = AGGRESSIVE_MIN_EV
-            self._pred_return_min  = AGGRESSIVE_PRED_RETURN_MIN
-            self._max_disp         = AGGRESSIVE_MAX_DISPERSION
-            self._min_agr          = AGGRESSIVE_MIN_AGREE
-            self._ev_gap           = AGGRESSIVE_EV_GAP
-            self._cost_bps         = AGGRESSIVE_COST_BPS
-            self._alloc            = AGGRESSIVE_ALLOCATION
-            self._max_alloc        = AGGRESSIVE_MAX_ALLOC
-            self._kf               = AGGRESSIVE_KELLY_FRAC
-            self._tp               = AGGRESSIVE_TAKE_PROFIT
-            self._sl               = AGGRESSIVE_STOP_LOSS
-            self._toh              = AGGRESSIVE_TIMEOUT_HOURS
-            self._min_hold_minutes = AGGRESSIVE_MIN_HOLD_MINUTES
-            self._emergency_sl     = AGGRESSIVE_EMERGENCY_SL
-            self._max_sl           = AGGRESSIVE_MAX_DAILY_SL
-            self._cd_mins          = AGGRESSIVE_COOLDOWN_MINS
-            self._sl_cd            = AGGRESSIVE_SL_COOLDOWN_MINS
-            self._penalty_losses   = AGGRESSIVE_PENALTY_COOLDOWN_LOSSES
-            self._penalty_hours    = AGGRESSIVE_PENALTY_COOLDOWN_HOURS
-            self._max_dd           = AGGRESSIVE_MAX_DD_PCT
-            self.log("[vox] Aggressive mode enabled: high-risk/high-upside settings active.")
-
-        elif self._risk_profile == "ruthless":
-            # Ruthless: maximum aggression — extreme risk profile
-            self._s_min            = RUTHLESS_SCORE_MIN
-            self._min_ev           = RUTHLESS_MIN_EV
-            self._pred_return_min  = RUTHLESS_PRED_RETURN_MIN
-            self._max_disp         = RUTHLESS_MAX_DISPERSION
-            self._min_agr          = RUTHLESS_MIN_AGREE
-            self._ev_gap           = RUTHLESS_EV_GAP
-            self._cost_bps         = RUTHLESS_COST_BPS
-            self._alloc            = RUTHLESS_ALLOCATION
-            self._max_alloc        = RUTHLESS_MAX_ALLOC
-            self._kf               = RUTHLESS_KELLY_FRAC
-            self._tp               = RUTHLESS_TAKE_PROFIT
-            self._sl               = RUTHLESS_STOP_LOSS
-            self._toh              = RUTHLESS_TIMEOUT_HOURS
-            self._min_hold_minutes = RUTHLESS_MIN_HOLD_MINUTES
-            self._emergency_sl     = RUTHLESS_EMERGENCY_SL
-            self._max_sl           = RUTHLESS_MAX_DAILY_SL
-            self._cd_mins          = RUTHLESS_COOLDOWN_MINS
-            self._sl_cd            = RUTHLESS_SL_COOLDOWN_MINS
-            self._penalty_losses   = RUTHLESS_PENALTY_COOLDOWN_LOSSES
-            self._penalty_hours    = RUTHLESS_PENALTY_COOLDOWN_HOURS
-            self._max_dd           = RUTHLESS_MAX_DD_PCT
-            self.log(
-                "[vox] \u26a0 RUTHLESS MODE ENABLED \u2014 maximum aggression. "
-                "Extreme risk of large drawdowns. "
-                "Use for high-risk experimentation only."
-            )
-
-        # ── Momentum override setup ───────────────────────────────────────────
-        # Enabled by default for aggressive/ruthless; disabled for balanced/conservative.
-        # An explicit momentum_override=true/false parameter always takes precedence.
-        _mo_raw = self.get_parameter("momentum_override")
-        if _mo_raw:
-            self._momentum_override = str(_mo_raw).lower() in ("true", "1", "yes")
-        else:
-            self._momentum_override = self._risk_profile in ("aggressive", "ruthless")
-
-        self._momentum_ret4_min    = float(self.get_parameter("momentum_ret4_min")       or MOMENTUM_RET4_MIN)
-        self._momentum_ret16_min   = float(self.get_parameter("momentum_ret16_min")      or MOMENTUM_RET16_MIN)
-        self._momentum_volume_min  = float(self.get_parameter("momentum_volume_min")     or MOMENTUM_VOLUME_MIN)
-        self._momentum_btc_rel_min = float(self.get_parameter("momentum_btc_rel_min")    or MOMENTUM_BTC_REL_MIN)
-        self._momentum_override_min_ev = float(
-            self.get_parameter("momentum_override_min_ev") or MOMENTUM_OVERRIDE_MIN_EV
-        )
-        # Momentum score boost: replaces balanced scoring formula in aggressive/ruthless
-        self._use_momentum_score = self._risk_profile in ("aggressive", "ruthless")
+        # ── Risk profile + momentum override setup ────────────────────────────
+        # Resolves effective profile (ruthless/aggressive/conservative/balanced)
+        # from QC parameters and applies gate/sizing overrides.  See config.py.
+        setup_risk_profile(self)
 
         # ── Universe ──────────────────────────────────────────────────────────
         self._symbols  = add_universe(self)
@@ -838,42 +585,12 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Entry logic ───────────────────────────────────────────────────────────
 
     def _try_enter(self):
-        """
-        Score all symbols; if a clear winner passes all gates, place a buy order.
+        """Score all symbols; if a clear winner passes all gates, place a buy order.
 
-        Gate pipeline (in order):
-          1.  Sufficient feature history
-          2.  Symbol NOT in penalty cooldown (repeated-loss gate)
-          3.  Ensemble confidence: class_proba >= score_min_eff (base-rate-aware)
-              (aggressive/ruthless: bypassed via momentum override when momentum
-               conditions are strong enough)
-          4.  Ensemble dispersion: std_proba <= MAX_DISPERSION
-          5.  Model agreement: n_agree >= MIN_AGREE
-          6.  EV gate: ev_after_costs > self._min_ev  (return-fraction units)
-              (momentum override: replaced by ev >= momentum_override_min_ev)
-          7.  Predicted-return gate: pred_return >= PRED_RETURN_MIN
-              (only enforced when regression ensemble is trained; bypassed by
-               momentum override)
-          8.  Final-score gap to runner-up >= self._ev_gap  (return-fraction units)
-          9.  Regime filter: 4h BTC SMA + slope
-          10. Risk manager: cooldown, daily SL cap, drawdown CB
-          11. Pre-trade validation: price > 0, cash, lot-size, min-order
-
-        Ranking and decision score (Vox v2):
-            class_proba    = weighted classifier probability (VotingClassifier)
-            pred_return    = weighted regression return (0.0 if not trained yet)
-            ev             = class_proba × tp_use − (1 − class_proba) × sl_use − cost_fraction
-            final_score    = 0.6 × ev + 0.4 × pred_return   (balanced/conservative)
-                           = 0.5 × ev + 0.25 × pred_return + 0.25 × momentum_score
-                             (aggressive/ruthless with momentum score boost)
-                           = ev × (1 − std_proba)            (fallback: EV × confidence)
-
-        Candidates are ranked by final_score.
-
-        Note: self._ev_gap uses EV_GAP (default 0.00025 = 0.025 %) while
-        self._s_gap uses SCORE_GAP (default 0.02 = 2 pp) for probability gaps only.
-        Mixing the two would block strong EV candidates because the probability-scale
-        threshold is ~80× larger than typical EV scores (0.001–0.02 range).
+        Gate pipeline: feature history → penalty cooldown → ensemble confidence
+        → dispersion → model agreement → EV gate → predicted-return gate
+        → final-score gap → regime filter → risk manager → pre-trade validation.
+        See README.md for full gate documentation.
         """
         scores         = {}   # sym -> final_score
         conf_data      = {}   # sym -> confidence dict from ensemble
@@ -964,22 +681,14 @@ class VoxAlgorithm(QCAlgorithm):
 
             if not ml_gates_pass:
                 # ── Momentum breakout override (aggressive/ruthless only) ─────
-                # When normal ML gates fail, allow a candidate through if strong
-                # momentum conditions are present (high ret_4, ret_16, volume
-                # spike, BTC outperformance).
-                # Feature vector layout: [ret_1, ret_4, ret_8, ret_16,
-                #   rsi_14, atr_n, vol_r, btc_rel, hour, reserved]
                 if not self._momentum_override:
                     continue
-                _ret_4   = float(feat[1])
-                _ret_16  = float(feat[3])
-                _vol_r   = float(feat[6])
-                _btc_rel = float(feat[7])
-                if not (
-                    _ret_4   >= self._momentum_ret4_min
-                    and _ret_16  >= self._momentum_ret16_min
-                    and _vol_r   >= self._momentum_volume_min
-                    and _btc_rel >= self._momentum_btc_rel_min
+                if not check_momentum_override_conditions(
+                    feat,
+                    self._momentum_ret4_min,
+                    self._momentum_ret16_min,
+                    self._momentum_volume_min,
+                    self._momentum_btc_rel_min,
                 ):
                     continue
                 entry_path = "momentum_override"
@@ -1040,18 +749,8 @@ class VoxAlgorithm(QCAlgorithm):
             # ── Final score ───────────────────────────────────────────────────
             if self._use_momentum_score:
                 # Aggressive/ruthless: momentum-boosted scoring formula.
-                # momentum_score combines ret_4, ret_16, volume excess, btc_rel.
-                # Volume excess is normalised and capped to avoid explosion.
-                _vol_excess = min(max(float(feat[6]) - 1.0, 0.0), 4.0) / 4.0  # [0, 1]
-                momentum_score = float(np.clip(
-                    0.40 * float(feat[1])       # ret_4
-                    + 0.30 * float(feat[3])     # ret_16
-                    + 0.20 * _vol_excess        # normalised volume spike
-                    + 0.10 * float(feat[7]),    # btc_rel
-                    -0.05, 0.10
-                ))
+                momentum_score = compute_momentum_score(feat)
                 if reg_fitted and pred_return != 0.0:
-                    # Aggressive formula: 50% EV + 25% pred_return + 25% momentum
                     final_score = (
                         0.50 * ev_after_costs
                         + 0.25 * pred_return
@@ -1351,18 +1050,7 @@ class VoxAlgorithm(QCAlgorithm):
         return True
 
     def _update_penalty_cooldown(self, sym, is_sl):
-        """
-        Check recent outcomes for *sym* and apply a penalty cooldown if needed.
-
-        Called after each trade exit.  If the last ``_penalty_losses``
-        outcomes are all SL exits (net negative), the symbol is blocked for
-        ``_penalty_hours`` hours.
-
-        Parameters
-        ----------
-        sym   : Symbol — the exited symbol.
-        is_sl : bool   — True if this exit was an SL.
-        """
+        """Apply penalty cooldown if sym has had _penalty_losses consecutive SL exits."""
         if not is_sl:
             return   # Only SL exits contribute to penalty counting
 
