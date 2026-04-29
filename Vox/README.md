@@ -262,52 +262,100 @@ Aggressive mode also enables:
 - **Momentum score boost** in the final ranking formula (see below).
 - **Momentum breakout override** (see below).
 
-#### Ruthless mode (`risk_profile=ruthless` or `ruthless_mode=true`)
+#### Ruthless v2 mode (`risk_profile=ruthless` or `ruthless_mode=true`)
 
-> ⚠ **HIGH RISK — use for experimentation only.**
-> Ruthless mode can produce fast, large drawdowns.  It is designed for users
-> who explicitly want maximum trade frequency and upside, and accept that large
-> losses are possible.  **Never use ruthless mode for live trading without
-> careful validation on a small account first.**
+> ⚠ **VERY HIGH RISK — use for experimentation only.**
+> Ruthless v2 targets genuinely high-upside, high-risk trading.  Expect larger
+> position sizes, slower (but bigger) winners, and **significantly larger
+> drawdowns and losses than balanced or aggressive mode**.  Ruthless mode can
+> draw down 35 % from peak before the circuit-breaker engages.
+> **Never use ruthless mode for live trading without careful validation on a
+> small account first.**
 
-Maximum aggression: very loose gates, maximum sizing, wide TP/SL, minimal
-cooldowns, high drawdown tolerance.
+Ruthless v2 is designed to shift away from fee-sensitive scalping toward
+asymmetric, larger winners:
 
-| Parameter | Ruthless | Balanced default |
-|-----------|---------|-----------------|
+- **Wider TP/SL** (9 % / 3 %) — P/L ratio ≈ 3.0 vs. 1.56 in the old ruthless
+- **24 h timeout** — winners have a full day to run vs. 12 h previously
+- **Kelly disabled by default** — flat 90 % allocation per trade instead of
+  Kelly potentially shrinking orders to 5–8 % of portfolio
+- **Allocation floor** — when Kelly is enabled, it cannot shrink allocations
+  below 75 % (`min_alloc=0.75`)
+- **Runner mode** — trailing stop replaces the instant TP exit (see below)
+- **Very loose pred_return gate** — regressor veto is nearly disabled
+
+| Parameter | Ruthless v2 | Balanced default |
+|-----------|------------|-----------------|
 | `score_min` | 0.45 | 0.50 |
 | `max_dispersion` | 0.35 | 0.22 |
 | `min_agree` | 1 | 2 |
 | `min_ev` | 0.0 | 0.001 |
-| `pred_return_min` | −0.002 | −0.0005 |
+| `pred_return_min` | **−0.004** | −0.0005 |
 | `ev_gap` | 0.0 | 0.0001 |
 | `cost_bps` | 20 | 35 |
-| `allocation` | 0.90 | 0.50 |
-| `max_alloc` | 1.00 (100%) | 0.80 |
+| `allocation` | **0.90** | 0.50 |
+| `max_alloc` | **1.00 (100 %)** | 0.80 |
+| `use_kelly` | **False** (flat 90 %) | True |
+| `min_alloc` | **0.75** | 0.0 |
 | `kelly_frac` | 0.75 | 0.25 |
-| `take_profit` | 0.060 (+6.0%) | 0.030 |
-| `stop_loss` | 0.025 (−2.5%) | 0.015 |
-| `timeout_hours` | 12 | 6 |
-| `min_hold_minutes` | 3 | 15 |
-| `emergency_sl` | 0.040 (−4.0%) | 0.030 |
+| `take_profit` | **0.09 (+9.0 %)** | 0.030 |
+| `stop_loss` | **0.03 (−3.0 %)** | 0.015 |
+| `timeout_hours` | **24** | 6 |
+| `min_hold_minutes` | 10 | 15 |
+| `emergency_sl` | 0.05 (−5.0 %) | 0.030 |
 | `max_daily_sl` | 5 | 2 |
 | `cooldown_mins` | 0 | 20 |
 | `sl_cooldown_mins` | 5 | 60 |
 | `penalty_cooldown_losses` | 5 | 3 |
 | `penalty_cooldown_hours` | 12 | 48 |
-| `max_dd_pct` | 0.35 (35%) | 0.08 |
+| `max_dd_pct` | 0.35 (35 %) | 0.08 |
+| `runner_mode` | **True** | False |
+| `trail_after_tp` | **0.04 (+4 %)** | — |
+| `trail_pct` | **0.025 (2.5 %)** | — |
 
-Ruthless mode also enables:
+Ruthless v2 also enables:
 - **Momentum score boost** in the final ranking formula.
 - **Momentum breakout override** (see below).
 
-**Suggested quick setup:**
+#### Runner / trailing-profit mode (`runner_mode=true`)
+
+Ruthless v2 enables `runner_mode` by default.  Instead of exiting immediately
+when the return crosses the TP threshold, the strategy activates a **trailing
+stop** and lets winners run.
+
+**Behavior:**
+
+1. When `ret >= trail_after_tp` (default +4 %) **or** `ret >= tp_use`
+   (whichever comes first), trailing is activated instead of exiting.
+2. The highest price seen since activation is tracked as `trail_high_px`.
+3. The position exits with tag **`EXIT_TRAIL`** when:
+   ```
+   price <= trail_high_px × (1 − trail_pct)
+   ```
+   i.e. the price falls 2.5 % from the trailing high.
+4. Hard SL (`EXIT_SL`), emergency SL, and timeout (`EXIT_TIMEOUT`) remain
+   active throughout — the trail never overrides catastrophic protection.
+
+**Example with defaults (take_profit=0.09, trail_after_tp=0.04, trail_pct=0.025):**
+
+```
+Entry at $100.
++4 % → $104 → trailing activated, trail_high=104
+Price rises to $115 → trail_high=115, trail_stop=115×0.975=$112.12
+Price drops to $112 → EXIT_TRAIL at ~+12 %
+```
+
+**`EXIT_TRAIL` exit tag** appears in order logs and trade records.  It is
+*not* treated as a stop-loss for penalty-cooldown accounting.
+
+**Recommended ruthless v2 setup:**
+
 ```text
 risk_profile = ruthless
-```
-or:
-```text
-ruthless_mode = true
+# Optional overrides:
+use_kelly    = false     # flat 90 % allocation (already default in ruthless)
+min_alloc    = 0.75      # Kelly floor if re-enabling Kelly
+runner_mode  = true      # trailing stop — already default in ruthless
 ```
 
 ### Momentum breakout override (aggressive/ruthless)
@@ -603,9 +651,20 @@ be managed (exits still fire); only new entries are blocked.
 | File | Purpose |
 |------|---------|
 | `main.py` | `VoxAlgorithm` — QCAlgorithm entry point + all strategy constants |
+| `config.py` | Risk profile constants + `setup_risk_profile()` |
+| `momentum.py` | Momentum override and score helpers |
 | `models.py` | Feature engineering, triple-barrier labeling, `VoxEnsemble`, training pipeline |
-| `risk.py` | `RegimeFilter` (4h BTC gate), Kelly sizing, `RiskManager` (cooldowns, drawdown CB) |
+| `risk.py` | `RegimeFilter` (4h BTC gate), Kelly sizing + `min_alloc` floor, `RiskManager` (cooldowns, drawdown CB) |
 | `infra.py` | Universe list + `add_universe()`, `OrderHelper`, `PartialFillTracker`, `PersistenceManager` |
+
+### Exit reason tags
+
+| Tag | Meaning |
+|-----|---------|
+| `EXIT_TP` | Take-profit threshold reached (normal mode) |
+| `EXIT_SL` | Stop-loss threshold reached (also used for emergency SL) |
+| `EXIT_TIMEOUT` | Position held for `timeout_hours` without a TP/SL trigger |
+| `EXIT_TRAIL` | Trailing stop activated at `trail_after_tp` triggered at `trail_pct` pullback from high (ruthless runner mode) |
 
 ---
 

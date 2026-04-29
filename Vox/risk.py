@@ -148,6 +148,7 @@ def compute_qty(
     cash_buffer,
     use_kelly,
     allocation,
+    min_alloc=0.0,
 ):
     """
     Compute the quantity (in coin units) to purchase.
@@ -156,9 +157,19 @@ def compute_qty(
     ────────────
     1. If *use_kelly* is True, compute the Kelly allocation.
        - If Kelly <= 0 (negative edge), fall back to flat *allocation*.
+       - If Kelly > 0 and *min_alloc* > 0, apply the floor:
+         ``alloc = max(kelly_alloc, min_alloc)``
     2. If *use_kelly* is False, use flat *allocation* directly.
-    3. Apply *cash_buffer* to leave headroom for fees.
-    4. Convert dollar value to coin units.
+    3. Apply *max_alloc* cap (always honoured, even after min_alloc floor).
+    4. Apply *cash_buffer* to leave headroom for fees.
+    5. Convert dollar value to coin units.
+
+    Parameters
+    ----------
+    min_alloc : float
+        Minimum allocation fraction when Kelly is positive (default 0.0).
+        Set to e.g. 0.75 for ruthless mode so Kelly cannot shrink trades
+        below 75 % of portfolio.  Ignored when use_kelly=False.
 
     Returns
     -------
@@ -169,9 +180,12 @@ def compute_qty(
         alloc = kelly_fraction(mean_proba, tp, sl, kelly_frac, max_alloc)
         if alloc <= 0.0:
             alloc = allocation
+        elif min_alloc > 0.0:
+            alloc = max(alloc, min_alloc)
     else:
         alloc = allocation
 
+    alloc        = min(alloc, max_alloc)   # honor hard ceiling after any floor
     dollar_value = portfolio_value * alloc * cash_buffer
     qty          = dollar_value / price if price > 0 else 0.0
     return qty, alloc

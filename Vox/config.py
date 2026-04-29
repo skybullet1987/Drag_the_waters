@@ -66,11 +66,17 @@ AGGRESSIVE_PENALTY_COOLDOWN_LOSSES = 3
 AGGRESSIVE_PENALTY_COOLDOWN_HOURS  = 24
 AGGRESSIVE_MAX_DD_PCT              = 0.20
 
-# ── Ruthless profile defaults ─────────────────────────────────────────────────
+# ── Ruthless v2 profile defaults ──────────────────────────────────────────────
 # WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.
+# Ruthless v2 targets large asymmetric winners:
+#   • Wider TP/SL (9% / 3%) → P/L ratio ≈ 3.0 — meaningfully above break-even
+#   • 24h timeout — winners have room to run
+#   • Runner mode — trailing stop replaces instant TP exit
+#   • Kelly disabled / allocation floor — positions sized ruthlessly (~90%)
+#   • Looser predicted-return gate — regressor rarely vetoes now
 RUTHLESS_SCORE_MIN               = 0.45
 RUTHLESS_MIN_EV                  = 0.0000
-RUTHLESS_PRED_RETURN_MIN         = -0.0020
+RUTHLESS_PRED_RETURN_MIN         = -0.0040   # was -0.0020; very loose veto
 RUTHLESS_MAX_DISPERSION          = 0.35
 RUTHLESS_MIN_AGREE               = 1
 RUTHLESS_EV_GAP                  = 0.0
@@ -78,17 +84,23 @@ RUTHLESS_COST_BPS                = 20
 RUTHLESS_ALLOCATION              = 0.90
 RUTHLESS_MAX_ALLOC               = 1.00
 RUTHLESS_KELLY_FRAC              = 0.75
-RUTHLESS_TAKE_PROFIT             = 0.060
-RUTHLESS_STOP_LOSS               = 0.025
-RUTHLESS_TIMEOUT_HOURS           = 12
-RUTHLESS_MIN_HOLD_MINUTES        = 3
-RUTHLESS_EMERGENCY_SL            = 0.040
+RUTHLESS_MIN_ALLOC               = 0.75     # Kelly cannot shrink below 75 %
+RUTHLESS_USE_KELLY               = False    # flat allocation at 90 % by default
+RUTHLESS_TAKE_PROFIT             = 0.09    # was 0.060; +9 % target
+RUTHLESS_STOP_LOSS               = 0.03    # was 0.025; −3 % stop
+RUTHLESS_TIMEOUT_HOURS           = 24      # was 12; winners get room to run
+RUTHLESS_MIN_HOLD_MINUTES        = 10      # was 3; less instant chop
+RUTHLESS_EMERGENCY_SL            = 0.05    # was 0.040; 5 % catastrophic stop
 RUTHLESS_MAX_DAILY_SL            = 5
 RUTHLESS_COOLDOWN_MINS           = 0
 RUTHLESS_SL_COOLDOWN_MINS        = 5
 RUTHLESS_PENALTY_COOLDOWN_LOSSES = 5
 RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
+# Runner / trailing-profit parameters
+RUTHLESS_RUNNER_MODE             = True    # trailing stop instead of instant TP exit
+RUTHLESS_TRAIL_AFTER_TP          = 0.04   # activate trailing once return ≥ +4 %
+RUTHLESS_TRAIL_PCT               = 0.025  # exit if price drops 2.5 % from trailing high
 
 # ── Momentum breakout override ─────────────────────────────────────────────────
 # Enabled by default for aggressive/ruthless profiles; disabled otherwise.
@@ -186,6 +198,13 @@ def setup_risk_profile(algo):
         algo._alloc            = RUTHLESS_ALLOCATION
         algo._max_alloc        = RUTHLESS_MAX_ALLOC
         algo._kf               = RUTHLESS_KELLY_FRAC
+        # Sizing floor + Kelly override — prevent Kelly from shrinking positions
+        # below 75 % of portfolio.  Default: Kelly disabled for flat 90 % sizing.
+        if getattr(algo, "_min_alloc", 0.0) == 0.0:
+            algo._min_alloc    = RUTHLESS_MIN_ALLOC
+        _uk_raw = algo.get_parameter("use_kelly")
+        if not _uk_raw:   # no explicit QC override → use ruthless default
+            algo._use_kelly = RUTHLESS_USE_KELLY
         algo._tp               = RUTHLESS_TAKE_PROFIT
         algo._sl               = RUTHLESS_STOP_LOSS
         algo._toh              = RUTHLESS_TIMEOUT_HOURS
@@ -197,11 +216,17 @@ def setup_risk_profile(algo):
         algo._penalty_losses   = RUTHLESS_PENALTY_COOLDOWN_LOSSES
         algo._penalty_hours    = RUTHLESS_PENALTY_COOLDOWN_HOURS
         algo._max_dd           = RUTHLESS_MAX_DD_PCT
-        algo.log(
-            "[vox] \u26a0 RUTHLESS MODE ENABLED \u2014 maximum aggression. "
-            "Extreme risk of large drawdowns. "
-            "Use for high-risk experimentation only."
-        )
+        # Runner mode — trailing stop replaces instant TP exit
+        if not getattr(algo, "_runner_mode", False):
+            _rm_param = algo.get_parameter("runner_mode")
+            algo._runner_mode = (
+                str(_rm_param).lower() in ("true", "1", "yes")
+                if _rm_param else RUTHLESS_RUNNER_MODE
+            )
+        if not getattr(algo, "_trail_after_tp", None):
+            algo._trail_after_tp = RUTHLESS_TRAIL_AFTER_TP
+        if not getattr(algo, "_trail_pct", None):
+            algo._trail_pct      = RUTHLESS_TRAIL_PCT
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -226,3 +251,25 @@ def setup_risk_profile(algo):
         algo.get_parameter("momentum_override_min_ev") or MOMENTUM_OVERRIDE_MIN_EV
     )
     algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless")
+
+    # ── Startup profile log (unthrottled — important config visibility) ────────
+    _runner_mode_val   = getattr(algo, "_runner_mode",   False)
+    _trail_after_tp    = getattr(algo, "_trail_after_tp", 0.0)
+    _trail_pct         = getattr(algo, "_trail_pct",      0.0)
+    _min_alloc         = getattr(algo, "_min_alloc",      0.0)
+    algo.log(
+        f"[vox] PROFILE ACTIVE: risk_profile={algo._risk_profile}"
+        f"  score_min={algo._s_min}"
+        f"  min_ev={algo._min_ev:.5f}"
+        f"  pred_return_min={algo._pred_return_min:.5f}"
+        f"  allocation={algo._alloc}"
+        f"  min_alloc={_min_alloc}"
+        f"  max_alloc={algo._max_alloc}"
+        f"  use_kelly={algo._use_kelly}"
+        f"  take_profit={algo._tp}"
+        f"  stop_loss={algo._sl}"
+        f"  timeout_hours={algo._toh}"
+        f"  runner_mode={_runner_mode_val}"
+        f"  trail_after_tp={_trail_after_tp}"
+        f"  trail_pct={_trail_pct}"
+    )

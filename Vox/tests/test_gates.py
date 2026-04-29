@@ -292,7 +292,7 @@ class TestTripleBarrierOutcome:
 # Risk profile constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Mirror of constants defined in main.py so tests do not require AlgorithmImports.
+# Mirror of constants defined in config.py so tests do not require AlgorithmImports.
 AGGRESSIVE_SCORE_MIN               = 0.48
 AGGRESSIVE_MIN_EV                  = 0.0005
 AGGRESSIVE_PRED_RETURN_MIN         = -0.0010
@@ -306,18 +306,24 @@ AGGRESSIVE_STOP_LOSS               = 0.020
 AGGRESSIVE_TIMEOUT_HOURS           = 8
 AGGRESSIVE_MAX_DD_PCT              = 0.20
 
+# Ruthless v2 constants (updated for high-upside asymmetric targeting)
 RUTHLESS_SCORE_MIN               = 0.45
 RUTHLESS_MIN_EV                  = 0.0000
-RUTHLESS_PRED_RETURN_MIN         = -0.0020
+RUTHLESS_PRED_RETURN_MIN         = -0.0040   # looser: was -0.0020
 RUTHLESS_MAX_DISPERSION          = 0.35
 RUTHLESS_MIN_AGREE               = 1
 RUTHLESS_ALLOCATION              = 0.90
 RUTHLESS_MAX_ALLOC               = 1.00
 RUTHLESS_KELLY_FRAC              = 0.75
-RUTHLESS_TAKE_PROFIT             = 0.060
-RUTHLESS_STOP_LOSS               = 0.025
-RUTHLESS_TIMEOUT_HOURS           = 12
+RUTHLESS_MIN_ALLOC               = 0.75      # Kelly floor — new in v2
+RUTHLESS_USE_KELLY               = False     # flat allocation by default — new in v2
+RUTHLESS_TAKE_PROFIT             = 0.09     # was 0.060; wider for P/L ratio ≈ 3.0
+RUTHLESS_STOP_LOSS               = 0.03     # was 0.025
+RUTHLESS_TIMEOUT_HOURS           = 24       # was 12; winners get room to run
 RUTHLESS_MAX_DD_PCT              = 0.35
+RUTHLESS_RUNNER_MODE             = True     # trailing stop instead of instant TP exit
+RUTHLESS_TRAIL_AFTER_TP          = 0.04    # activate trailing once return ≥ +4 %
+RUTHLESS_TRAIL_PCT               = 0.025   # exit if price drops 2.5 % from trailing high
 
 MOMENTUM_RET4_MIN          = 0.015
 MOMENTUM_RET16_MIN         = 0.025
@@ -526,3 +532,155 @@ class TestMomentumScoreFormula:
         assert agg_score > bal_score, (
             f"Aggressive score {agg_score:.5f} should exceed balanced {bal_score:.5f}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless v2 constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRuthlessV2Constants:
+    """Validate Ruthless v2 TP/SL/timeout asymmetry and new sizing parameters."""
+
+    def test_ruthless_v2_take_profit_is_nine_percent(self):
+        """Ruthless v2 take_profit must be 9 % for high-upside targeting."""
+        assert RUTHLESS_TAKE_PROFIT == pytest.approx(0.09)
+
+    def test_ruthless_v2_stop_loss_is_three_percent(self):
+        """Ruthless v2 stop_loss must be 3 % (P/L ratio ≈ 3.0)."""
+        assert RUTHLESS_STOP_LOSS == pytest.approx(0.03)
+
+    def test_ruthless_v2_pl_ratio_above_two(self):
+        """Ruthless v2 P/L ratio (TP/SL) must be >= 2.0 to support high-upside."""
+        assert RUTHLESS_TAKE_PROFIT / RUTHLESS_STOP_LOSS >= 2.0
+
+    def test_ruthless_v2_timeout_is_24h(self):
+        """Ruthless v2 timeout must be 24 h so winners have room to run."""
+        assert RUTHLESS_TIMEOUT_HOURS == 24
+
+    def test_ruthless_v2_timeout_longer_than_aggressive(self):
+        """Ruthless v2 timeout must be longer than aggressive."""
+        assert RUTHLESS_TIMEOUT_HOURS > AGGRESSIVE_TIMEOUT_HOURS
+
+    def test_ruthless_v2_pred_return_min_looser(self):
+        """Ruthless v2 pred_return_min must be lower than aggressive (very loose veto)."""
+        assert RUTHLESS_PRED_RETURN_MIN < AGGRESSIVE_PRED_RETURN_MIN
+
+    def test_ruthless_v2_pred_return_min_is_minus_forty_bps(self):
+        """Ruthless v2 pred_return_min should be -0.004 (−40 bps = −0.40 % loose veto)."""
+        assert RUTHLESS_PRED_RETURN_MIN == pytest.approx(-0.004)
+
+    def test_ruthless_v2_min_alloc_defined(self):
+        """Ruthless v2 must define RUTHLESS_MIN_ALLOC allocation floor."""
+        assert RUTHLESS_MIN_ALLOC == pytest.approx(0.75)
+
+    def test_ruthless_v2_min_alloc_below_allocation(self):
+        """RUTHLESS_MIN_ALLOC floor must be <= RUTHLESS_ALLOCATION."""
+        assert RUTHLESS_MIN_ALLOC <= RUTHLESS_ALLOCATION
+
+    def test_ruthless_v2_use_kelly_false(self):
+        """Ruthless v2 must default to use_kelly=False for flat 90 % sizing."""
+        assert RUTHLESS_USE_KELLY is False
+
+    def test_ruthless_v2_runner_mode_true(self):
+        """Ruthless v2 must enable runner_mode by default."""
+        assert RUTHLESS_RUNNER_MODE is True
+
+    def test_ruthless_v2_trail_after_tp_below_take_profit(self):
+        """trail_after_tp must be below take_profit so trailing activates before full TP."""
+        assert RUTHLESS_TRAIL_AFTER_TP < RUTHLESS_TAKE_PROFIT
+
+    def test_ruthless_v2_trail_pct_positive(self):
+        """trail_pct must be a positive fraction for the trailing stop width."""
+        assert 0.0 < RUTHLESS_TRAIL_PCT < 0.10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# compute_qty — min_alloc floor
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Import the pure-Python sizing function (no AlgorithmImports dependency).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), ".."))
+
+import importlib
+import types
+
+# Minimal stub so risk.py can be imported without AlgorithmImports
+_stub = types.ModuleType("AlgorithmImports")
+sys.modules.setdefault("AlgorithmImports", _stub)
+
+from risk import compute_qty  # type: ignore  # noqa: E402
+
+
+class TestComputeQtyMinAlloc:
+    """Validate that min_alloc floor is applied correctly in compute_qty."""
+
+    _PRICE = 100.0
+    _PV    = 10_000.0
+    _CB    = 1.0   # no buffer for simplicity
+
+    def _qty(self, use_kelly, allocation, min_alloc=0.0,
+             mean_proba=0.5, tp=0.09, sl=0.03,
+             kelly_frac=0.25, max_alloc=1.0):
+        return compute_qty(
+            mean_proba      = mean_proba,
+            tp              = tp,
+            sl              = sl,
+            price           = self._PRICE,
+            portfolio_value = self._PV,
+            kelly_frac      = kelly_frac,
+            max_alloc       = max_alloc,
+            cash_buffer     = self._CB,
+            use_kelly       = use_kelly,
+            allocation      = allocation,
+            min_alloc       = min_alloc,
+        )
+
+    def test_default_min_alloc_zero_preserves_old_behavior(self):
+        """With min_alloc=0 (default), Kelly is unconstrained — balanced mode unchanged."""
+        qty_new, alloc_new = self._qty(use_kelly=False, allocation=0.50, min_alloc=0.0)
+        qty_old, alloc_old = self._qty(use_kelly=False, allocation=0.50)
+        assert qty_new == pytest.approx(qty_old)
+        assert alloc_new == pytest.approx(alloc_old)
+
+    def test_use_kelly_false_ignores_min_alloc(self):
+        """When use_kelly=False, min_alloc is irrelevant — flat allocation is used."""
+        _, alloc = self._qty(use_kelly=False, allocation=0.90, min_alloc=0.75)
+        assert alloc == pytest.approx(0.90)
+
+    def test_min_alloc_floor_applied_when_kelly_positive(self):
+        """When Kelly is positive but small, min_alloc raises it to the floor."""
+        # With proba=0.35, tp=0.09, sl=0.03, kelly_frac=0.25:
+        # b = 3.0, f_full = (0.35*4 - 1)/3 = 0.40/3 ≈ 0.133, kelly = 0.133*0.25 ≈ 0.033
+        # min_alloc=0.75 should push it to 0.75.
+        _, alloc = self._qty(
+            use_kelly=True, allocation=0.90, min_alloc=0.75,
+            mean_proba=0.35, tp=0.09, sl=0.03, kelly_frac=0.25, max_alloc=1.0
+        )
+        assert alloc >= 0.75
+
+    def test_min_alloc_does_not_exceed_max_alloc(self):
+        """min_alloc cannot push allocation above max_alloc."""
+        _, alloc = self._qty(
+            use_kelly=True, allocation=0.90, min_alloc=0.95,
+            mean_proba=0.35, tp=0.09, sl=0.03, kelly_frac=0.25, max_alloc=0.80
+        )
+        assert alloc <= 0.80
+
+    def test_min_alloc_not_applied_when_kelly_nonpositive(self):
+        """When Kelly is 0 or negative, fall back to flat allocation (not min_alloc)."""
+        # proba=0.20 with b=3.0: f_full = (0.20*4-1)/3 = -0.2/3 < 0 → Kelly <= 0
+        _, alloc = self._qty(
+            use_kelly=True, allocation=0.90, min_alloc=0.75,
+            mean_proba=0.20, tp=0.09, sl=0.03, kelly_frac=0.25, max_alloc=1.0
+        )
+        assert alloc == pytest.approx(0.90)   # falls back to flat allocation
+
+    def test_ruthless_v2_flat_allocation_approx_ninety_percent(self):
+        """With use_kelly=False and allocation=0.90, position should be ~90 % of portfolio."""
+        qty, alloc = self._qty(
+            use_kelly=False, allocation=RUTHLESS_ALLOCATION,
+            min_alloc=RUTHLESS_MIN_ALLOC, max_alloc=RUTHLESS_MAX_ALLOC
+        )
+        assert alloc == pytest.approx(RUTHLESS_ALLOCATION)
+        expected_usd = self._PV * RUTHLESS_ALLOCATION
+        assert qty * self._PRICE == pytest.approx(expected_usd)
