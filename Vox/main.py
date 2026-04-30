@@ -20,9 +20,11 @@ from execution import (
     apply_breakeven, is_breakeven_active, should_exit_momentum_fail,
     evaluate_timeout, LimitOrderTracker, evaluate_candidate,
 )
-from market_mode import MarketModeDetector
-from meta_model  import MetaFilter
-from infra import hydrate_state_from_history
+from market_mode    import MarketModeDetector
+from meta_model     import MetaFilter
+from infra          import hydrate_state_from_history
+from diagnostics    import format_vote_log
+from model_registry import format_model_registry_log
 
 np.random.seed(42)
 random.seed(42)
@@ -164,6 +166,7 @@ class VoxAlgorithm(QCAlgorithm):
                 self._ensemble.set_logger(self.log)
             self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
+        self.log(format_model_registry_log(self._ensemble._estimators))
 
         # ── Position state ────────────────────────────────────────────────────
         self._pos_sym          = None
@@ -188,6 +191,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._entry_limit_tracker = None
 
         self._entry_predictions = {}
+        self._log_model_votes   = LOG_MODEL_VOTES
 
         # ── Per-symbol penalty cooldown ───────────────────────────────────────
         from collections import deque as _deque
@@ -383,16 +387,13 @@ class VoxAlgorithm(QCAlgorithm):
 
                 # ── Ruthless exit diagnostics ──────────────────────────────────
                 if self._risk_profile == "ruthless":
-                    _trail_info = (
-                        f"  trail_active={self._trail_active}"
-                        f"  trail_high={self._trail_high_px:.4f}"
-                        if self._trail_active else ""
-                    )
+                    _ti = (f"  trail_high={self._trail_high_px:.4f}" if self._trail_active else "")
                     self.log(
-                        f"[ruthless] EXIT {sym.value}  reason={tag}"
-                        f"  ret={ret:.3%}"
-                        f"  elapsed_min={(self.time - self._entry_time).total_seconds()/60:.1f}"
-                        + _trail_info
+                        f"[exit_diag] {sym.value}  tag={tag}"
+                        f"  entry={self._entry_px:.5f}  fill={order_event.fill_price:.5f}"
+                        f"  ret={ret:+.3%}  max={self._max_return_seen:+.3%}"
+                        f"  elapsed_min={(self.time - self._entry_time).total_seconds()/60 if self._entry_time else 0:.1f}"
+                        + (f"  trail=active{_ti}" if self._trail_active else "")
                     )
                 else:
                     self.debug(
@@ -411,6 +412,7 @@ class VoxAlgorithm(QCAlgorithm):
                     "symbol":             sym.value,
                     "exit_reason":        tag,
                     "realized_return":    round(ret, 6),
+                    "max_return_seen":    round(self._max_return_seen, 6),
                     "predicted_class_proba": round(entry_pred["class_proba"], 4) if entry_pred else None,
                     "predicted_return":   round(entry_pred["pred_return"], 6)    if entry_pred else None,
                     "predicted_ev":       round(entry_pred["ev"], 6)             if entry_pred else None,
@@ -418,6 +420,7 @@ class VoxAlgorithm(QCAlgorithm):
                     "tp":                 round(entry_pred["tp"], 4)             if entry_pred else None,
                     "sl":                 round(entry_pred["sl"], 4)             if entry_pred else None,
                     "entry_path":         entry_pred.get("entry_path", "ml")     if entry_pred else None,
+                    "model_votes":        entry_pred.get("model_votes", {})      if entry_pred else {},
                 })
 
                 # ── Per-symbol outcome tracking (penalty cooldown) ─────────────
@@ -850,6 +853,9 @@ class VoxAlgorithm(QCAlgorithm):
                 counters=counters,
                 market_mode=_market_mode,
                 ruthless_allowed_modes=_ruthless_allowed_modes,
+                ruthless_good_mode_relaxation=getattr(self, "_good_mode_relaxation", True),
+                ruthless_good_mode_ev_min=getattr(self, "_good_mode_min_ev", 0.004),
+                ruthless_good_mode_volr_min=getattr(self, "_good_mode_volume_min", 1.3),
             )
             if result is None:
                 continue
@@ -1053,33 +1059,20 @@ class VoxAlgorithm(QCAlgorithm):
             "sl":          sl_use,
             "time":        self.time,
             "entry_path":  entry_path_data.get(top_sym, "ml"),
+            "model_votes": conf_data[top_sym].get("per_model", {}),
         }
 
         _top_entry_path = entry_path_data.get(top_sym, "ml")
         if self._risk_profile == "ruthless":
-            # Ruthless: emit richer entry log at INFO level
-            _feat_top = next((f for s, f in candidates if s == top_sym), None)
-            _ret4_log  = f"{float(_feat_top[1]):.4f}" if _feat_top is not None else "n/a"
-            _ret16_log = f"{float(_feat_top[3]):.4f}" if _feat_top is not None else "n/a"
-            _volr_log  = f"{float(_feat_top[6]):.2f}"  if _feat_top is not None else "n/a"
-            _btcr_log  = f"{float(_feat_top[7]):.4f}"  if _feat_top is not None else "n/a"
+            _ft = next((f for s, f in candidates if s == top_sym), None)
+            _cd = conf_data[top_sym]
             self.log(
-                f"[ruthless] ENTRY {top_sym.value}"
-                f"  path={_top_entry_path}"
-                f"  confirm={_top_confirm}"
-                f"  proba={class_proba_top:.3f}"
-                f"  n_agree={conf_data[top_sym]['n_agree']}"
-                f"  std={conf_data[top_sym]['std_proba']:.3f}"
-                f"  ev={ev_top:.5f}"
-                f"  pred_ret={pred_return_top:.5f}"
-                f"  ret4={_ret4_log} ret16={_ret16_log}"
-                f"  vol_r={_volr_log} btc_rel={_btcr_log}"
-                f"  tp={tp_use:.4f}(floor={tp_floor_applied})"
-                f"  sl={sl_use:.4f}(floor={sl_floor_applied})"
-                f"  alloc={alloc:.3f}"
-                f"  min_alloc={self._min_alloc}"
-                f"  kelly={self._use_kelly}"
-                f"  price={price:.4f}  qty={qty:.6f}"
+                f"[ruthless] ENTRY {top_sym.value} path={_top_entry_path} confirm={_top_confirm}"
+                f" proba={class_proba_top:.3f} agree={_cd['n_agree']}"
+                f" std={_cd['std_proba']:.3f} ev={ev_top:.5f} pred={pred_return_top:.5f}"
+                + (f" r4={float(_ft[1]):.4f} r16={float(_ft[3]):.4f} vr={float(_ft[6]):.2f}" if _ft else "")
+                + f" tp={tp_use:.4f}(fl={tp_floor_applied}) sl={sl_use:.4f}(fl={sl_floor_applied})"
+                + f" alloc={alloc:.3f} px={price:.4f} qty={qty:.6f}"
             )
         else:
             self.debug(
@@ -1107,13 +1100,18 @@ class VoxAlgorithm(QCAlgorithm):
             "pred_return":  pred_return_top,
             "n_agree":      conf_data[top_sym]["n_agree"],
             "std_proba":    conf_data[top_sym]["std_proba"],
+            "model_votes":  conf_data[top_sym].get("per_model", {}),
             "tp":           tp_use,
             "sl":           sl_use,
             "ev_score":     ev_top,
             "final_score":  top_sc,
             "cost_bps":     self._cost_bps,
             "entry_path":   _top_entry_path,
+            "market_mode":  _market_mode,
+            "confirm":      _top_confirm,
         })
+        if self._log_model_votes and conf_data[top_sym].get("per_model"):
+            self.log(format_vote_log(top_sym.value, conf_data[top_sym], market_mode=_market_mode))
 
     # ── Retrain ───────────────────────────────────────────────────────────────
 

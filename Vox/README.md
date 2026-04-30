@@ -1386,3 +1386,143 @@ flooding logs.
   diverge significantly, re-calibrate or adjust the `score_min` gate.
 - **Regime-aware regressors** — Train separate regression ensembles for
   bull/bear/sideways regimes identified by the BTC regime filter.
+
+---
+
+## Vox v5 — Model Attribution & Observability
+
+### Stable Model IDs
+
+Each classifier in the ensemble has a stable string ID used in logs and journal records:
+
+| ID       | Model                                   | Notes            |
+|----------|-----------------------------------------|------------------|
+| `lr`     | LogisticRegression                      | linear baseline  |
+| `hgbc`   | HistGradientBoostingClassifier          | primary booster  |
+| `et`     | ExtraTreesClassifier (calibrated)       | diverse trees    |
+| `rf`     | RandomForestClassifier (calibrated)     | bagged trees     |
+| `lgbm`   | LGBMClassifier (optional)               | needs lightgbm   |
+| `xgb`    | XGBClassifier (optional)                | needs xgboost    |
+| `catboost` | CatBoostClassifier (optional)         | never required   |
+
+Enabled IDs are logged at startup:
+```
+[model_registry] enabled=lr(w=1.0),hgbc(w=1.0),et(w=1.0),rf(w=1.0)
+```
+
+### Per-Model Vote Attribution
+
+Each entry prediction now includes per-model probabilities:
+```python
+conf = {
+    "class_proba":   0.64,   # VotingClassifier result (unchanged)
+    "weighted_mean": 0.63,   # user-weight-adjusted mean
+    "std_proba":     0.05,
+    "n_agree":       3,
+    "vote_threshold": 0.5,
+    "per_model": {
+        "lr":   0.55,
+        "hgbc": 0.70,
+        "et":   0.67,
+        "rf":   0.61,
+    },
+    "votes": { ... }  # alias for per_model
+}
+```
+
+Enable compact vote logging per trade (disabled by default — protects QC log cap):
+```python
+LOG_MODEL_VOTES = True   # in config.py, or via QC parameter log_model_votes=true
+```
+
+Example vote log line:
+```
+[vote] ADAUSD mean=0.64 std=0.05 agree=3/4 mode=pump votes=lr:0.55,hgbc:0.70,et:0.67,rf:0.61
+```
+
+### Optional Weighted Ensemble
+
+Adjust per-model influence via `config.py`:
+```python
+MODEL_WEIGHT_LR   = 1.0   # reduce to 0.5 to halve LR's influence
+MODEL_WEIGHT_HGBC = 1.5   # increase to boost HGBC
+MODEL_WEIGHT_ET   = 0.0   # set 0 to exclude a model
+MODEL_WEIGHT_RF   = 1.0
+```
+
+Default weights (all 1.0) preserve current behaviour.  The `weighted_mean`
+field in confidence dicts reflects user weights; `class_proba` is unchanged.
+
+### Trade Journal
+
+Every trade persistence log record now includes:
+- **Entry fields**: `model_votes`, `market_mode`, `confirm` path, ensemble metrics.
+- **Exit fields**: `max_return_seen`, `trail_active`, `breakeven_active`, `model_votes`.
+
+Records are emitted to `PersistenceManager` at both entry and exit and can be
+retrieved from the ObjectStore JSON log for offline analysis.
+
+**Per-model accuracy analysis** (offline, from journal records):
+```python
+from trade_journal import TradeJournal
+j = TradeJournal()
+j.load_json(your_json_log_string)
+attr = j.compute_model_attribution()
+# attr["hgbc"]["win_rate_when_yes"] — win rate when HGBC voted yes
+# attr["lr"]["avg_return_when_yes"]  — avg return when LR voted yes
+```
+
+⚠️ **Warning**: with only 10–20 trades the per-model statistics are extremely
+noisy.  Run attribution over multiple windows to get reliable signal:
+- 2023, 2024, 2025, 2026 YTD
+- Bull periods, chop periods, selloffs
+
+### Good-Market-Mode Relaxation (ruthless only)
+
+In `pump` / `risk_on_trend` modes, confirmation thresholds are slightly relaxed
+to increase sample size without returning to chop overtrading:
+
+| Parameter | Strict (default) | Relaxed (pump/trend) |
+|-----------|-----------------|----------------------|
+| `ruthless_confirm_ev_min` | 0.006 | 0.004 |
+| `ruthless_confirm_volr_min` | 1.5 | 1.3 |
+| `meta_min_proba` (future) | 0.55 | 0.52 |
+
+Configurable in `config.py`:
+```python
+RUTHLESS_GOOD_MODE_RELAXATION     = True    # master switch
+RUTHLESS_GOOD_MODE_MIN_EV         = 0.004
+RUTHLESS_GOOD_MODE_VOLUME_MIN     = 1.3
+```
+
+Confirm reason is tagged `strong_ml_relax` / `trend_momentum_relax` when
+relaxation is active, making it easy to filter the effect in backtest analysis.
+
+### Exit Diagnostics
+
+The ruthless exit log now includes entry/fill prices and high-water mark:
+```
+[exit_diag] SOLUSD  tag=EXIT_SL  entry=268.23000  fill=268.34000
+            ret=+0.04%  max=+0.04%  sl=0.0300  elapsed_min=12.5
+            (warn:ret>=0_tagged_sl)
+```
+
+This clarifies suspicious exits: e.g. an `EXIT_SL` on a positive fill means
+the stop was a breakeven stop or fee-adjusted loss, not a directional loss.
+
+### Entry Limit Order Observability
+
+Startup log shows current limit-order configuration:
+```
+[vox] RUTHLESS entry_limit_orders: use=True offset=0.001 ttl_min=3
+```
+
+### QuantConnect File-Size Rule
+
+Every individual Python code file must remain **under 63,000 characters**.
+Check with `wc -c Vox/*.py` before deploying.  Current sizes:
+- `main.py` — ~62,600 chars (critical; monitor closely)
+- `models.py` — ~46,000 chars
+- `config.py` — ~27,000 chars
+- `execution.py` — ~11,000 chars
+- `trade_journal.py`, `diagnostics.py`, `model_registry.py`, `tuning.py` — < 15,000 each
