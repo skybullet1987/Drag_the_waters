@@ -1354,3 +1354,52 @@ class TestVoxV5:
         ens.fit(X, (rng.standard_normal(60) > 0).astype(int))
         c = ens.predict_with_confidence(X[[0]])
         assert all(k in c for k in ("weighted_mean", "per_model", "votes", "vote_threshold"))
+
+
+class TestFeatureDiagSuffix:
+    """Tests for the _feature_diag_suffix helper in diagnostics.py."""
+
+    def test_returns_formatted_suffix_for_valid_vector(self):
+        from diagnostics import _feature_diag_suffix
+        ft = np.zeros(FEATURE_COUNT)
+        ft[1] = 0.0123
+        ft[3] = 0.0234
+        ft[6] = 1.45
+        result = _feature_diag_suffix(ft)
+        assert "r4=0.0123" in result
+        assert "r16=0.0234" in result
+        assert "vr=1.45" in result
+
+    def test_returns_formatted_suffix_for_list(self):
+        from diagnostics import _feature_diag_suffix
+        ft = [0.0] * FEATURE_COUNT
+        ft[1] = 0.05
+        ft[3] = 0.10
+        ft[6] = 2.0
+        result = _feature_diag_suffix(ft)
+        assert "r4=0.0500" in result
+        assert "r16=0.1000" in result
+        assert "vr=2.00" in result
+
+    def test_returns_empty_for_none(self):
+        from diagnostics import _feature_diag_suffix
+        assert _feature_diag_suffix(None) == ""
+
+    def test_returns_empty_for_too_short_vector(self):
+        from diagnostics import _feature_diag_suffix
+        assert _feature_diag_suffix(np.zeros(4)) == ""
+        assert _feature_diag_suffix([]) == ""
+        assert _feature_diag_suffix([1.0, 2.0]) == ""
+
+    def test_does_not_raise_for_numpy_array(self):
+        """Confirm no ambiguous truth-value error for multi-element NumPy array."""
+        from diagnostics import _feature_diag_suffix
+        ft = np.zeros(FEATURE_COUNT)
+        # Must not raise "The truth value of an array is ambiguous"
+        result = _feature_diag_suffix(ft)
+        assert isinstance(result, str)
+
+    def test_does_not_raise_for_malformed_values(self):
+        from diagnostics import _feature_diag_suffix
+        assert _feature_diag_suffix("bad") == ""
+        assert _feature_diag_suffix(42) == ""
