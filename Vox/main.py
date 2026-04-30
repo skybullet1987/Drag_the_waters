@@ -23,7 +23,7 @@ from execution import (
 from market_mode    import MarketModeDetector
 from meta_model     import MetaFilter
 from infra          import hydrate_state_from_history
-from diagnostics    import format_vote_log
+from diagnostics    import format_vote_log, _feature_diag_suffix
 from model_registry import format_model_registry_log
 
 np.random.seed(42)
@@ -1070,7 +1070,7 @@ class VoxAlgorithm(QCAlgorithm):
                 f"[ruthless] ENTRY {top_sym.value} path={_top_entry_path} confirm={_top_confirm}"
                 f" proba={class_proba_top:.3f} agree={_cd['n_agree']}"
                 f" std={_cd['std_proba']:.3f} ev={ev_top:.5f} pred={pred_return_top:.5f}"
-                + (f" r4={float(_ft[1]):.4f} r16={float(_ft[3]):.4f} vr={float(_ft[6]):.2f}" if _ft else "")
+                + _feature_diag_suffix(_ft)
                 + f" tp={tp_use:.4f}(fl={tp_floor_applied}) sl={sl_use:.4f}(fl={sl_floor_applied})"
                 + f" alloc={alloc:.3f} px={price:.4f} qty={qty:.6f}"
             )

@@ -7,6 +7,30 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ── Feature diagnostics ───────────────────────────────────────────────────────
+
+def _feature_diag_suffix(ft):
+    """Return a compact r4/r16/volume-ratio suffix string from a feature vector.
+
+    Safe against None, too-short vectors, and NumPy arrays (avoids ambiguous
+    truth-value checks on multi-element arrays).
+
+    Parameters
+    ----------
+    ft : array-like or None
+
+    Returns
+    -------
+    str — e.g. " r4=0.0123 r16=0.0234 vr=1.45", or "" when unavailable.
+    """
+    try:
+        if ft is None or len(ft) <= 6:
+            return ""
+        return f" r4={float(ft[1]):.4f} r16={float(ft[3]):.4f} vr={float(ft[6]):.2f}"
+    except Exception:
+        return ""
+
+
 # ── Vote log formatting ───────────────────────────────────────────────────────
 
 def format_vote_log(symbol, conf, meta_score=None, market_mode=None):
