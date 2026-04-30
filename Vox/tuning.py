@@ -145,18 +145,6 @@ def resolve_good_mode_params(algo, config_module):
     relaxed_meta = getattr(config_module, "RUTHLESS_GOOD_MODE_META_MIN_PROBA", RUTHLESS_GOOD_MODE_META_MIN_PROBA)
 
     # Allow QC param overrides
-    for attr, qc_key in [
-        ("relaxed_ev",   "ruthless_good_mode_min_ev"),
-        ("relaxed_volr", "ruthless_good_mode_volume_min"),
-        ("relaxed_meta", "ruthless_good_mode_meta_min_proba"),
-    ]:
-        try:
-            _v = algo.get_parameter(qc_key)
-            if _v:
-                locals()[attr]  # noqa: just reference; actual assignment below
-        except Exception:
-            pass
-
     try:
         _v = algo.get_parameter("ruthless_good_mode_min_ev")
         if _v:

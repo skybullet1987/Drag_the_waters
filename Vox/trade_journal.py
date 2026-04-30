@@ -208,15 +208,13 @@ class TradeJournal:
         for mid, s in sorted(attr.items()):
             wr = s["win_rate_when_yes"]
             ar = s["avg_return_when_yes"]
-            lines.append(
+            line = (
                 f"  {mid:<12}"
                 f" yes={s['vote_yes_count']:>3} no={s['vote_no_count']:>3}"
-                f" wr_yes={wr:.1%}" if wr is not None else
-                f"  {mid:<12}"
-                f" yes={s['vote_yes_count']:>3} no={s['vote_no_count']:>3}"
-                f" wr_yes=n/a"
+                + (f" wr_yes={wr:.1%}" if wr is not None else " wr_yes=n/a")
                 + (f" avg_ret_yes={ar:.3%}" if ar is not None else "")
             )
+            lines.append(line)
         return "\n".join(lines)
 
 

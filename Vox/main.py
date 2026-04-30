@@ -1072,7 +1072,7 @@ class VoxAlgorithm(QCAlgorithm):
                 f" std={_cd['std_proba']:.3f} ev={ev_top:.5f} pred={pred_return_top:.5f}"
                 + (f" r4={float(_ft[1]):.4f} r16={float(_ft[3]):.4f} vr={float(_ft[6]):.2f}" if _ft else "")
                 + f" tp={tp_use:.4f}(fl={tp_floor_applied}) sl={sl_use:.4f}(fl={sl_floor_applied})"
-                  f" alloc={alloc:.3f} px={price:.4f} qty={qty:.6f}"
+                + f" alloc={alloc:.3f} px={price:.4f} qty={qty:.6f}"
             )
         else:
             self.debug(
