@@ -132,11 +132,18 @@ def evaluate_candidate(
     counters,
     market_mode=None,
     ruthless_allowed_modes=None,
+    ruthless_good_mode_relaxation=True,
+    ruthless_good_mode_ev_min=0.004,
+    ruthless_good_mode_volr_min=1.3,
 ):
     """Evaluate a single candidate for entry. Returns a result dict or None if filtered.
 
     counters: dict with keys n_pass_disp, n_pass_agree, n_pass_score,
               n_pass_ev, n_pass_pred_ret, n_momentum_override — mutated in-place.
+
+    When risk_profile=ruthless and market_mode is pump/risk_on_trend and
+    ruthless_good_mode_relaxation is True, the confirmation thresholds are
+    slightly relaxed to carefully increase sample size in favorable modes.
     """
     class_proba = conf["class_proba"]
     std_proba   = conf["std_proba"]
@@ -205,6 +212,22 @@ def evaluate_candidate(
             return None
         counters["n_pass_pred_ret"] += 1
 
+    # ── Good-market-mode relaxation (ruthless only) ───────────────────────────
+    # In pump/risk_on_trend modes, slightly relax confirmation thresholds to
+    # increase sample size without touching chop/selloff.
+    _eff_confirm_ev_min   = ruthless_confirm_ev_min
+    _eff_confirm_volr_min = ruthless_confirm_volr_min
+    _good_mode_active     = False
+    if (
+        risk_profile == "ruthless"
+        and ruthless_good_mode_relaxation
+        and market_mode is not None
+        and market_mode in (ruthless_allowed_modes or ["risk_on_trend", "pump"])
+    ):
+        _eff_confirm_ev_min   = min(ruthless_confirm_ev_min,   ruthless_good_mode_ev_min)
+        _eff_confirm_volr_min = min(ruthless_confirm_volr_min, ruthless_good_mode_volr_min)
+        _good_mode_active = True
+
     # Ruthless confirmation gate — priority order:
     #   1. momentum_override (entry was already a momentum breakout)
     #   2. strong_ml         (high EV + high class_proba + multi-model agreement)
@@ -216,17 +239,17 @@ def evaluate_candidate(
         if entry_path == "momentum_override":
             confirm_reason = "momentum_override"
         elif (
-            ev_after_costs >= ruthless_confirm_ev_min
+            ev_after_costs >= _eff_confirm_ev_min
             and class_proba >= ruthless_confirm_proba_min
             and n_agree    >= ruthless_confirm_agree_min
         ):
-            confirm_reason = "strong_ml"
+            confirm_reason = "strong_ml" + ("_relax" if _good_mode_active else "")
         elif (
             float(feat[1]) >= ruthless_confirm_ret4_min
             and float(feat[3]) >= ruthless_confirm_ret16_min
-            and float(feat[6]) >= ruthless_confirm_volr_min
+            and float(feat[6]) >= _eff_confirm_volr_min
         ):
-            confirm_reason = "trend_momentum"
+            confirm_reason = "trend_momentum" + ("_relax" if _good_mode_active else "")
         # market_mode is the lowest-priority confirmation path: only tried when
         # momentum_override, strong_ml, and trend_momentum all fail.
         if confirm_reason is None and market_mode is not None:

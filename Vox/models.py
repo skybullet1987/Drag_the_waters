@@ -548,6 +548,36 @@ class VoxEnsemble:
         self._regressor_weights = list(REGRESSOR_WEIGHTS)
         self._reg_fitted        = False
 
+        # Optional per-model user weights for weighted mean computation.
+        # Default: empty dict → unweighted mean (same as current behavior).
+        # Set via set_model_weights().  Keys are model IDs ("lr", "hgbc", etc.)
+        self._user_model_weights = {}
+
+    def set_model_weights(self, weights_dict):
+        """Set optional per-model weights for the weighted mean computation.
+
+        Only affects the ``weighted_mean`` field in the confidence output.
+        The VotingClassifier's internal weights (CLASSIFIER_WEIGHTS) are not
+        changed; the ``class_proba`` field remains the VotingClassifier result.
+
+        Parameters
+        ----------
+        weights_dict : dict[str, float] — model_id -> weight.
+                       A weight of 0.0 zeroes out that model's contribution.
+                       If all weights are 0 or dict is empty, falls back to
+                       unweighted mean.
+
+        Example
+        -------
+        ensemble.set_model_weights({"lr": 0.5, "hgbc": 1.5, "et": 1.0, "rf": 1.0})
+        """
+        self._user_model_weights = dict(weights_dict) if weights_dict else {}
+
+    @property
+    def model_ids(self):
+        """Return list of active model IDs from the VotingClassifier estimators."""
+        return [name for name, _ in self._estimators]
+
     # ── Training ──────────────────────────────────────────────────────────────
 
     def fit(self, X, y_class, y_return=None):
@@ -605,11 +635,14 @@ class VoxEnsemble:
         dict
             ``class_proba``        — float in [0, 1]: weighted P(class=1) (alias: ``mean_proba``).
             ``mean_proba``         — same as ``class_proba`` (backward-compatible alias).
+            ``weighted_mean``      — float: user-weight-adjusted mean (equals class_proba if no custom weights).
             ``std_proba``          — float: std-dev of per-model probabilities.
             ``n_agree``            — int: models with P(class=1) >= agree_threshold.
+            ``vote_threshold``     — float: threshold used for agreement counting.
             ``pred_return``        — float: weighted-average predicted net return (0.0 if regressors not trained).
             ``return_dispersion``  — float: std-dev of regressor predictions (0.0 if unavailable).
             ``per_model``          — dict[str, float]: model_name -> P(class=1).
+            ``votes``              — same as ``per_model`` (alias for clarity).
 
         Raises
         ------
@@ -635,8 +668,20 @@ class VoxEnsemble:
         except Exception:
             mean_p = float(np.mean(list(probas.values())))
 
-        std_p   = float(np.std(list(probas.values())))
-        n_agree = int(sum(1 for p in probas.values() if p >= self._agree_threshold()))
+        agree_thr = self._agree_threshold()
+        std_p     = float(np.std(list(probas.values())))
+        n_agree   = int(sum(1 for p in probas.values() if p >= agree_thr))
+
+        # Optional user-configured weighted mean
+        uw = self._user_model_weights
+        if uw:
+            total_w = sum(uw.get(m, 1.0) for m in probas)
+            if total_w > 0:
+                weighted_mean = sum(uw.get(m, 1.0) * p for m, p in probas.items()) / total_w
+            else:
+                weighted_mean = float(np.mean(list(probas.values())))
+        else:
+            weighted_mean = mean_p
 
         # ── Regression predictions ────────────────────────────────────────────
         pred_return       = 0.0
@@ -657,13 +702,16 @@ class VoxEnsemble:
                 return_dispersion = float(np.std(reg_preds)) if len(reg_preds) > 1 else 0.0
 
         return {
-            "class_proba":       mean_p,   # v2 primary key
-            "mean_proba":        mean_p,   # backward-compat alias
+            "class_proba":       mean_p,        # v2 primary key (VotingClassifier result)
+            "mean_proba":        mean_p,         # backward-compat alias
+            "weighted_mean":     weighted_mean,  # user-weight-adjusted (equals mean_p by default)
             "std_proba":         std_p,
             "n_agree":           n_agree,
+            "vote_threshold":    agree_thr,
             "pred_return":       pred_return,
             "return_dispersion": return_dispersion,
             "per_model":         probas,
+            "votes":             probas,         # alias for clarity in journal/logs
         }
 
     def predict_with_confidence_batch(self, X):
@@ -742,14 +790,28 @@ class VoxEnsemble:
 
         out = []
         for i in range(N):
+            per_model_i = {m: float(proba_per_model[m][i]) for m in model_names}
+            # Optional user-configured weighted mean
+            uw = self._user_model_weights
+            if uw:
+                total_w = sum(uw.get(m, 1.0) for m in per_model_i)
+                if total_w > 0:
+                    wm = sum(uw.get(m, 1.0) * p for m, p in per_model_i.items()) / total_w
+                else:
+                    wm = float(means[i])
+            else:
+                wm = float(means[i])
             out.append({
                 "class_proba":       float(means[i]),
                 "mean_proba":        float(means[i]),   # backward-compat
+                "weighted_mean":     wm,
                 "std_proba":         float(stds[i]),
                 "n_agree":           int(agrees[i]),
+                "vote_threshold":    agree_thr,
                 "pred_return":       float(pred_returns[i]),
                 "return_dispersion": float(ret_dispersions[i]),
-                "per_model":         {m: float(proba_per_model[m][i]) for m in model_names},
+                "per_model":         per_model_i,
+                "votes":             per_model_i,   # alias
             })
         return out
 
@@ -778,6 +840,10 @@ class VoxEnsemble:
         if getattr(saved, "_reg_fitted", False) and getattr(saved, "_regressors", None):
             self._regressors    = saved._regressors
             self._reg_fitted    = True
+        # Preserve user model weights if saved (v5+); older pickles default to empty.
+        saved_weights = getattr(saved, "_user_model_weights", {})
+        if saved_weights and not self._user_model_weights:
+            self._user_model_weights = saved_weights
 
     def set_logger(self, logger):
         """Attach (or replace) the logger callable. Not persisted."""

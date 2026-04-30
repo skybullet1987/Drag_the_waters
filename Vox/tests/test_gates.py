@@ -1328,3 +1328,29 @@ class TestFeatureCount:
         y   = rng.integers(0, 2, 60)
         ens.fit(X, y)
         assert getattr(ens, "_feature_count", None) == FEATURE_COUNT
+
+class TestVoxV5:
+    def test_pure_functions(self):
+        from model_registry import compute_weighted_mean, format_model_registry_log
+        from trade_journal import TradeJournal
+        from tuning import get_relaxed_thresholds as grt
+        assert "lr" in format_model_registry_log([("lr", None)])
+        v = {"lr": 0.6, "hgbc": 0.7}
+        assert abs(compute_weighted_mean(v, {k: 0.0 for k in v}) - 0.65) < 1e-9
+        j = TradeJournal(max_size=2)
+        j.record_entry("A", {"model_votes": {"lr": 0.6}})
+        r = j.record_exit("A", {"realized_return": 0.03})
+        assert r["model_votes"]["lr"] == 0.6
+        for i in range(3): j.record_entry(str(i), {}); j.record_exit(str(i), {})
+        assert j.record_count() == 2
+        assert grt("pump", "ruthless", 0.006, 1.5, 0.55)[0] < 0.006
+        assert grt("chop", "ruthless", 0.006, 1.5, 0.55)[0] == 0.006
+        assert grt("pump", "balanced", 0.006, 1.5, 0.55)[0] == 0.006
+
+    def test_ensemble_vote_fields(self):
+        rng = np.random.default_rng(7)
+        ens = VoxEnsemble()
+        X = rng.standard_normal((60, FEATURE_COUNT))
+        ens.fit(X, (rng.standard_normal(60) > 0).astype(int))
+        c = ens.predict_with_confidence(X[[0]])
+        assert all(k in c for k in ("weighted_mean", "per_model", "votes", "vote_threshold"))

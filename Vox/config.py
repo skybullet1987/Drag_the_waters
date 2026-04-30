@@ -140,6 +140,39 @@ USE_LIGHTGBM                     = False  # enable if lightgbm installed
 USE_XGBOOST                      = False  # enable if xgboost installed
 USE_CATBOOST                     = False  # disabled: CatBoost is not available in the QC cloud environment
 
+# ── Per-model static weights (optional weighted ensemble) ─────────────────────
+# Default 1.0 for all models → unweighted mean (preserves current behavior).
+# Reduce a weak model's weight (e.g. 0.5) or zero it out (0.0) to exclude it.
+# Increase a strong model's weight (e.g. 2.0) to boost its influence.
+# CatBoost is never loaded by default; its weight is ignored unless USE_CATBOOST.
+MODEL_WEIGHT_LR           = 1.0
+MODEL_WEIGHT_HGBC         = 1.0
+MODEL_WEIGHT_ET           = 1.0
+MODEL_WEIGHT_RF           = 1.0
+MODEL_WEIGHT_LGBM         = 1.0
+MODEL_WEIGHT_XGB          = 1.0
+MODEL_WEIGHT_CATBOOST     = 1.0
+
+# ── Trade journal config ──────────────────────────────────────────────────────
+# persist_trade_journal: when True, journal records accumulate in memory and
+# are available via self._trade_journal.get_records() / to_json().
+PERSIST_TRADE_JOURNAL     = True
+TRADE_JOURNAL_MAX_SIZE    = 500   # rolling cap — oldest records dropped first
+
+# ── Vote log config ───────────────────────────────────────────────────────────
+# log_model_votes: when True, each entry emits a compact [vote] line listing
+# per-model probabilities.  Disabled by default to protect QC's 100KB log cap.
+LOG_MODEL_VOTES           = False
+
+# ── Ruthless good-market-mode relaxation ──────────────────────────────────────
+# When market_mode is pump or risk_on_trend, slightly relax ruthless gates to
+# increase sample size without returning to chop overtrading.
+# Set RUTHLESS_GOOD_MODE_RELAXATION = False to disable all relaxation.
+RUTHLESS_GOOD_MODE_RELAXATION         = True
+RUTHLESS_GOOD_MODE_META_MIN_PROBA     = 0.52   # relaxed from 0.55
+RUTHLESS_GOOD_MODE_MIN_EV             = 0.004   # relaxed confirm ev from 0.006
+RUTHLESS_GOOD_MODE_VOLUME_MIN         = 1.3    # relaxed from 1.5
+
 # ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
 RUTHLESS_LOSS_WINDOW_HOURS       = 24     # rolling window for counting SL exits
 RUTHLESS_LOSS_LIMIT              = 2      # SL exits in window that trigger long block
@@ -323,6 +356,11 @@ def setup_risk_profile(algo):
         algo._ruthless_allowed_modes  = RUTHLESS_ALLOWED_MODES
         algo._meta_filter_enabled     = RUTHLESS_META_FILTER_ENABLED
         algo._meta_min_proba          = RUTHLESS_META_MIN_PROBA
+        # Good-market-mode relaxation
+        algo._good_mode_relaxation          = RUTHLESS_GOOD_MODE_RELAXATION
+        algo._good_mode_meta_min_proba      = RUTHLESS_GOOD_MODE_META_MIN_PROBA
+        algo._good_mode_min_ev              = RUTHLESS_GOOD_MODE_MIN_EV
+        algo._good_mode_volume_min          = RUTHLESS_GOOD_MODE_VOLUME_MIN
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -384,4 +422,17 @@ def setup_risk_profile(algo):
             f"  label_tp={getattr(algo, '_label_tp', 0.09)}"
             f"  label_sl={getattr(algo, '_label_sl', 0.03)}"
             f"  label_horizon_bars={getattr(algo, '_label_horizon', 96)}"
+        )
+        algo.log(
+            f"[vox] RUTHLESS good-mode-relaxation:"
+            f"  enabled={getattr(algo, '_good_mode_relaxation', True)}"
+            f"  meta_min_proba={getattr(algo, '_good_mode_meta_min_proba', RUTHLESS_GOOD_MODE_META_MIN_PROBA)}"
+            f"  min_ev={getattr(algo, '_good_mode_min_ev', RUTHLESS_GOOD_MODE_MIN_EV)}"
+            f"  volume_min={getattr(algo, '_good_mode_volume_min', RUTHLESS_GOOD_MODE_VOLUME_MIN)}"
+        )
+        algo.log(
+            f"[vox] RUTHLESS entry_limit_orders:"
+            f"  use={getattr(algo, '_use_entry_limit_orders', False)}"
+            f"  offset={ENTRY_LIMIT_OFFSET}"
+            f"  ttl_min={ENTRY_LIMIT_TTL_MINUTES}"
         )
