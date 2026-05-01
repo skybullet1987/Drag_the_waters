@@ -24,7 +24,8 @@ from market_mode    import MarketModeDetector
 from meta_model     import MetaFilter
 from infra          import hydrate_state_from_history
 from diagnostics    import format_vote_log, _feature_diag_suffix
-from model_registry import format_model_registry_log
+from model_registry import format_model_registry_log, build_roles_dict_from_config
+import config as _cfg_module
 
 np.random.seed(42)
 random.seed(42)
@@ -167,7 +168,7 @@ class VoxAlgorithm(QCAlgorithm):
             self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
         # Apply model roles from config (active/shadow/diagnostic)
-        self._ensemble.set_model_roles({"lr": MODEL_ROLE_LR, "hgbc": MODEL_ROLE_HGBC, "et": MODEL_ROLE_ET, "rf": MODEL_ROLE_RF})
+        self._ensemble.set_model_roles(build_roles_dict_from_config(_cfg_module))
         self.log(format_model_registry_log(self._ensemble._estimators, roles_dict=self._ensemble._model_roles))
 
         # ── Position state ────────────────────────────────────────────────────

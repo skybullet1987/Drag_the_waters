@@ -634,11 +634,15 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
 # Maps estimator names (as used in _make_estimators) to their default role.
 # lr is diagnostic by default: observed vote_lr ≈ 0.006–0.023 on every trade
 # (always bearish), so it should not count in active agreement.
+# gnb is diagnostic by default: vote_gnb = 1.0 on every trade (degenerate
+# always-bullish). GNB is not in the VotingClassifier but its role is tracked
+# here so load_state and set_model_roles work correctly for any saved state.
 _DEFAULT_CORE_ROLES = {
     "lr":   "diagnostic",
     "hgbc": "active",
     "et":   "active",
     "rf":   "active",
+    "gnb":  "diagnostic",  # always-bullish; not in VotingClassifier but tracked
 }
 
 
