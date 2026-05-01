@@ -1,6 +1,6 @@
 # ── Vox Model Registry ────────────────────────────────────────────────────────
 #
-# Stable model identifiers and weighted ensemble helpers.
+# Stable model identifiers, role constants, and weighted ensemble helpers.
 #
 # Model IDs are intentionally short for compact log output.
 # The core sklearn stack (lr, hgbc, et, rf) is always present.
@@ -12,6 +12,7 @@ MODEL_ID_LR       = "lr"
 MODEL_ID_HGBC     = "hgbc"     # HistGradientBoostingClassifier
 MODEL_ID_ET       = "et"       # ExtraTreesClassifier
 MODEL_ID_RF       = "rf"       # RandomForestClassifier
+MODEL_ID_GNB      = "gnb"      # GaussianNB (diagnostic-only by default)
 MODEL_ID_LGBM     = "lgbm"
 MODEL_ID_XGB      = "xgb"
 MODEL_ID_CATBOOST = "catboost"
@@ -33,9 +34,32 @@ MODEL_DESCRIPTIONS = {
     MODEL_ID_HGBC:     "HistGradientBoostingClassifier (strong sklearn booster)",
     MODEL_ID_ET:       "ExtraTreesClassifier (randomised trees, diverse)",
     MODEL_ID_RF:       "RandomForestClassifier (bagged trees)",
+    MODEL_ID_GNB:      "GaussianNB (diagnostic-only; degenerate on crypto)",
     MODEL_ID_LGBM:     "LGBMClassifier (external, optional)",
     MODEL_ID_XGB:      "XGBClassifier (external, optional)",
     MODEL_ID_CATBOOST: "CatBoostClassifier (external, optional)",
+}
+
+# ── Model role constants ───────────────────────────────────────────────────────
+# active     — contributes to ensemble vote; affects trading confidence.
+# shadow     — predicted and logged but NEVER affects trading decisions.
+# diagnostic — predicted and logged for risk/veto/debug only.
+# disabled   — skipped entirely (not trained or predicted).
+ROLE_ACTIVE     = "active"
+ROLE_SHADOW     = "shadow"
+ROLE_DIAGNOSTIC = "diagnostic"
+ROLE_DISABLED   = "disabled"
+
+# Default role for each core model ID
+DEFAULT_MODEL_ROLES = {
+    MODEL_ID_LR:       ROLE_DIAGNOSTIC,  # was always-bearish; diagnostic only
+    MODEL_ID_HGBC:     ROLE_ACTIVE,
+    MODEL_ID_ET:       ROLE_ACTIVE,
+    MODEL_ID_RF:       ROLE_ACTIVE,
+    MODEL_ID_GNB:      ROLE_DIAGNOSTIC,  # always-bullish (vote_gnb=1.0); diagnostic
+    MODEL_ID_LGBM:     ROLE_SHADOW,
+    MODEL_ID_XGB:      ROLE_SHADOW,
+    MODEL_ID_CATBOOST: ROLE_SHADOW,
 }
 
 
@@ -46,24 +70,36 @@ MODEL_DESCRIPTIONS = {
 #   model    : estimator or None
 #   enabled  : bool
 #   weight   : float — used in weighted mean computation
+#   role     : str   — one of ROLE_* constants
 
-def make_registry_entry(model_id, model, enabled=True, weight=1.0):
-    """Create a model registry entry dict."""
+def make_registry_entry(model_id, model, enabled=True, weight=1.0, role=ROLE_ACTIVE):
+    """Create a model registry entry dict.
+
+    Parameters
+    ----------
+    model_id : str
+    model    : estimator or None
+    enabled  : bool
+    weight   : float
+    role     : str — one of ROLE_ACTIVE / ROLE_SHADOW / ROLE_DIAGNOSTIC / ROLE_DISABLED
+    """
     return {
         "id":      model_id,
         "model":   model,
         "enabled": enabled,
         "weight":  float(weight),
+        "role":    role,
     }
 
 
-def build_registry_from_estimators(estimators, weights_dict=None):
+def build_registry_from_estimators(estimators, weights_dict=None, roles_dict=None):
     """Build a registry list from VotingClassifier estimators.
 
     Parameters
     ----------
     estimators   : list of (name, estimator) — from VotingClassifier
     weights_dict : dict[str, float] or None — optional per-model weights
+    roles_dict   : dict[str, str] or None   — optional per-model roles
 
     Returns
     -------
@@ -72,11 +108,13 @@ def build_registry_from_estimators(estimators, weights_dict=None):
     registry = []
     for name, model in estimators:
         w = (weights_dict or {}).get(name, 1.0)
+        r = (roles_dict or {}).get(name, ROLE_ACTIVE)
         registry.append(make_registry_entry(
             model_id=name,
             model=model,
             enabled=True,
             weight=w,
+            role=r,
         ))
     return registry
 
@@ -128,19 +166,88 @@ def weights_are_uniform(weights_dict):
     return all(abs(v - vals[0]) < 1e-9 for v in vals)
 
 
+# ── Role-aware vote splitting ──────────────────────────────────────────────────
+
+def split_votes_by_role(votes, roles_dict):
+    """Split a per-model votes dict into role-separated sub-dicts.
+
+    Parameters
+    ----------
+    votes      : dict[str, float] — model_id -> P(class=1)
+    roles_dict : dict[str, str]   — model_id -> role string
+
+    Returns
+    -------
+    tuple of (active_votes, shadow_votes, diagnostic_votes)
+        Each is a dict[str, float] containing only models of that role.
+    """
+    active     = {}
+    shadow     = {}
+    diagnostic = {}
+    for mid, proba in votes.items():
+        role = roles_dict.get(mid, ROLE_ACTIVE)
+        if role == ROLE_ACTIVE:
+            active[mid] = proba
+        elif role == ROLE_SHADOW:
+            shadow[mid] = proba
+        elif role == ROLE_DIAGNOSTIC:
+            diagnostic[mid] = proba
+        # ROLE_DISABLED models should not appear in votes at all
+    return active, shadow, diagnostic
+
+
+def compute_active_stats(active_votes, agree_thr=0.5):
+    """Compute mean / std / n_agree from active-role votes only.
+
+    Parameters
+    ----------
+    active_votes : dict[str, float] — active-model votes
+    agree_thr    : float            — threshold for agreement counting
+
+    Returns
+    -------
+    dict with keys: active_mean, active_std, active_n_agree
+    """
+    import numpy as _np
+    if not active_votes:
+        return {"active_mean": 0.5, "active_std": 0.0, "active_n_agree": 0}
+    vals = list(active_votes.values())
+    return {
+        "active_mean":    float(_np.mean(vals)),
+        "active_std":     float(_np.std(vals)),
+        "active_n_agree": int(sum(1 for v in vals if v >= agree_thr)),
+    }
+
+
 # ── Startup log helper ────────────────────────────────────────────────────────
 
-def format_model_registry_log(estimators, weights_dict=None):
-    """Format a startup log line listing enabled model IDs and their weights.
+def format_model_registry_log(estimators, weights_dict=None, roles_dict=None):
+    """Format a startup log line listing enabled model IDs, weights, and roles.
 
     Example output:
-        [model_registry] enabled=lr(w=1.0),hgbc(w=1.0),et(w=1.0),rf(w=1.0)
+        [model_registry] active=hgbc(w=1.0),et(w=1.0),rf(w=1.0) diag=lr
     """
-    parts = []
+    active_parts = []
+    shadow_parts = []
+    diag_parts   = []
     for name, _ in estimators:
-        w = (weights_dict or {}).get(name, 1.0)
-        parts.append(f"{name}(w={w:.2g})")
-    return "[model_registry] enabled=" + ",".join(parts)
+        w    = (weights_dict or {}).get(name, 1.0)
+        role = (roles_dict or {}).get(name, ROLE_ACTIVE)
+        tag  = f"{name}(w={w:.2g})"
+        if role == ROLE_SHADOW:
+            shadow_parts.append(tag)
+        elif role == ROLE_DIAGNOSTIC:
+            diag_parts.append(tag)
+        else:
+            active_parts.append(tag)
+    parts = []
+    if active_parts:
+        parts.append("active=" + ",".join(active_parts))
+    if shadow_parts:
+        parts.append("shadow=" + ",".join(shadow_parts))
+    if diag_parts:
+        parts.append("diag=" + ",".join(diag_parts))
+    return "[model_registry] " + " ".join(parts) if parts else "[model_registry] (none)"
 
 
 def format_vote_summary(votes, vote_threshold=0.5):
@@ -175,4 +282,29 @@ def build_weights_dict_from_config(config_module):
     for model_id, attr in mapping.items():
         val = getattr(config_module, attr, 1.0)
         result[model_id] = float(val)
+    return result
+
+
+# ── Default model roles from config ───────────────────────────────────────────
+
+def build_roles_dict_from_config(config_module):
+    """Extract per-model roles from a config module.
+
+    Looks for MODEL_ROLE_LR, MODEL_ROLE_HGBC, etc. constants.
+    Falls back to DEFAULT_MODEL_ROLES if the constant is missing.
+    """
+    mapping = {
+        MODEL_ID_LR:       "MODEL_ROLE_LR",
+        MODEL_ID_HGBC:     "MODEL_ROLE_HGBC",
+        MODEL_ID_ET:       "MODEL_ROLE_ET",
+        MODEL_ID_RF:       "MODEL_ROLE_RF",
+        MODEL_ID_GNB:      "MODEL_ROLE_GNB",
+        MODEL_ID_LGBM:     "MODEL_ROLE_LGBM",
+        MODEL_ID_XGB:      "MODEL_ROLE_XGB",
+        MODEL_ID_CATBOOST: "MODEL_ROLE_CATBOOST",
+    }
+    result = {}
+    for model_id, attr in mapping.items():
+        val = getattr(config_module, attr, DEFAULT_MODEL_ROLES.get(model_id, ROLE_ACTIVE))
+        result[model_id] = str(val)
     return result

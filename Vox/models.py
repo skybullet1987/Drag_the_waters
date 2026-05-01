@@ -502,6 +502,146 @@ def _make_regressors():
     ]
 
 
+def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
+    """Build shadow model (name, estimator, role) tuples for the shadow lab.
+
+    Shadow models are predicted and logged but never affect trading decisions.
+    Models are compact variants of the active stack + optional external models.
+
+    Parameters
+    ----------
+    use_calibration : bool — wrap tree models with CalibratedClassifierCV
+    max_count       : int  — cap on total shadow models returned
+    logger          : callable or None
+
+    Returns
+    -------
+    list[tuple[str, estimator, str]]  — (id, estimator, role)
+        role is "shadow" or "diagnostic" for each entry.
+    """
+    from model_registry import ROLE_SHADOW, ROLE_DIAGNOSTIC
+    shadows = []
+
+    def _cal(est):
+        if use_calibration:
+            return CalibratedClassifierCV(est, method="isotonic", cv=2)
+        return est
+
+    # ── Shallow ET variant (less overfit, faster) ─────────────────────────────
+    try:
+        shadows.append(("et_shallow", _cal(
+            ExtraTreesClassifier(
+                n_estimators=80, max_depth=3, n_jobs=1, random_state=43,
+                class_weight="balanced",
+            )
+        ), ROLE_SHADOW))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] et_shallow init failed: {exc}")
+
+    # ── Shallow RF variant ────────────────────────────────────────────────────
+    try:
+        shadows.append(("rf_shallow", _cal(
+            RandomForestClassifier(
+                n_estimators=80, max_depth=3, n_jobs=1, random_state=43,
+                class_weight="balanced",
+            )
+        ), ROLE_SHADOW))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] rf_shallow init failed: {exc}")
+
+    # ── HGBC with stronger L2 regularization ─────────────────────────────────
+    try:
+        _hgbc_l2 = None
+        try:
+            _hgbc_l2 = HistGradientBoostingClassifier(
+                max_iter=80, learning_rate=0.05, max_depth=4,
+                min_samples_leaf=25, l2_regularization=0.5,
+                random_state=43, class_weight="balanced",
+            )
+        except TypeError:
+            _hgbc_l2 = HistGradientBoostingClassifier(
+                max_iter=80, learning_rate=0.05, max_depth=4,
+                min_samples_leaf=25, l2_regularization=0.5,
+                random_state=43,
+            )
+        shadows.append(("hgbc_l2", _hgbc_l2, ROLE_SHADOW))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] hgbc_l2 init failed: {exc}")
+
+    # ── Calibrated ET (may differ from default CalibratedClassifierCV usage) ──
+    try:
+        shadows.append(("cal_et", CalibratedClassifierCV(
+            ExtraTreesClassifier(
+                n_estimators=100, max_depth=5, n_jobs=1, random_state=44,
+                class_weight="balanced",
+            ), method="isotonic", cv=3
+        ), ROLE_SHADOW))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] cal_et init failed: {exc}")
+
+    # ── Calibrated RF ─────────────────────────────────────────────────────────
+    try:
+        shadows.append(("cal_rf", CalibratedClassifierCV(
+            RandomForestClassifier(
+                n_estimators=100, max_depth=5, n_jobs=1, random_state=44,
+                class_weight="balanced",
+            ), method="isotonic", cv=3
+        ), ROLE_SHADOW))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] cal_rf init failed: {exc}")
+
+    # ── Balanced LR variant (diagnostic: linear, good calibration reference) ──
+    try:
+        shadows.append(("lr_bal", LogisticRegression(
+            max_iter=1000, C=0.5, class_weight="balanced",
+        ), ROLE_DIAGNOSTIC))
+    except Exception as exc:
+        if logger:
+            logger(f"[shadow_lab] lr_bal init failed: {exc}")
+
+    # ── Optional external models (graceful fallback if not installed) ─────────
+    if len(shadows) < max_count and HAS_LGBM:
+        try:
+            shadows.append(("lgbm_bal", LGBMClassifier(
+                n_estimators=100, max_depth=4, learning_rate=0.05,
+                class_weight="balanced", random_state=42, verbose=-1,
+                n_jobs=1,
+            ), ROLE_SHADOW))
+        except Exception as exc:
+            if logger:
+                logger(f"[shadow_lab] lgbm_bal init failed: {exc}")
+
+    if len(shadows) < max_count and HAS_XGB:
+        try:
+            shadows.append(("xgb_bal", XGBClassifier(
+                n_estimators=100, max_depth=4, learning_rate=0.05,
+                use_label_encoder=False, eval_metric="logloss",
+                random_state=42, n_jobs=1,
+            ), ROLE_SHADOW))
+        except Exception as exc:
+            if logger:
+                logger(f"[shadow_lab] xgb_bal init failed: {exc}")
+
+    return shadows[:max_count]
+
+
+# ── Default model roles for the core VotingClassifier models ─────────────────
+# Maps estimator names (as used in _make_estimators) to their default role.
+# lr is diagnostic by default: observed vote_lr ≈ 0.006–0.023 on every trade
+# (always bearish), so it should not count in active agreement.
+_DEFAULT_CORE_ROLES = {
+    "lr":   "diagnostic",
+    "hgbc": "active",
+    "et":   "active",
+    "rf":   "active",
+}
+
+
 class VoxEnsemble:
     """
     Heterogeneous soft-voting ensemble for the Vox v2 strategy.
@@ -528,9 +668,19 @@ class VoxEnsemble:
     Tree classifiers are wrapped in CalibratedClassifierCV(method="isotonic", cv=2)
     for reliable probability estimates.  HistGradientBoosting is well-calibrated
     by design and is not additionally wrapped.
+
+    Shadow Model Lab
+    ----------------
+    When ``shadow_lab_enabled=True`` (the default), additional shadow models are
+    trained and predicted alongside the active ensemble.  Shadow predictions are
+    included in ``predict_with_confidence()`` output under ``shadow_votes`` and
+    ``diagnostic_votes`` but **never affect trading decisions**.
+
+    Model roles: active | shadow | diagnostic | disabled
     """
 
-    def __init__(self, logger=None, use_calibration=True):
+    def __init__(self, logger=None, use_calibration=True,
+                 shadow_lab_enabled=True, shadow_max_count=12):
         self._logger          = logger
         self._use_calibration = use_calibration
         self._estimators      = _make_estimators(logger, use_calibration=use_calibration)
@@ -553,6 +703,31 @@ class VoxEnsemble:
         # Set via set_model_weights().  Keys are model IDs ("lr", "hgbc", etc.)
         self._user_model_weights = {}
 
+        # ── Model roles ───────────────────────────────────────────────────────
+        # Maps model_id -> role string (active/shadow/diagnostic/disabled).
+        # Governs which models count for active_mean/active_n_agree.
+        # Populated from config via set_model_roles(); defaults applied otherwise.
+        self._model_roles = dict(_DEFAULT_CORE_ROLES)
+
+        # ── Shadow model lab ──────────────────────────────────────────────────
+        # List of (id, estimator, role) for shadow/diagnostic-only models.
+        # These are trained and predicted but never affect trading.
+        self._shadow_lab_enabled  = shadow_lab_enabled
+        self._shadow_max_count    = int(shadow_max_count)
+        self._shadow_models       = []   # list of (id, estimator, role)
+        self._shadow_fitted       = False
+        if shadow_lab_enabled:
+            try:
+                self._shadow_models = _make_shadow_estimators(
+                    use_calibration=use_calibration,
+                    max_count=shadow_max_count,
+                    logger=logger,
+                )
+            except Exception as exc:
+                if logger:
+                    logger(f"[shadow_lab] init failed: {exc}")
+                self._shadow_models = []
+
     def set_model_weights(self, weights_dict):
         """Set optional per-model weights for the weighted mean computation.
 
@@ -572,6 +747,28 @@ class VoxEnsemble:
         ensemble.set_model_weights({"lr": 0.5, "hgbc": 1.5, "et": 1.0, "rf": 1.0})
         """
         self._user_model_weights = dict(weights_dict) if weights_dict else {}
+
+    def set_model_roles(self, roles_dict):
+        """Set per-model roles controlling active/shadow/diagnostic classification.
+
+        Parameters
+        ----------
+        roles_dict : dict[str, str] — model_id -> role string
+                     Valid roles: "active", "shadow", "diagnostic", "disabled"
+
+        Active models contribute to active_mean/active_std/active_n_agree and
+        thus affect trading confidence.  Shadow/diagnostic models are predicted
+        and logged but never affect trading decisions.
+
+        Example
+        -------
+        ensemble.set_model_roles({
+            "lr": "diagnostic", "hgbc": "active",
+            "et": "active", "rf": "active",
+        })
+        """
+        if roles_dict:
+            self._model_roles.update(roles_dict)
 
     @property
     def model_ids(self):
@@ -611,6 +808,23 @@ class VoxEnsemble:
                         self._logger(f"[ensemble] regressor {name} fit failed: {exc}")
             self._reg_fitted = True
 
+        # ── Shadow model lab training ─────────────────────────────────────────
+        if self._shadow_models:
+            self._shadow_fitted = False
+            n_ok = 0
+            for name, est, _role in self._shadow_models:
+                try:
+                    est.fit(X, y_class)
+                    n_ok += 1
+                except Exception as exc:
+                    if self._logger:
+                        self._logger(f"[shadow_lab] {name} fit failed: {exc}")
+            self._shadow_fitted = n_ok > 0
+            if self._logger:
+                self._logger(
+                    f"[shadow_lab] trained {n_ok}/{len(self._shadow_models)} shadow models"
+                )
+
     # ── Inference ─────────────────────────────────────────────────────────────
 
     def _agree_threshold(self):
@@ -633,15 +847,22 @@ class VoxEnsemble:
         Returns
         -------
         dict
-            ``class_proba``        — float in [0, 1]: weighted P(class=1) (alias: ``mean_proba``).
-            ``mean_proba``         — same as ``class_proba`` (backward-compatible alias).
-            ``weighted_mean``      — float: user-weight-adjusted mean (equals class_proba if no custom weights).
-            ``std_proba``          — float: std-dev of per-model probabilities.
-            ``n_agree``            — int: models with P(class=1) >= agree_threshold.
+            ``class_proba``        — float: active-role mean P(class=1) (backward-compat).
+            ``mean_proba``         — same as ``class_proba``.
+            ``std_proba``          — float: std-dev of active-role probabilities.
+            ``n_agree``            — int: active-role models with P >= agree_threshold.
+            ``active_mean``        — float: mean of active-role models.
+            ``active_std``         — float: std-dev of active-role models.
+            ``active_n_agree``     — int: active-role models passing agree threshold.
+            ``active_votes``       — dict[str, float]: active-role model probas.
+            ``shadow_votes``       — dict[str, float]: shadow-role model probas.
+            ``diagnostic_votes``   — dict[str, float]: diagnostic-role model probas.
+            ``excluded_models``    — dict[str, str]: non-active model_id -> reason.
+            ``weighted_mean``      — float: user-weight-adjusted active mean.
             ``vote_threshold``     — float: threshold used for agreement counting.
-            ``pred_return``        — float: weighted-average predicted net return (0.0 if regressors not trained).
-            ``return_dispersion``  — float: std-dev of regressor predictions (0.0 if unavailable).
-            ``per_model``          — dict[str, float]: model_name -> P(class=1).
+            ``pred_return``        — float: weighted-average predicted net return.
+            ``return_dispersion``  — float: std-dev of regressor predictions.
+            ``per_model``          — dict[str, float]: all models (active+shadow+diag).
             ``votes``              — same as ``per_model`` (alias for clarity).
 
         Raises
@@ -652,8 +873,9 @@ class VoxEnsemble:
             raise RuntimeError("VoxEnsemble.fit() must be called before inference.")
 
         X_arr  = np.atleast_2d(X)
+        roles  = self._model_roles
 
-        # ── Classifier probabilities ──────────────────────────────────────────
+        # ── Classifier probabilities (VotingClassifier models) ────────────────
         probas = {}
         for name, est in self._model.named_estimators_.items():
             try:
@@ -662,26 +884,71 @@ class VoxEnsemble:
                 p = 0.5
             probas[name] = p
 
-        # Use VotingClassifier's weighted prediction for the aggregate.
-        try:
-            mean_p = float(self._model.predict_proba(X_arr)[0, 1])
-        except Exception:
-            mean_p = float(np.mean(list(probas.values())))
+        # ── Shadow / diagnostic model probabilities ───────────────────────────
+        shadow_probas = {}
+        if self._shadow_fitted:
+            for name, est, role in self._shadow_models:
+                try:
+                    p = float(est.predict_proba(X_arr)[0, 1])
+                except Exception:
+                    p = 0.5
+                shadow_probas[name] = (p, role)
 
+        # ── Role-split per-model probas ───────────────────────────────────────
+        active_votes     = {}
+        diagnostic_votes = {}
+        excluded_models  = {}
+
+        for mid, p in probas.items():
+            role = roles.get(mid, "active")
+            if role == "active":
+                active_votes[mid] = p
+            elif role == "diagnostic":
+                diagnostic_votes[mid] = p
+                excluded_models[mid]  = "diagnostic_only"
+            # shadow / disabled: should not appear in VotingClassifier probas
+
+        shadow_votes = {}
+        for mid, (p, role) in shadow_probas.items():
+            if role == "shadow":
+                shadow_votes[mid] = p
+            elif role == "diagnostic":
+                diagnostic_votes[mid] = p
+                excluded_models[mid]  = "diagnostic_only"
+
+        # ── Active-only statistics ────────────────────────────────────────────
         agree_thr = self._agree_threshold()
-        std_p     = float(np.std(list(probas.values())))
-        n_agree   = int(sum(1 for p in probas.values() if p >= agree_thr))
-
-        # Optional user-configured weighted mean
-        uw = self._user_model_weights
-        if uw:
-            total_w = sum(uw.get(m, 1.0) for m in probas)
-            if total_w > 0:
-                weighted_mean = sum(uw.get(m, 1.0) * p for m, p in probas.items()) / total_w
-            else:
-                weighted_mean = float(np.mean(list(probas.values())))
+        if active_votes:
+            active_vals  = list(active_votes.values())
+            active_mean  = float(np.mean(active_vals))
+            active_std   = float(np.std(active_vals))
+            active_nagree = int(sum(1 for v in active_vals if v >= agree_thr))
         else:
-            weighted_mean = mean_p
+            # Fallback: no active models — use all VotingClassifier models
+            all_vals     = list(probas.values()) or [0.5]
+            active_mean  = float(np.mean(all_vals))
+            active_std   = float(np.std(all_vals))
+            active_nagree = int(sum(1 for v in all_vals if v >= agree_thr))
+
+        # Optional user-configured weighted mean (over active models only)
+        uw = self._user_model_weights
+        if uw and active_votes:
+            total_w = sum(uw.get(m, 1.0) for m in active_votes)
+            if total_w > 0:
+                weighted_mean = sum(uw.get(m, 1.0) * p for m, p in active_votes.items()) / total_w
+            else:
+                weighted_mean = active_mean
+        else:
+            weighted_mean = active_mean
+
+        # ── Shadow aggregate statistics ───────────────────────────────────────
+        if shadow_votes:
+            sv = list(shadow_votes.values())
+            shadow_mean = float(np.mean(sv))
+            shadow_std  = float(np.std(sv))
+        else:
+            shadow_mean = 0.0
+            shadow_std  = 0.0
 
         # ── Regression predictions ────────────────────────────────────────────
         pred_return       = 0.0
@@ -701,17 +968,35 @@ class VoxEnsemble:
                 pred_return   = sum(p * w for p, w in zip(reg_preds, reg_ws)) / total_w
                 return_dispersion = float(np.std(reg_preds)) if len(reg_preds) > 1 else 0.0
 
+        # ── All-model dict (for logging / backward compat) ────────────────────
+        all_probas = dict(probas)
+        all_probas.update({mid: p for mid, (p, _role) in shadow_probas.items()})
+
         return {
-            "class_proba":       mean_p,        # v2 primary key (VotingClassifier result)
-            "mean_proba":        mean_p,         # backward-compat alias
-            "weighted_mean":     weighted_mean,  # user-weight-adjusted (equals mean_p by default)
-            "std_proba":         std_p,
-            "n_agree":           n_agree,
+            # Active-only values — used for trading (backward-compat fields map here)
+            "class_proba":       active_mean,    # backward compat → active mean
+            "mean_proba":        active_mean,    # backward compat alias
+            "std_proba":         active_std,     # backward compat → active std
+            "n_agree":           active_nagree,  # backward compat → active n_agree
+            # Explicit active role fields
+            "active_mean":       active_mean,
+            "active_std":        active_std,
+            "active_n_agree":    active_nagree,
+            "active_votes":      active_votes,
+            # Shadow/diagnostic role fields (never affect trading)
+            "shadow_mean":       shadow_mean,
+            "shadow_std":        shadow_std,
+            "shadow_votes":      shadow_votes,
+            "diagnostic_votes":  diagnostic_votes,
+            "excluded_models":   excluded_models,
+            # Weighted mean (over active models, user-weight-adjusted)
+            "weighted_mean":     weighted_mean,
             "vote_threshold":    agree_thr,
             "pred_return":       pred_return,
             "return_dispersion": return_dispersion,
-            "per_model":         probas,
-            "votes":             probas,         # alias for clarity in journal/logs
+            # All-model dicts (for logging / trade journal)
+            "per_model":         all_probas,
+            "votes":             all_probas,    # alias for clarity in journal/logs
         }
 
     def predict_with_confidence_batch(self, X):
@@ -754,17 +1039,26 @@ class VoxEnsemble:
             except Exception:
                 proba_per_model[name] = np.full(N, 0.5, dtype=float)
 
-        model_names = list(proba_per_model.keys())
-        arr         = np.stack([proba_per_model[m] for m in model_names], axis=1)  # (N, M)
-        stds        = arr.std(axis=1)
-        agree_thr   = self._agree_threshold()
-        agrees      = (arr >= agree_thr).sum(axis=1)
+        # ── Shadow model probabilities (batch) ────────────────────────────────
+        shadow_proba_per_model = {}  # id -> (array, role)
+        if self._shadow_fitted:
+            for name, est, role in self._shadow_models:
+                try:
+                    shadow_proba_per_model[name] = (
+                        est.predict_proba(X)[:, 1].astype(float), role
+                    )
+                except Exception:
+                    shadow_proba_per_model[name] = (np.full(N, 0.5, dtype=float), role)
 
-        # VotingClassifier weighted predictions
+        roles     = self._model_roles
+        agree_thr = self._agree_threshold()
+
+        # VotingClassifier weighted predictions (kept for internal reference)
         try:
             means = self._model.predict_proba(X)[:, 1].astype(float)
         except Exception:
-            means = arr.mean(axis=1)
+            all_names = list(proba_per_model.keys())
+            means = np.stack([proba_per_model[m] for m in all_names], axis=1).mean(axis=1)
 
         # ── Regression predictions (batch) ────────────────────────────────────
         reg_preds_list = []   # list of (array_of_length_N, weight)
@@ -790,28 +1084,86 @@ class VoxEnsemble:
 
         out = []
         for i in range(N):
-            per_model_i = {m: float(proba_per_model[m][i]) for m in model_names}
-            # Optional user-configured weighted mean
-            uw = self._user_model_weights
-            if uw:
-                total_w = sum(uw.get(m, 1.0) for m in per_model_i)
-                if total_w > 0:
-                    wm = sum(uw.get(m, 1.0) * p for m, p in per_model_i.items()) / total_w
-                else:
-                    wm = float(means[i])
+            per_model_i = {m: float(proba_per_model[m][i]) for m in proba_per_model}
+
+            # Role-split
+            active_votes_i     = {}
+            diagnostic_votes_i = {}
+            excluded_models_i  = {}
+            for mid, p in per_model_i.items():
+                role = roles.get(mid, "active")
+                if role == "active":
+                    active_votes_i[mid] = p
+                elif role == "diagnostic":
+                    diagnostic_votes_i[mid] = p
+                    excluded_models_i[mid]  = "diagnostic_only"
+
+            shadow_votes_i = {}
+            for mid, (arr_p, role) in shadow_proba_per_model.items():
+                p = float(arr_p[i])
+                if role == "shadow":
+                    shadow_votes_i[mid] = p
+                elif role == "diagnostic":
+                    diagnostic_votes_i[mid] = p
+                    excluded_models_i[mid]  = "diagnostic_only"
+                per_model_i[mid] = p
+
+            # Active statistics
+            if active_votes_i:
+                av = list(active_votes_i.values())
+                am  = float(np.mean(av))
+                ast = float(np.std(av))
+                ana = int(sum(1 for v in av if v >= agree_thr))
             else:
-                wm = float(means[i])
+                fallback = list(per_model_i.values()) or [0.5]
+                am  = float(np.mean(fallback))
+                ast = float(np.std(fallback))
+                ana = int(sum(1 for v in fallback if v >= agree_thr))
+
+            # Shadow statistics
+            if shadow_votes_i:
+                sv    = list(shadow_votes_i.values())
+                sm    = float(np.mean(sv))
+                sstd  = float(np.std(sv))
+            else:
+                sm    = 0.0
+                sstd  = 0.0
+
+            # Optional user-configured weighted mean (over active models only)
+            uw = self._user_model_weights
+            if uw and active_votes_i:
+                total_w = sum(uw.get(m, 1.0) for m in active_votes_i)
+                if total_w > 0:
+                    wm = sum(uw.get(m, 1.0) * p for m, p in active_votes_i.items()) / total_w
+                else:
+                    wm = am
+            else:
+                wm = am
+
             out.append({
-                "class_proba":       float(means[i]),
-                "mean_proba":        float(means[i]),   # backward-compat
+                # Backward-compat fields → active values
+                "class_proba":       am,
+                "mean_proba":        am,
+                "std_proba":         ast,
+                "n_agree":           ana,
+                # Explicit active role fields
+                "active_mean":       am,
+                "active_std":        ast,
+                "active_n_agree":    ana,
+                "active_votes":      active_votes_i,
+                # Shadow/diagnostic
+                "shadow_mean":       sm,
+                "shadow_std":        sstd,
+                "shadow_votes":      shadow_votes_i,
+                "diagnostic_votes":  diagnostic_votes_i,
+                "excluded_models":   excluded_models_i,
+                # Other
                 "weighted_mean":     wm,
-                "std_proba":         float(stds[i]),
-                "n_agree":           int(agrees[i]),
                 "vote_threshold":    agree_thr,
                 "pred_return":       float(pred_returns[i]),
                 "return_dispersion": float(ret_dispersions[i]),
                 "per_model":         per_model_i,
-                "votes":             per_model_i,   # alias
+                "votes":             per_model_i,
             })
         return out
 
@@ -844,6 +1196,16 @@ class VoxEnsemble:
         saved_weights = getattr(saved, "_user_model_weights", {})
         if saved_weights and not self._user_model_weights:
             self._user_model_weights = saved_weights
+        # Restore model roles if saved (v6+); older pickles keep defaults.
+        saved_roles = getattr(saved, "_model_roles", {})
+        if saved_roles:
+            self._model_roles.update(saved_roles)
+        # Restore shadow models if saved (v6+); older pickles keep defaults.
+        saved_shadows = getattr(saved, "_shadow_models", [])
+        saved_shadow_fitted = getattr(saved, "_shadow_fitted", False)
+        if saved_shadows and saved_shadow_fitted:
+            self._shadow_models  = saved_shadows
+            self._shadow_fitted  = True
 
     def set_logger(self, logger):
         """Attach (or replace) the logger callable. Not persisted."""

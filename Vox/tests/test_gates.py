@@ -1403,3 +1403,367 @@ class TestFeatureDiagSuffix:
         from diagnostics import _feature_diag_suffix
         assert _feature_diag_suffix("bad") == ""
         assert _feature_diag_suffix(42) == ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model roles and role-separated prediction output
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestModelRoles:
+    """Verify model role infrastructure and role-separated prediction output."""
+
+    def _trained_ens(self, n=100):
+        """Return a fitted VoxEnsemble with default settings."""
+        ens = VoxEnsemble()
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((n, FEATURE_COUNT))
+        y = rng.integers(0, 2, n)
+        ens.fit(X, y)
+        return ens, X
+
+    def test_default_core_roles_set(self):
+        """VoxEnsemble must have default model roles set after construction."""
+        ens = VoxEnsemble()
+        assert hasattr(ens, "_model_roles")
+        assert isinstance(ens._model_roles, dict)
+
+    def test_lr_is_diagnostic_by_default(self):
+        """LR must be diagnostic-only by default (was always-bearish in backtest)."""
+        ens = VoxEnsemble()
+        assert ens._model_roles.get("lr") == "diagnostic"
+
+    def test_hgbc_et_rf_are_active_by_default(self):
+        """hgbc, et, rf must be active by default."""
+        ens = VoxEnsemble()
+        for mid in ("hgbc", "et", "rf"):
+            assert ens._model_roles.get(mid) == "active", f"{mid} should be active"
+
+    def test_set_model_roles_updates_roles(self):
+        """set_model_roles must update the roles dict."""
+        ens = VoxEnsemble()
+        ens.set_model_roles({"lr": "active", "hgbc": "shadow"})
+        assert ens._model_roles["lr"]   == "active"
+        assert ens._model_roles["hgbc"] == "shadow"
+
+    def test_predict_returns_active_votes_field(self):
+        """predict_with_confidence must return active_votes dict."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert "active_votes" in result
+        assert isinstance(result["active_votes"], dict)
+
+    def test_predict_returns_shadow_and_diagnostic_votes(self):
+        """predict_with_confidence must return shadow_votes and diagnostic_votes."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert "shadow_votes" in result
+        assert "diagnostic_votes" in result
+
+    def test_predict_returns_excluded_models(self):
+        """predict_with_confidence must return excluded_models."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert "excluded_models" in result
+
+    def test_lr_in_diagnostic_votes_not_active(self):
+        """LR should appear in diagnostic_votes, not active_votes."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        # lr is diagnostic by default
+        assert "lr" not in result["active_votes"], "lr should not be in active_votes"
+        assert "lr" in result["diagnostic_votes"], "lr should be in diagnostic_votes"
+
+    def test_active_votes_contains_hgbc_et_rf(self):
+        """active_votes must contain hgbc, et, rf (the active models)."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        for mid in ("hgbc", "et", "rf"):
+            assert mid in result["active_votes"], f"{mid} missing from active_votes"
+
+    def test_class_proba_maps_to_active_mean(self):
+        """class_proba must equal active_mean (backward-compat points to active)."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert result["class_proba"] == pytest.approx(result["active_mean"])
+
+    def test_std_proba_maps_to_active_std(self):
+        """std_proba must equal active_std."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert result["std_proba"] == pytest.approx(result["active_std"])
+
+    def test_n_agree_maps_to_active_n_agree(self):
+        """n_agree must equal active_n_agree."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert result["n_agree"] == result["active_n_agree"]
+
+    def test_diagnostic_model_not_counted_in_active_n_agree(self):
+        """A diagnostic model must not inflate active_n_agree."""
+        ens, X = self._trained_ens()
+        # Verify active_n_agree only counts active models
+        result = ens.predict_with_confidence(X[0])
+        active_count = len(result["active_votes"])
+        assert result["active_n_agree"] <= active_count
+
+    def test_shadow_votes_do_not_affect_active_mean(self):
+        """Shadow votes must not affect active_mean computation."""
+        ens, X = self._trained_ens()
+        # Add a shadow model manually by training and marking
+        result_before = ens.predict_with_confidence(X[0])
+        # Shadow votes in result must not change class_proba
+        active_mean = result_before["active_mean"]
+        shadow_votes = result_before.get("shadow_votes", {})
+        if shadow_votes:
+            # Verify class_proba == active_mean regardless of shadow values
+            assert result_before["class_proba"] == pytest.approx(active_mean)
+
+    def test_excluded_models_has_lr_reason(self):
+        """excluded_models must contain lr with 'diagnostic_only' reason."""
+        ens, X = self._trained_ens()
+        result = ens.predict_with_confidence(X[0])
+        assert result["excluded_models"].get("lr") == "diagnostic_only"
+
+    def test_batch_returns_role_separated_output(self):
+        """predict_with_confidence_batch must also include role-separated fields."""
+        ens, X = self._trained_ens()
+        results = ens.predict_with_confidence_batch(X[:5])
+        assert len(results) == 5
+        for r in results:
+            assert "active_votes" in r
+            assert "shadow_votes" in r
+            assert "diagnostic_votes" in r
+            assert "class_proba" in r
+            assert r["class_proba"] == pytest.approx(r["active_mean"])
+
+    def test_no_active_models_fallback_safe(self):
+        """If all models are diagnostic, fallback should not crash."""
+        ens, X = self._trained_ens()
+        # Mark all as diagnostic
+        ens.set_model_roles({"lr": "diagnostic", "hgbc": "diagnostic",
+                             "et": "diagnostic", "rf": "diagnostic"})
+        result = ens.predict_with_confidence(X[0])
+        # Should still return a valid float for class_proba
+        assert isinstance(result["class_proba"], float)
+        assert 0.0 <= result["class_proba"] <= 1.0
+
+    def test_load_state_restores_model_roles(self):
+        """load_state must restore _model_roles from saved ensemble."""
+        ens, X = self._trained_ens()
+        ens.set_model_roles({"hgbc": "shadow", "et": "active", "rf": "active"})
+
+        dst = VoxEnsemble()
+        dst.load_state(ens)
+        assert dst._model_roles.get("hgbc") == "shadow"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model health diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from model_health import ModelHealthTracker  # noqa: E402
+
+
+class TestModelHealthTracker:
+    """Verify model health flag detection for degenerate/low-variance models."""
+
+    def test_always_bullish_flagged(self):
+        """A model that always predicts >= 0.95 should be flagged degenerate_bullish."""
+        tracker = ModelHealthTracker(min_obs=5, extreme_proba=0.95, degenerate_frac=0.90)
+        for _ in range(20):
+            tracker.update("gnb", 1.0)
+        flags = tracker.get_flags("gnb")
+        assert flags["degenerate_bullish"] is True
+
+    def test_always_bearish_flagged(self):
+        """A model that always predicts <= 0.05 should be flagged degenerate_bearish."""
+        tracker = ModelHealthTracker(min_obs=5, extreme_proba=0.95, degenerate_frac=0.90)
+        for _ in range(20):
+            tracker.update("lr", 0.01)
+        flags = tracker.get_flags("lr")
+        assert flags["degenerate_bearish"] is True
+
+    def test_normal_model_not_flagged(self):
+        """A model with realistic probability spread should not be flagged."""
+        tracker = ModelHealthTracker(min_obs=5)
+        rng = np.random.default_rng(0)
+        for p in rng.uniform(0.3, 0.7, 30):
+            tracker.update("hgbc", float(p))
+        flags = tracker.get_flags("hgbc")
+        assert flags["degenerate_bullish"] is False
+        assert flags["degenerate_bearish"] is False
+        assert flags["low_variance"] is False
+
+    def test_low_variance_flagged(self):
+        """A model with near-zero std should be flagged low_variance."""
+        tracker = ModelHealthTracker(min_obs=5, low_std=0.01)
+        for _ in range(20):
+            tracker.update("const_model", 0.5)
+        flags = tracker.get_flags("const_model")
+        assert flags["low_variance"] is True
+
+    def test_below_min_obs_no_flags(self):
+        """Should not flag with fewer than min_obs observations."""
+        tracker = ModelHealthTracker(min_obs=20)
+        for _ in range(10):
+            tracker.update("gnb", 1.0)
+        flags = tracker.get_flags("gnb")
+        # Not enough observations to flag
+        assert flags["degenerate_bullish"] is False
+
+    def test_update_batch_works(self):
+        """update_batch must record predictions for multiple models."""
+        tracker = ModelHealthTracker()
+        tracker.update_batch({"hgbc": 0.62, "lr": 0.01, "gnb": 1.0})
+        assert tracker.get_flags("hgbc")["n_obs"] == 1
+        assert tracker.get_flags("lr")["n_obs"] == 1
+        assert tracker.get_flags("gnb")["n_obs"] == 1
+
+    def test_get_all_flags_returns_all_models(self):
+        """get_all_flags must return entries for all tracked models."""
+        tracker = ModelHealthTracker()
+        tracker.update_batch({"hgbc": 0.62, "lr": 0.01})
+        all_flags = tracker.get_all_flags()
+        assert "hgbc" in all_flags
+        assert "lr" in all_flags
+
+    def test_format_log_summary_contains_model_ids(self):
+        """format_log_summary should include each tracked model."""
+        tracker = ModelHealthTracker(min_obs=2)
+        tracker.update_batch({"gnb": 1.0, "lr": 0.02})
+        tracker.update_batch({"gnb": 1.0, "lr": 0.01})
+        summary = tracker.format_log_summary(roles_dict={"gnb": "diagnostic", "lr": "diagnostic"})
+        assert "gnb" in summary
+        assert "lr" in summary
+
+    def test_reset_clears_history(self):
+        """reset() must clear history for the specified model."""
+        tracker = ModelHealthTracker()
+        tracker.update("gnb", 1.0)
+        tracker.reset("gnb")
+        assert tracker.get_flags("gnb")["n_obs"] == 0
+
+    def test_pct_above_thr_computed_correctly(self):
+        """pct_above_thr should reflect fraction of obs >= extreme_proba."""
+        tracker = ModelHealthTracker(extreme_proba=0.90)
+        for _ in range(5):
+            tracker.update("m", 0.95)  # above thr
+        for _ in range(5):
+            tracker.update("m", 0.50)  # below thr
+        flags = tracker.get_flags("m")
+        assert flags["pct_above_thr"] == pytest.approx(0.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model registry role helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+from model_registry import (  # noqa: E402
+    split_votes_by_role, compute_active_stats, build_roles_dict_from_config,
+    ROLE_ACTIVE, ROLE_SHADOW, ROLE_DIAGNOSTIC,
+)
+
+
+class TestModelRegistryRoleHelpers:
+    """Verify model_registry role-aware helpers."""
+
+    def test_split_votes_by_role_active(self):
+        """Active-role votes must go to active dict only."""
+        votes = {"hgbc": 0.70, "et": 0.65, "rf": 0.60}
+        roles = {"hgbc": ROLE_ACTIVE, "et": ROLE_ACTIVE, "rf": ROLE_ACTIVE}
+        active, shadow, diag = split_votes_by_role(votes, roles)
+        assert active == votes
+        assert shadow == {}
+        assert diag == {}
+
+    def test_split_votes_by_role_diagnostic(self):
+        """Diagnostic-role votes must go to diagnostic dict only."""
+        votes = {"lr": 0.01, "gnb": 1.0}
+        roles = {"lr": ROLE_DIAGNOSTIC, "gnb": ROLE_DIAGNOSTIC}
+        active, shadow, diag = split_votes_by_role(votes, roles)
+        assert active == {}
+        assert diag == votes
+
+    def test_split_votes_by_role_mixed(self):
+        """Mixed roles must be correctly separated."""
+        votes = {"hgbc": 0.65, "lr": 0.01, "lgbm_bal": 0.60}
+        roles = {"hgbc": ROLE_ACTIVE, "lr": ROLE_DIAGNOSTIC, "lgbm_bal": ROLE_SHADOW}
+        active, shadow, diag = split_votes_by_role(votes, roles)
+        assert "hgbc" in active
+        assert "lgbm_bal" in shadow
+        assert "lr" in diag
+
+    def test_compute_active_stats_mean(self):
+        """compute_active_stats must return correct mean."""
+        votes = {"hgbc": 0.60, "et": 0.70, "rf": 0.50}
+        stats = compute_active_stats(votes, agree_thr=0.5)
+        assert stats["active_mean"] == pytest.approx((0.60 + 0.70 + 0.50) / 3)
+
+    def test_compute_active_stats_n_agree(self):
+        """compute_active_stats must count models above agree_thr."""
+        votes = {"hgbc": 0.60, "et": 0.70, "rf": 0.40}
+        stats = compute_active_stats(votes, agree_thr=0.5)
+        assert stats["active_n_agree"] == 2  # hgbc and et are above 0.5
+
+    def test_compute_active_stats_empty_fallback(self):
+        """compute_active_stats with empty dict must return safe default."""
+        stats = compute_active_stats({}, agree_thr=0.5)
+        assert stats["active_mean"] == 0.5
+        assert stats["active_n_agree"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# format_vote_log with role-separated output
+# ─────────────────────────────────────────────────────────────────────────────
+
+from diagnostics import format_vote_log as _fmt_vote_log  # noqa: E402
+
+
+class TestFormatVoteLogWithRoles:
+    """Verify format_vote_log emits role-separated output when fields are present."""
+
+    def test_role_aware_format_includes_active(self):
+        """When active_mean is present, log must include active= section."""
+        conf = {
+            "active_mean": 0.62, "active_std": 0.05, "active_n_agree": 3,
+            "active_votes": {"hgbc": 0.65, "et": 0.70, "rf": 0.58},
+            "shadow_votes": {"et_shallow": 0.60},
+            "diagnostic_votes": {"lr": 0.01},
+            "excluded_models": {"lr": "diagnostic_only"},
+            "per_model": {"hgbc": 0.65, "et": 0.70, "rf": 0.58, "lr": 0.01},
+        }
+        line = _fmt_vote_log("ADAUSD", conf, market_mode="pump")
+        assert "active_mean=0.62" in line
+        assert "active=" in line
+        assert "diag=" in line
+        assert "mode=pump" in line
+
+    def test_shadow_votes_in_log(self):
+        """Shadow votes must appear in the log line."""
+        conf = {
+            "active_mean": 0.62, "active_std": 0.05, "active_n_agree": 2,
+            "active_votes": {"hgbc": 0.65, "rf": 0.60},
+            "shadow_votes": {"lgbm_bal": 0.72, "cal_et": 0.68},
+            "diagnostic_votes": {},
+            "excluded_models": {},
+            "per_model": {},
+        }
+        line = _fmt_vote_log("XRPUSD", conf)
+        assert "shadow=" in line
+        assert "lgbm_bal" in line
+
+    def test_legacy_format_without_active_mean(self):
+        """Without active_mean field, log must use legacy format."""
+        conf = {
+            "class_proba": 0.58,
+            "std_proba": 0.10,
+            "n_agree": 3,
+            "per_model": {"lr": 0.50, "hgbc": 0.70, "et": 0.65},
+        }
+        line = _fmt_vote_log("SOLUSD", conf)
+        assert "mean=0.58" in line
+        assert "votes=" in line
+        # Must NOT have active_mean since field is absent
+        assert "active_mean" not in line

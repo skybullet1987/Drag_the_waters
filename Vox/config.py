@@ -153,6 +153,48 @@ MODEL_WEIGHT_LGBM         = 1.0
 MODEL_WEIGHT_XGB          = 1.0
 MODEL_WEIGHT_CATBOOST     = 1.0
 
+# ── Model roles ────────────────────────────────────────────────────────────────
+# Roles: "active" | "shadow" | "diagnostic" | "disabled"
+#
+#   active     — contributes to ensemble vote; affects trading confidence.
+#   shadow     — predicted and logged but NEVER affects trading decisions.
+#   diagnostic — predicted and logged for risk/veto/debug only.
+#   disabled   — skipped entirely (not trained or predicted).
+#
+# Backward-compat: class_proba / std_proba / n_agree map to ACTIVE values only.
+# GNB is diagnostic by default because vote_gnb=1.0 on every entry (degenerate).
+# LR is diagnostic because it was always bearish (~0.006-0.023 on all entries).
+MODEL_ROLE_LR       = "diagnostic"  # always-bearish observed; diagnostic-only
+MODEL_ROLE_HGBC     = "active"
+MODEL_ROLE_ET       = "active"
+MODEL_ROLE_RF       = "active"
+MODEL_ROLE_GNB      = "diagnostic"  # degenerate: always-bullish (vote_gnb=1.0)
+MODEL_ROLE_LGBM     = "shadow"
+MODEL_ROLE_XGB      = "shadow"
+MODEL_ROLE_CATBOOST = "shadow"
+
+# ── Shadow model lab ───────────────────────────────────────────────────────────
+# When True, additional shadow models (ET/RF variants, calibrated variants, etc.)
+# are trained and predicted alongside the active ensemble.  Shadow predictions
+# are logged but never affect trading.  Disable to reduce training time.
+ENABLE_SHADOW_MODEL_LAB    = True
+SHADOW_MODEL_MAX_COUNT     = 12   # cap on total shadow models trained
+
+# ── Model health diagnostics ──────────────────────────────────────────────────
+# Track per-model rolling probability statistics to flag degenerate models.
+# Flags: degenerate_bullish | degenerate_bearish | low_variance
+MODEL_HEALTH_ENABLED        = True
+MODEL_HEALTH_MIN_OBS        = 20    # minimum observations before flagging
+MODEL_HEALTH_EXTREME_PROBA  = 0.95  # threshold for "extreme" probability
+MODEL_HEALTH_DEGENERATE_FRAC = 0.90 # fraction of obs above/below that triggers flag
+MODEL_HEALTH_LOW_STD        = 0.01  # std below this → low_variance flag
+
+# ── Optional active std/disagreement gate ─────────────────────────────────────
+# Disabled by default — trade count is already low; enabling would reduce it.
+# When enabled, ruthless ML entries are blocked if active_std > threshold.
+RUTHLESS_USE_ACTIVE_STD_GATE   = False
+RUTHLESS_MAX_ACTIVE_STD_PROBA  = 0.30
+
 # ── Trade journal config ──────────────────────────────────────────────────────
 # persist_trade_journal: when True, journal records accumulate in memory and
 # are available via self._trade_journal.get_records() / to_json().

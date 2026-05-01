@@ -34,9 +34,15 @@ def _feature_diag_suffix(ft):
 # ── Vote log formatting ───────────────────────────────────────────────────────
 
 def format_vote_log(symbol, conf, meta_score=None, market_mode=None):
-    """Format a compact per-model vote log line.
+    """Format a compact per-model vote log line with role-separated vote groups.
 
-    Example output::
+    Example output (with roles)::
+
+        [vote] ADAUSD active_mean=0.62 active_std=0.05 agree=3/3 mode=pump
+               active=hgbc:0.70,et:0.67,rf:0.61
+               shadow=et_shallow:0.64,cal_et:0.65 diag=lr:0.01
+
+    Falls back to legacy format when role fields are absent::
 
         [vote] ADAUSD mean=0.64 std=0.05 agree=5/6 meta=0.59
                votes=lr:0.55,hgbc:0.62,et:0.70,rf:0.58
@@ -52,6 +58,36 @@ def format_vote_log(symbol, conf, meta_score=None, market_mode=None):
     -------
     str
     """
+    # Prefer active-role statistics when available
+    if "active_mean" in conf:
+        mean    = conf["active_mean"]
+        std     = conf["active_std"]
+        n_agree = conf["active_n_agree"]
+        total   = len(conf.get("active_votes", {}))
+        line = (
+            f"[vote] {symbol}"
+            f" active_mean={mean:.2f} active_std={std:.2f}"
+            f" agree={n_agree}/{total}"
+        )
+        if meta_score is not None:
+            line += f" meta={meta_score:.2f}"
+        if market_mode is not None:
+            line += f" mode={market_mode}"
+        av = conf.get("active_votes", {})
+        if av:
+            line += " active=" + ",".join(f"{m}:{v:.2f}" for m, v in av.items())
+        sv = conf.get("shadow_votes", {})
+        if sv:
+            line += " shadow=" + ",".join(f"{m}:{v:.2f}" for m, v in sv.items())
+        dv = conf.get("diagnostic_votes", {})
+        if dv:
+            line += " diag=" + ",".join(f"{m}:{v:.2f}" for m, v in dv.items())
+        excl = conf.get("excluded_models", {})
+        if excl:
+            line += " excluded=" + ",".join(f"{m}:{r}" for m, r in excl.items())
+        return line
+
+    # Legacy format (no role fields)
     mean    = conf.get("class_proba", conf.get("mean_proba", 0.0))
     std     = conf.get("std_proba", 0.0)
     n_agree = conf.get("n_agree", 0)
