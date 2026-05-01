@@ -928,11 +928,15 @@ class VoxEnsemble:
             active_std   = float(np.std(active_vals))
             active_nagree = int(sum(1 for v in active_vals if v >= agree_thr))
         else:
-            # Fallback: no active models — use all VotingClassifier models
-            all_vals     = list(probas.values()) or [0.5]
-            active_mean  = float(np.mean(all_vals))
-            active_std   = float(np.std(all_vals))
-            active_nagree = int(sum(1 for v in all_vals if v >= agree_thr))
+            # Fallback: no active models — use only non-diagnostic VotingClassifier
+            # models (shadow/unclassified) to avoid including degenerate diagnostics.
+            fallback_vals = [
+                p for mid, p in probas.items()
+                if roles.get(mid, "active") not in ("diagnostic", "disabled")
+            ] or list(probas.values()) or [0.5]
+            active_mean  = float(np.mean(fallback_vals))
+            active_std   = float(np.std(fallback_vals))
+            active_nagree = int(sum(1 for v in fallback_vals if v >= agree_thr))
 
         # Optional user-configured weighted mean (over active models only)
         uw = self._user_model_weights
@@ -1119,10 +1123,14 @@ class VoxEnsemble:
                 ast = float(np.std(av))
                 ana = int(sum(1 for v in av if v >= agree_thr))
             else:
-                fallback = list(per_model_i.values()) or [0.5]
-                am  = float(np.mean(fallback))
-                ast = float(np.std(fallback))
-                ana = int(sum(1 for v in fallback if v >= agree_thr))
+                # Fallback: exclude diagnostics from the fallback pool too
+                fb = [
+                    p for mid, p in per_model_i.items()
+                    if roles.get(mid, "active") not in ("diagnostic", "disabled")
+                ] or list(per_model_i.values()) or [0.5]
+                am  = float(np.mean(fb))
+                ast = float(np.std(fb))
+                ana = int(sum(1 for v in fb if v >= agree_thr))
 
             # Shadow statistics
             if shadow_votes_i:

@@ -113,7 +113,7 @@ class ModelHealthTracker:
             }
 
         mean_p = sum(hist) / n
-        std_p  = _std(hist)
+        std_p  = _population_std(hist)
         low_thr = 1.0 - self._extreme_proba
         pct_above = sum(1 for p in hist if p >= self._extreme_proba) / n
         pct_below = sum(1 for p in hist if p <= low_thr) / n
@@ -202,7 +202,7 @@ class ModelHealthTracker:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _std(vals):
+def _population_std(vals):
     """Population std-dev of a list of floats (pure-Python, no numpy)."""
     n = len(vals)
     if n < 2:
