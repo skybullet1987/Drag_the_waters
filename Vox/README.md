@@ -1526,3 +1526,222 @@ Check with `wc -c Vox/*.py` before deploying.  Current sizes:
 - `config.py` — ~27,000 chars
 - `execution.py` — ~11,000 chars
 - `trade_journal.py`, `diagnostics.py`, `model_registry.py`, `tuning.py` — < 15,000 each
+
+---
+
+## Ruthless Profit-Voting Mode
+
+### Overview
+
+`RUTHLESS_PROFIT_VOTING_MODE = True` (set in `config.py`) activates a distinct
+vote-score/ranking-based entry gate for the `ruthless` risk profile.  Balanced,
+conservative, and aggressive profiles are **not affected**.
+
+In profit-voting mode, candidates must pass:
+1. The standard ruthless confirmation gate (strong_ml / trend_momentum / market_mode).
+2. An additional **vote-score gate** requiring a minimum `vote_yes_fraction`
+   and `top3_mean` across active-role models.
+3. For `chop` market mode: a stricter **supermajority gate**.
+
+Startup log shows whether profit-voting is active:
+```
+[profile] risk_profile=ruthless profit_voting=True
+[profile] chop_rule=supermajority_only vote_threshold=0.55 yes_frac_min=0.50 top3_mean_min=0.62
+```
+
+### Vote-Score Fields
+
+Each candidate evaluation produces:
+
+| Field | Description |
+|-------|-------------|
+| `active_model_count` | Number of active-role models |
+| `vote_yes_fraction` | Fraction of active models with P ≥ `vote_threshold` (0.55) |
+| `top3_mean` | Mean of the top-3 active model probabilities |
+| `vote_score` | Weighted composite: `0.4×active_mean + 0.3×vote_yes_fraction + 0.3×top3_mean` |
+
+Entry requires (trend / pump): `vote_yes_fraction >= 0.50` AND `top3_mean >= 0.62`.
+
+Entry requires (chop): `vote_yes_fraction >= 0.70` AND `top3_mean >= 0.75`
+AND `pred_return >= 0.01` AND `ev_score >= 0.01`.
+
+### Active vs Shadow vs Diagnostic Model Roles
+
+| Role | Affects trading? | Persisted/logged? | Purpose |
+|------|-----------------|-------------------|---------|
+| `active` | **Yes** | Yes | Ensemble decision (trading confidence) |
+| `shadow` | No | Yes | Safe test-bench for future models |
+| `diagnostic` | No | Yes | Veto/risk/debug signals |
+| `disabled` | No | No | Off entirely |
+
+Backward-compatible fields (`class_proba`, `std_proba`, `n_agree`) **always map
+to active-role values only**, so non-ruthless code paths remain unaffected.
+
+### Default Model Roles
+
+| Model | Default role | Notes |
+|-------|-------------|-------|
+| `rf` | active | Core ensemble |
+| `et` | active | Core ensemble |
+| `hgbc` | active | Core ensemble |
+| `gnb` | **diagnostic** | Always-bullish (vote_gnb=1.0); never inflates n_agree |
+| `lr` | **diagnostic** | Always-bearish (0.006–0.023); used as veto signal only |
+| `lgbm` | shadow | Optional; only if USE_LIGHTGBM=True |
+| `xgb` | shadow | Optional; only if USE_XGBOOST=True |
+
+**GNB quarantine rationale:** live data showed `vote_gnb=1.0` on every trade.
+This would inflate `n_agree` and `class_proba` regardless of real signal quality.
+It is now `MODEL_ROLE_GNB = "diagnostic"` with `MODEL_WEIGHT_GNB = 0.0`.
+
+**LR quarantine rationale:** live data showed `vote_lr ≈ 0.006–0.023` on every
+trade.  As an always-bearish model, it was suppressing `active_mean` without
+adding discrimination.  It is `MODEL_ROLE_LR = "diagnostic"` with
+`MODEL_WEIGHT_LR = 0.0` by default.
+
+### Extended Shadow Lab Models
+
+The `shadow_lab.py` module adds additional shadow and diagnostic models when
+`ENABLE_SHADOW_LAB_EXTENDED = True`:
+
+**Buy-probability shadow models** (role: `shadow`):
+- `gbc` — GradientBoostingClassifier (compact, QC-friendly)
+- `ada` — AdaBoostClassifier (compact, QC-friendly)
+
+**Regime/risk diagnostic models** (role: `diagnostic`):
+- `markov_regime` — Logistic-regression-based regime diagnostic
+  (uptrend / downtrend / chop detection from ret_4, ret_16, vol_ratio)
+- `hmm_regime` — Optional GaussianHMM regime model (requires `hmmlearn`);
+  falls back to `markov_regime` if unavailable
+- `kmeans_regime` — KMeans-based regime clustering (4 clusters)
+- `isoforest_risk` — IsolationForest anomaly score (unusual market setups)
+
+These models output a probability-like score but are **never used as direct buy
+votes**.  Their outputs are persisted under `shadow_votes` and `diagnostic_votes`
+in the trade journal for post-hoc attribution.
+
+### Candidate Journal
+
+`CandidateJournal` records the top-N candidates (configurable) from each decision
+cycle — including **skipped candidates** — for post-hoc analysis.
+
+Enabled by `PERSIST_CANDIDATE_JOURNAL = True` (default: `True`).
+
+Each record contains:
+```json
+{
+  "time": "2025-03-01 12:00:00",
+  "symbol": "SOLUSD",
+  "rank": 1,
+  "selected": true,
+  "reject_reason": null,
+  "market_mode": "risk_on_trend",
+  "vote_score": 0.712,
+  "active_mean": 0.68,
+  "active_std": 0.05,
+  "active_n_agree": 3,
+  "vote_yes_fraction": 0.67,
+  "top3_mean": 0.75,
+  "pred_return": 0.025,
+  "ev_score": 0.0082,
+  "active_votes": {"rf": 0.72, "et": 0.68, "hgbc": 0.71},
+  "shadow_votes": {"gbc": 0.65, "ada": 0.60},
+  "diagnostic_votes": {"gnb": 1.0, "lr": 0.01, "markov_regime": 0.70},
+  "entry_path": "ml"
+}
+```
+
+Access records from a Research notebook:
+```python
+from QuantConnect.Research import QuantBook
+qb = QuantBook()
+import json
+if qb.object_store.contains_key("vox/trade_log.jsonl"):
+    lines = qb.object_store.read("vox/trade_log.jsonl").splitlines()
+    # Filter entry_attempt records
+    entries = [json.loads(l) for l in lines if '"event": "entry_attempt"' in l]
+```
+
+### Ruthless Payoff Floor
+
+To prevent the "tiny scalp" failure mode (`avg_win = +0.24%`), ruthless mode
+enforces a minimum TP floor:
+
+```python
+RUTHLESS_MIN_TP = 0.04   # do not target wins < +4%
+```
+
+The ATR-based TP may be larger; this is a floor, not a ceiling.  Average wins
+should be in the +3–10% range for ruthless mode.
+
+---
+
+## Clearing ObjectStore Logs Before Comparing Windows
+
+**Always clear old logs before switching between date windows or profiles.**
+Stale logs from a prior run mix with new results and produce confusing stats.
+
+Run this in a QuantConnect Research notebook:
+```python
+from QuantConnect.Research import QuantBook
+qb = QuantBook()
+
+for key in ["vox/trade_log.jsonl"]:
+    if qb.object_store.contains_key(key):
+        qb.object_store.delete(key)
+        print("deleted", key)
+
+# Optionally delete model for fresh retrain (useful when comparing profiles):
+# if qb.object_store.contains_key("vox/model.pkl"):
+#     qb.object_store.delete("vox/model.pkl")
+```
+
+**Never compare balanced vs ruthless results in the same ObjectStore session.**
+Each test window needs a clean log.
+
+---
+
+## Reproducible Tuning Workflow
+
+1. Clear ObjectStore logs (see above).
+2. Set `risk_profile = ruthless` (or `balanced`) in QC parameters.
+3. Run backtest for a defined date window (e.g. Jan 2025 – May 2026).
+4. Export trade log from Research: filter `event = entry_attempt`.
+5. Inspect `vote_score`, `vote_yes_fraction`, `top3_mean` on taken trades.
+6. Inspect skipped-candidate journal to see what the model was ranking.
+7. Check `shadow_votes` to see if `gbc` / `ada` would have agreed.
+8. **Do not tune thresholds** based on < 30 trades — the sample is too small.
+
+### How to Promote a Shadow Model
+
+Before promoting any shadow model to active role:
+- Shadow model must have ≥ 30 yes-votes in the journal across multiple windows.
+- `avg_return_when_yes > 0` across multiple periods.
+- `win_rate_when_yes > 0.50` across multiple periods.
+- Not degenerate (not always-bullish or always-bearish).
+- Not redundant with existing active models (check correlation of votes).
+
+To promote:
+1. Add model ID to the `RUTHLESS_ACTIVE_MODELS` list in `config.py`.
+2. Change its `MODEL_ROLE_xxx` constant from `"shadow"` to `"active"`.
+3. Set a non-zero `MODEL_WEIGHT_xxx` (start with 0.75 to weight it below peers).
+4. Retrain model (delete `vox/model.pkl`, run fresh backtest).
+5. Validate on a held-out window before enabling for live trading.
+
+---
+
+## QuantConnect File-Size Constraint
+
+Every individual Python file must remain **under 63,000 characters**.
+Check with:
+```bash
+wc -c Vox/*.py
+```
+
+If a file is over the limit, move helper logic to a new module.  Current files:
+- `main.py` — ~61,800 chars
+- `models.py` — ~62,700 chars
+- `config.py` — ~37,000 chars
+- `execution.py` — ~12,900 chars
+- `shadow_lab.py` — ~12,900 chars
+- `model_registry.py`, `diagnostics.py`, `market_mode.py`, `meta_model.py` — < 13,000 each
+- `candidate_journal.py`, `profit_voting.py` — < 8,000 each
