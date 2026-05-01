@@ -24,7 +24,8 @@ from market_mode    import MarketModeDetector
 from meta_model     import MetaFilter
 from infra          import hydrate_state_from_history
 from diagnostics    import format_vote_log, _feature_diag_suffix
-from model_registry import format_model_registry_log
+from model_registry import format_model_registry_log, build_roles_dict_from_config
+import config as _cfg_module
 
 np.random.seed(42)
 random.seed(42)
@@ -166,7 +167,9 @@ class VoxAlgorithm(QCAlgorithm):
                 self._ensemble.set_logger(self.log)
             self._model_ready = self._ensemble.is_fitted
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
-        self.log(format_model_registry_log(self._ensemble._estimators))
+        # Apply model roles from config (active/shadow/diagnostic)
+        self._ensemble.set_model_roles(build_roles_dict_from_config(_cfg_module))
+        self.log(format_model_registry_log(self._ensemble._estimators, roles_dict=self._ensemble._model_roles))
 
         # ── Position state ────────────────────────────────────────────────────
         self._pos_sym          = None
@@ -1089,6 +1092,7 @@ class VoxAlgorithm(QCAlgorithm):
             )
 
         # Log trade attempt to persistence
+        _cd_top = conf_data[top_sym]
         self._persistence.log_trade({
             "event":        "entry_attempt",
             "time":         str(self.time),
@@ -1098,9 +1102,11 @@ class VoxAlgorithm(QCAlgorithm):
             "alloc":        alloc,
             "class_proba":  class_proba_top,
             "pred_return":  pred_return_top,
-            "n_agree":      conf_data[top_sym]["n_agree"],
-            "std_proba":    conf_data[top_sym]["std_proba"],
-            "model_votes":  conf_data[top_sym].get("per_model", {}),
+            "n_agree":      _cd_top["n_agree"],
+            "std_proba":    _cd_top["std_proba"],
+            "model_votes":  _cd_top.get("per_model", {}),
+            "active_votes": _cd_top.get("active_votes", {}),
+            "shadow_votes": _cd_top.get("shadow_votes", {}),
             "tp":           tp_use,
             "sl":           sl_use,
             "ev_score":     ev_top,
@@ -1110,8 +1116,8 @@ class VoxAlgorithm(QCAlgorithm):
             "market_mode":  _market_mode,
             "confirm":      _top_confirm,
         })
-        if self._log_model_votes and conf_data[top_sym].get("per_model"):
-            self.log(format_vote_log(top_sym.value, conf_data[top_sym], market_mode=_market_mode))
+        if self._log_model_votes and _cd_top.get("per_model"):
+            self.log(format_vote_log(top_sym.value, _cd_top, market_mode=_market_mode))
 
     # ── Retrain ───────────────────────────────────────────────────────────────
 

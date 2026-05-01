@@ -173,3 +173,198 @@ features targeting high-conviction breakout setups.
 > discarded on load (via `load_state` feature-count mismatch check) and a full
 > retrain will be scheduled.
 
+
+---
+
+## Shadow Model Lab & Active-Vote Health Controls
+
+This section documents the model role infrastructure added to make it safe to
+test new ML models without risking degenerate signals affecting live trading.
+
+### Why this was needed
+
+Analysis of 11 completed trades (Jan 2025–Apr 2026) showed:
+
+| Model | Observation | Implication |
+|---|---|---|
+| `gnb` | `vote_gnb = 1.0` on every trade | Degenerate/always-bullish; inflates `n_agree` |
+| `lr`  | `vote_lr ≈ 0.006–0.023` on every trade | Always-bearish; never contributes a bullish signal |
+
+The profitable behavior was driven by market mode, momentum, and exit logic —
+not clean ML consensus.  Adding more models blindly would make this worse.
+
+### Model roles
+
+Each model has one of four roles:
+
+| Role | Training | Prediction | Affects trading |
+|---|---|---|---|
+| `active` | ✅ | ✅ | ✅ Yes — counted in `active_mean`, `n_agree` |
+| `shadow` | ✅ | ✅ | ❌ No — logged but never affects trades |
+| `diagnostic` | ✅ | ✅ | ❌ No — logged for risk/debug only |
+| `disabled` | ❌ | ❌ | ❌ Not trained or predicted |
+
+### Default model roles
+
+| Model | Default role | Reason |
+|---|---|---|
+| `hgbc` | `active` | Core booster, well-calibrated |
+| `et` | `active` | Diverse random trees |
+| `rf` | `active` | Bagged trees, stable |
+| `lr` | `diagnostic` | Always-bearish in observed data |
+| `gnb` | `diagnostic` | Always-bullish (vote_gnb=1.0); degenerate |
+| `lgbm` | `shadow` | Optional external; tested in shadow first |
+| `xgb` | `shadow` | Optional external; tested in shadow first |
+
+Configure via `config.py`:
+
+```python
+MODEL_ROLE_LR   = "diagnostic"   # was always-bearish
+MODEL_ROLE_GNB  = "diagnostic"   # was always-bullish
+MODEL_ROLE_HGBC = "active"
+MODEL_ROLE_ET   = "active"
+MODEL_ROLE_RF   = "active"
+MODEL_ROLE_LGBM = "shadow"
+MODEL_ROLE_XGB  = "shadow"
+```
+
+### Backward-compatible fields
+
+`class_proba`, `std_proba`, and `n_agree` in the prediction output now map to
+**active-role models only**.  This means degenerate diagnostic models (GNB, LR)
+no longer inflate these values.
+
+### Shadow model lab
+
+A set of compact shadow models is trained alongside the active ensemble.  They
+never affect trading.  Shadow models include:
+
+| ID | Type | Purpose |
+|---|---|---|
+| `et_shallow` | ExtraTrees, max_depth=3 | Less overfit variant |
+| `rf_shallow` | RandomForest, max_depth=3 | Less overfit variant |
+| `hgbc_l2` | HGBC, stronger L2 | Regularised booster |
+| `cal_et` | Calibrated ExtraTrees (cv=3) | Alternative calibration |
+| `cal_rf` | Calibrated RandomForest (cv=3) | Alternative calibration |
+| `lr_bal` | LogisticRegression, balanced | Diagnostic linear baseline |
+| `lgbm_bal` | LightGBM, balanced (if installed) | External shadow candidate |
+| `xgb_bal` | XGBoost, balanced (if installed) | External shadow candidate |
+
+Control via `config.py`:
+
+```python
+ENABLE_SHADOW_MODEL_LAB  = True
+SHADOW_MODEL_MAX_COUNT   = 12
+```
+
+### Model health diagnostics
+
+The `ModelHealthTracker` (in `model_health.py`) records rolling per-model
+probability statistics and emits health flags:
+
+| Flag | Condition |
+|---|---|
+| `degenerate_bullish` | ≥ 90% of predictions ≥ 0.95 |
+| `degenerate_bearish` | ≥ 90% of predictions ≤ 0.05 |
+| `low_variance` | rolling std < 0.01 |
+
+Example log output:
+
+```
+[model_health] gnb role=diagnostic n=50 mean=1.000 std=0.000 yes=100% flag=degenerate_bullish
+[model_health] lr  role=diagnostic n=50 mean=0.012 std=0.006 yes=0%   flag=degenerate_bearish
+[model_health] hgbc role=active    n=50 mean=0.620 std=0.085 yes=72%  flag=ok
+```
+
+Configure via `config.py`:
+
+```python
+MODEL_HEALTH_ENABLED        = True
+MODEL_HEALTH_MIN_OBS        = 20
+MODEL_HEALTH_EXTREME_PROBA  = 0.95
+MODEL_HEALTH_DEGENERATE_FRAC = 0.90
+MODEL_HEALTH_LOW_STD        = 0.01
+```
+
+### Optional active std gate
+
+A gate that blocks high-disagreement entries is available but **disabled by
+default** because trade count is already low:
+
+```python
+RUTHLESS_USE_ACTIVE_STD_GATE   = False   # enable with caution
+RUTHLESS_MAX_ACTIVE_STD_PROBA  = 0.30
+```
+
+### How to interpret model attribution data
+
+Enable vote logging to see per-trade role breakdowns:
+
+```python
+LOG_MODEL_VOTES = True
+```
+
+Log line example:
+
+```
+[vote] ADAUSD active_mean=0.62 active_std=0.05 agree=3/3 mode=pump
+       active=hgbc:0.70,et:0.67,rf:0.58
+       shadow=et_shallow:0.64,cal_et:0.65 diag=lr:0.01
+```
+
+Pull the trade log from ObjectStore (in a Research notebook):
+
+```python
+from QuantConnect.Research import QuantBook
+import json, pandas as pd
+
+qb = QuantBook()
+raw = qb.object_store.read("vox/trade_log.jsonl")
+rows = [json.loads(x) for x in raw.splitlines() if x.strip()]
+df = pd.DataFrame(rows)
+
+entries = df[df["event"] == "entry_attempt"].copy()
+# shadow_votes and active_votes fields are present for each entry
+```
+
+### How to promote a shadow model to active
+
+**Only promote after testing across multiple market periods**:
+
+- `2023`, `2024`, `2025`, `2026 YTD`
+- Bull periods, chop periods, selloffs
+
+Promotion criteria (per period):
+
+| Criterion | Threshold |
+|---|---|
+| `vote_yes_count` | ≥ 30 |
+| `avg_return_when_yes` | > 0 |
+| `win_rate_when_yes` | > strategy baseline |
+| Not degenerate | `degenerate_bullish` = False, `degenerate_bearish` = False |
+| Not redundant | < 0.95 correlation with existing active models |
+
+Then update `config.py`:
+
+```python
+MODEL_ROLE_LGBM = "active"   # promote from shadow to active
+```
+
+### Important: 11 trades is not enough
+
+The user's Jan 2025–Apr 2026 backtest had 22 orders.  At this sample size:
+
+- Win-rate confidence intervals span ±20–30 percentage points
+- Per-model attribution is highly noisy
+- Apparent model quality differences may be pure chance
+
+**Run multiple windows before drawing conclusions:**
+
+```
+2023 | 2024 | 2025 | 2026 YTD | bull periods | chop periods | selloffs
+```
+
+### QuantConnect file-size rule
+
+Every Python file deployed to QuantConnect must remain **under 63,000 characters**.
+If a module grows too large, split helper logic into a new file.
