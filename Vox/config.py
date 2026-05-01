@@ -529,11 +529,17 @@ def setup_risk_profile(algo):
         f" use_kelly={algo._use_kelly}"
         f" runner_mode={_runner_mode_val}"
     )
-    # Model role audit (active vs shadow vs diagnostic)
+    # Model role audit (active vs shadow vs diagnostic) — built from config lists
+    _active_str     = ",".join(getattr(algo, "_ruthless_active_models",
+                                       ["rf", "et", "hgbc"]) if algo._risk_profile == "ruthless"
+                               else ["rf", "et", "hgbc"])
+    _diag_str       = ",".join(getattr(algo, "_ruthless_diagnostic_models",
+                                       ["gnb", "lr"]) if algo._risk_profile == "ruthless"
+                               else ["gnb", "lr"])
     algo.log(
-        f"[profile] active_models=rf,et,hgbc"
-        f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lr_bal,lgbm_bal,gbc,ada"
-        f" diagnostic_models=gnb,lr,markov_regime,hmm_regime,kmeans_regime,isoforest_risk"
+        f"[profile] active_models={_active_str}"
+        f" diagnostic_models={_diag_str}"
+        f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lgbm_bal,gbc,ada"
     )
     if algo._risk_profile == "ruthless":
         _chop_rule = "supermajority_only" if _pv_mode else "standard"

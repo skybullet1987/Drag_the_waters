@@ -315,10 +315,13 @@ def evaluate_candidate(
             confidence_adj = max(0.0, 1.0 - std_proba)
             final_score = ev_after_costs * confidence_adj
 
-    # Incorporate vote_score as a tiebreaker in final_score for ruthless PV mode
+    # Incorporate vote_score as a tiebreaker in final_score for ruthless PV mode.
+    # Weights: 85% base EV/momentum score + 15% vote quality score.
+    _PV_BASE_SCORE_WEIGHT = 0.85
+    _PV_VOTE_SCORE_WEIGHT = 0.15
     if risk_profile == "ruthless" and ruthless_profit_voting_mode:
         vote_sc = conf.get("vote_score", 0.0)
-        final_score = 0.85 * final_score + 0.15 * vote_sc
+        final_score = _PV_BASE_SCORE_WEIGHT * final_score + _PV_VOTE_SCORE_WEIGHT * vote_sc
 
     return {
         "sym":               sym,

@@ -282,8 +282,10 @@ class IsoForestRiskDiagnostic:
             Xr = self._extract(X).astype(float)
             # decision_function: negative = anomaly, positive = normal
             scores = self._iso.decision_function(Xr)
-            # Re-scale to [0, 1]: anomaly probability increases as score goes negative
-            anom_prob = 1.0 / (1.0 + np.exp(10.0 * scores))
+            # Re-scale to [0, 1]: anomaly probability increases as score goes negative.
+            # Scale factor controls steepness of the sigmoid mapping.
+            _ANOMALY_SIGMOID_SCALE = 10.0
+            anom_prob = 1.0 / (1.0 + np.exp(_ANOMALY_SIGMOID_SCALE * scores))
             return np.column_stack([1.0 - anom_prob, anom_prob])
         except Exception:
             n = len(np.atleast_2d(X))

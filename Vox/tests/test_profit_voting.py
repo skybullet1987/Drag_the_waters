@@ -137,14 +137,13 @@ class TestProfitVotingGate:
         assert "top3_mean" in reason
 
     def test_chop_requires_supermajority(self):
-        # Would pass for trend (3/4 above 0.55) but fail for chop (needs 0.70 frac)
-        conf = self._make_conf({"rf": 0.7, "et": 0.72, "hgbc": 0.65, "lgbm": 0.35})
-        # yes_frac = 3/4 = 0.75 (barely meets chop threshold of 0.70)
+        # 3/4 models above 0.55 → yes_frac = 0.75 ≥ chop_threshold(0.70), but
+        # top3_mean = (0.72+0.70+0.65)/3 = 0.69 < chop_top3_min(0.75) → FAIL
+        conf = self._make_conf({"rf": 0.70, "et": 0.72, "hgbc": 0.65, "lgbm": 0.35})
         approved, reason = check_profit_voting_gate(conf, market_mode="chop",
                                                      chop_vote_yes_frac_min=0.70,
                                                      chop_top3_mean_min=0.75)
-        # top3_mean must also be >= 0.75
-        top3 = (0.72 + 0.70 + 0.65) / 3  # = 0.69 < 0.75 → should fail
+        # yes_frac = 3/4 = 0.75 (passes frac), but top3_mean ≈ 0.69 (fails top3)
         assert not approved
         assert "top3_mean" in reason
 
