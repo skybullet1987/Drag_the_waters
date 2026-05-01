@@ -924,8 +924,9 @@ class VoxAlgorithm(QCAlgorithm):
             # Journal top-N rejected candidates so the user can diagnose gate rejects
             if getattr(_cfg_module, "PERSIST_CANDIDATE_JOURNAL", True) and all_cand_conf:
                 _rej = build_rejected_candidate_records(
-                    all_cand_conf, _market_mode,
-                    getattr(_cfg_module, "CANDIDATE_JOURNAL_TOP_N", 5)
+                    all_cand_conf,
+                    market_mode=_market_mode,
+                    top_n=getattr(_cfg_module, "CANDIDATE_JOURNAL_TOP_N", 5),
                 )
                 if _rej:
                     self._candidate_journal.record_cycle(self.time, _rej)

@@ -277,9 +277,8 @@ def apply_ruthless_active_promotion(conf, active_models, diagnostic_models=None)
     # Update backward-compat fields to reflect promoted active pool
     if promoted:
         vals = list(promoted.values())
-        import numpy as _np
-        mean_v = float(_np.mean(vals))
-        std_v  = float(_np.std(vals))
+        mean_v = float(np.mean(vals))
+        std_v  = float(np.std(vals))
         nagree = int(sum(1 for v in vals if v >= 0.5))
         conf["class_proba"]    = mean_v
         conf["mean_proba"]     = mean_v

@@ -287,10 +287,10 @@ class TestProfileDifferences:
         # Core promoted models must be present
         for m in ("rf", "et", "hgbc_l2"):
             assert m in active, f"{m} missing from _ruthless_active_models"
-        # Diagnostic models must include gnb and lr
-        for m in ("gnb", "lr"):
+        # Diagnostic models must include gnb, lr, and lr_bal
+        for m in ("gnb", "lr", "lr_bal"):
             assert m in diag, f"{m} missing from _ruthless_diagnostic_models"
-        # gnb and lr must NOT be in active
+        # gnb, lr, and lr_bal must NOT be in active
         for m in ("gnb", "lr", "lr_bal"):
             assert m not in active, f"{m} must not be in _ruthless_active_models"
 
