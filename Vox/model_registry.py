@@ -196,6 +196,38 @@ def split_votes_by_role(votes, roles_dict):
     return active, shadow, diagnostic
 
 
+def compute_vote_score(active_votes, vote_thr=0.55):
+    """Compute profit-voting score fields from active-model votes.
+
+    Parameters
+    ----------
+    active_votes : dict[str, float]
+        Model-id -> P(class=1) for active-role models only.
+    vote_thr : float
+        Per-model yes/no threshold.
+
+    Returns
+    -------
+    dict with keys:
+        active_model_count  — int
+        vote_yes_fraction   — float in [0, 1]
+        top3_mean           — float: mean of top-3 active probabilities
+        vote_score          — float: weighted composite
+    """
+    import numpy as _np
+    if not active_votes:
+        return {"active_model_count": 0, "vote_yes_fraction": 0.0,
+                "top3_mean": 0.0, "vote_score": 0.0}
+    vals = sorted(active_votes.values(), reverse=True)
+    n    = len(vals)
+    am   = float(_np.mean(vals))
+    yf   = sum(1 for v in vals if v >= vote_thr) / n
+    t3   = float(_np.mean(vals[:3])) if vals else 0.0
+    vs   = 0.40 * am + 0.30 * yf + 0.30 * t3
+    return {"active_model_count": n, "vote_yes_fraction": yf,
+            "top3_mean": t3, "vote_score": vs}
+
+
 def compute_active_stats(active_votes, agree_thr=0.5):
     """Compute mean / std / n_agree from active-role votes only.
 
@@ -274,9 +306,15 @@ def build_weights_dict_from_config(config_module):
         MODEL_ID_HGBC:     "MODEL_WEIGHT_HGBC",
         MODEL_ID_ET:       "MODEL_WEIGHT_ET",
         MODEL_ID_RF:       "MODEL_WEIGHT_RF",
+        MODEL_ID_GNB:      "MODEL_WEIGHT_GNB",
         MODEL_ID_LGBM:     "MODEL_WEIGHT_LGBM",
         MODEL_ID_XGB:      "MODEL_WEIGHT_XGB",
         MODEL_ID_CATBOOST: "MODEL_WEIGHT_CATBOOST",
+        # Shadow/promoted models
+        "hgbc_l2":         "MODEL_WEIGHT_HGBC_L2",
+        "cal_et":          "MODEL_WEIGHT_CAL_ET",
+        "cal_rf":          "MODEL_WEIGHT_CAL_RF",
+        "lgbm_bal":        "MODEL_WEIGHT_LGBM_BAL",
     }
     result = {}
     for model_id, attr in mapping.items():

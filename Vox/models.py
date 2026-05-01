@@ -18,6 +18,7 @@ from sklearn.ensemble import (
 )
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
+from model_registry import compute_vote_score as _compute_vote_score
 
 # ── Optional external ML models with safe import guards ──────────────────────
 try:
@@ -627,6 +628,13 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             if logger:
                 logger(f"[shadow_lab] xgb_bal init failed: {exc}")
 
+    # ── Extended shadow lab (gbc/ada/markov/hmm/kmeans/isoforest) ────────────
+    try:
+        from shadow_lab import extend_shadow_estimators as _ext_sh
+        shadows = _ext_sh(shadows, max_count, logger)
+    except Exception:
+        pass
+
     return shadows[:max_count]
 
 
@@ -647,40 +655,16 @@ _DEFAULT_CORE_ROLES = {
 
 
 class VoxEnsemble:
-    """
-    Heterogeneous soft-voting ensemble for the Vox v2 strategy.
+    """Heterogeneous soft-voting ensemble for the Vox v2 strategy.
 
-    Classifiers (weighted soft voting)
-    -----------------------------------
-    - **LogisticRegression** (weight 0.20) — linear baseline.
-    - **HistGradientBoostingClassifier** (weight 0.35) — strong sklearn-native booster.
-    - **ExtraTreesClassifier** (weight 0.25) — randomised trees, diverse.
-    - **RandomForestClassifier** (weight 0.20) — bagged trees.
+    Classifiers (weighted soft voting): LR(0.20), HGBC(0.35), ET(0.25), RF(0.20).
+    Regressors (weighted avg predicted return): HGBC_R(0.40), ETR(0.35), Ridge(0.25).
+    GaussianNB excluded: always-bullish on crypto data; degrades calibration.
+    Tree classifiers wrapped in CalibratedClassifierCV(isotonic, cv=2).
 
-    GaussianNB is intentionally removed: at typical positive rates of 1–5 %
-    it dominates the soft vote with extreme probabilities and degrades calibration.
-
-    Regressors (weighted average of predicted return)
-    -------------------------------------------------
-    - **HistGradientBoostingRegressor** (weight 0.40)
-    - **ExtraTreesRegressor** (weight 0.35)
-    - **Ridge** (weight 0.25)
-
-    Trained on the cost-aware realised return from ``triple_barrier_outcome``.
-    Only used if ``y_return`` is provided to ``fit()``.
-
-    Tree classifiers are wrapped in CalibratedClassifierCV(method="isotonic", cv=2)
-    for reliable probability estimates.  HistGradientBoosting is well-calibrated
-    by design and is not additionally wrapped.
-
-    Shadow Model Lab
-    ----------------
-    When ``shadow_lab_enabled=True`` (the default), additional shadow models are
-    trained and predicted alongside the active ensemble.  Shadow predictions are
-    included in ``predict_with_confidence()`` output under ``shadow_votes`` and
-    ``diagnostic_votes`` but **never affect trading decisions**.
-
-    Model roles: active | shadow | diagnostic | disabled
+    Shadow Model Lab: when shadow_lab_enabled=True, extra models are trained and
+    predicted but never affect trading. See predict_with_confidence() for output.
+    Model roles: active | shadow | diagnostic | disabled.
     """
 
     def __init__(self, logger=None, use_calibration=True,
@@ -980,6 +964,7 @@ class VoxEnsemble:
         all_probas = dict(probas)
         all_probas.update({mid: p for mid, (p, _role) in shadow_probas.items()})
 
+        _vs = _compute_vote_score(active_votes)
         return {
             # Active-only values — used for trading (backward-compat fields map here)
             "class_proba":       active_mean,    # backward compat → active mean
@@ -991,6 +976,11 @@ class VoxEnsemble:
             "active_std":        active_std,
             "active_n_agree":    active_nagree,
             "active_votes":      active_votes,
+            # Profit-voting score fields
+            "active_model_count": _vs["active_model_count"],
+            "vote_yes_fraction":  _vs["vote_yes_fraction"],
+            "top3_mean":          _vs["top3_mean"],
+            "vote_score":         _vs["vote_score"],
             # Shadow/diagnostic role fields (never affect trading)
             "shadow_mean":       shadow_mean,
             "shadow_std":        shadow_std,
@@ -1132,6 +1122,8 @@ class VoxEnsemble:
                 ast = float(np.std(fb))
                 ana = int(sum(1 for v in fb if v >= agree_thr))
 
+            _vs_i = _compute_vote_score(active_votes_i)
+
             # Shadow statistics
             if shadow_votes_i:
                 sv    = list(shadow_votes_i.values())
@@ -1163,6 +1155,11 @@ class VoxEnsemble:
                 "active_std":        ast,
                 "active_n_agree":    ana,
                 "active_votes":      active_votes_i,
+                # Profit-voting score fields
+                "active_model_count": _vs_i["active_model_count"],
+                "vote_yes_fraction":  _vs_i["vote_yes_fraction"],
+                "top3_mean":          _vs_i["top3_mean"],
+                "vote_score":         _vs_i["vote_score"],
                 # Shadow/diagnostic
                 "shadow_mean":       sm,
                 "shadow_std":        sstd,

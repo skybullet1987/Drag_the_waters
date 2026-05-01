@@ -25,6 +25,7 @@ from meta_model     import MetaFilter
 from infra          import hydrate_state_from_history
 from diagnostics    import format_vote_log, _feature_diag_suffix
 from model_registry import format_model_registry_log, build_roles_dict_from_config
+from candidate_journal import CandidateJournal, build_candidate_records
 import config as _cfg_module
 
 np.random.seed(42)
@@ -90,13 +91,9 @@ class VoxAlgorithm(QCAlgorithm):
         self._label_horizon = int(self.get_parameter("label_horizon_bars")   or LABEL_HORIZON_BARS)
         self._label_cost_bps = float(self.get_parameter("label_cost_bps")    or LABEL_COST_BPS)
 
-        # ── Risk profile + momentum override setup ────────────────────────────
-        # Resolves effective profile (ruthless/aggressive/conservative/balanced)
-        # from QC parameters and applies gate/sizing overrides.  See config.py.
         setup_risk_profile(self)
 
-        # ── Ruthless v4: market mode detector + meta filter ───────────────────
-        self._market_mode_det  = None   # created after universe is ready
+        self._market_mode_det  = None
         self._meta_filter      = MetaFilter(
             enabled  = getattr(self, "_meta_filter_enabled", False),
             min_proba= getattr(self, "_meta_min_proba", 0.55),
@@ -108,7 +105,6 @@ class VoxAlgorithm(QCAlgorithm):
             (s for s in self._symbols if s.value.upper().startswith("BTC")), None
         )
 
-        # ── Slippage model ────────────────────────────────────────────────────
         for sym in self._symbols:
             self.securities[sym].set_slippage_model(ConstantSlippageModel(0.001))
 
@@ -118,48 +114,31 @@ class VoxAlgorithm(QCAlgorithm):
         _dq = lambda n=_state_max: deque(maxlen=n)
         self._state = {}
         for sym in self._symbols:
-            self._state[sym] = {
-                "closes":  _dq(),
-                "highs":   _dq(),
-                "lows":    _dq(),
-                "volumes": _dq(),
-            }
+            self._state[sym] = {"closes": _dq(), "highs": _dq(), "lows": _dq(), "volumes": _dq()}
 
-        # ── 5-minute consolidators ────────────────────────────────────────────
         for sym in self._symbols:
-            self.consolidate(
-                sym,
-                timedelta(minutes=RESOLUTION_MINUTES),
-                lambda bar, s=sym: self._on_5m(s, bar),
-            )
+            self.consolidate(sym, timedelta(minutes=RESOLUTION_MINUTES),
+                             lambda bar, s=sym: self._on_5m(s, bar))
 
-        # ── Regime filter (4h BTC consolidator wired inside) ──────────────────
         self._regime = RegimeFilter()
         if self._btc_sym:
             self._regime.update_btc(self, self._btc_sym)
 
-        # ── Market mode detector (4h BTC consolidator) ────────────────────────
         _mm_enabled = getattr(self, "_market_mode_enabled", False)
         if _mm_enabled and self._btc_sym:
             self._market_mode_det = MarketModeDetector()
             self._market_mode_det.update_btc(self, self._btc_sym)
 
-        # ── Risk manager ──────────────────────────────────────────────────────
         self._risk = RiskManager(
-            max_daily_sl     = self._max_sl,
-            cooldown_mins    = self._cd_mins,
-            sl_cooldown_mins = self._sl_cd,
-            max_dd_pct       = self._max_dd,
-            cash_buffer      = self._cb,
+            max_daily_sl=self._max_sl, cooldown_mins=self._cd_mins,
+            sl_cooldown_mins=self._sl_cd, max_dd_pct=self._max_dd, cash_buffer=self._cb,
         )
 
-        # ── Ensemble + persistence ────────────────────────────────────────────
         self._ensemble    = VoxEnsemble(logger=self.log, use_calibration=self._use_calibration)
         self._persistence = PersistenceManager(self)
         self._fill_tracker= PartialFillTracker()
         self._model_ready = False
 
-        # Try to load a previously trained model
         saved = self._persistence.load_model()
         if saved is not None:
             self._ensemble.load_state(saved)
@@ -195,6 +174,10 @@ class VoxAlgorithm(QCAlgorithm):
 
         self._entry_predictions = {}
         self._log_model_votes   = LOG_MODEL_VOTES
+        self._candidate_journal = CandidateJournal(
+            max_size=getattr(_cfg_module, "CANDIDATE_JOURNAL_MAX_SIZE", 2000),
+            top_n=getattr(_cfg_module, "CANDIDATE_JOURNAL_TOP_N", 5),
+        )
 
         # ── Per-symbol penalty cooldown ───────────────────────────────────────
         from collections import deque as _deque
@@ -228,9 +211,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── 5-minute bar handler ──────────────────────────────────────────────────
 
     def on_warmup_finished(self):
-        """Schedule initial hydration + training off the time loop via self.train().
-        Synchronous heavy work in on_warmup_finished can exceed QC's 10-minute
-        Isolator watchdog and crash the algorithm."""
+        """Schedule initial hydration + training off the time loop via self.train()."""
         self.log("[vox] Warmup finished — scheduling initial train off-loop.")
         self.train(self._initial_train)
 
@@ -528,11 +509,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Reconciliation ────────────────────────────────────────────────────────
 
     def _reconcile(self):
-        """
-        Compare internal tracking state against actual portfolio holdings.
-        Clears stale state when they diverge, so the next scoring pass starts
-        from a clean slate.
-        """
+        """Compare internal state against portfolio; clears stale state on divergence."""
         if self._pos_sym is not None:
             qty = self.portfolio[self._pos_sym].quantity
             if qty <= 0:
@@ -724,13 +701,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Entry logic ───────────────────────────────────────────────────────────
 
     def _try_enter(self):
-        """Score all symbols; if a clear winner passes all gates, place a buy order.
-
-        Gate pipeline: feature history → penalty cooldown → ensemble confidence
-        → dispersion → model agreement → EV gate → predicted-return gate
-        → final-score gap → regime filter → risk manager → pre-trade validation.
-        See README.md for full gate documentation.
-        """
+        """Score all symbols; if a clear winner passes all gates, place a buy order."""
         scores         = {}   # sym -> final_score
         conf_data      = {}   # sym -> confidence dict from ensemble
         tp_sl_data     = {}   # sym -> (tp_use, sl_use, atr, price) for re-use
@@ -859,6 +830,15 @@ class VoxAlgorithm(QCAlgorithm):
                 ruthless_good_mode_relaxation=getattr(self, "_good_mode_relaxation", True),
                 ruthless_good_mode_ev_min=getattr(self, "_good_mode_min_ev", 0.004),
                 ruthless_good_mode_volr_min=getattr(self, "_good_mode_volume_min", 1.3),
+                ruthless_profit_voting_mode=getattr(self, "_ruthless_profit_voting_mode", False),
+                pv_vote_threshold=getattr(self, "_pv_vote_threshold", 0.55),
+                pv_vote_yes_frac_min=getattr(self, "_pv_vote_yes_frac_min", 0.50),
+                pv_top3_mean_min=getattr(self, "_pv_top3_mean_min", 0.62),
+                pv_vote_ev_floor=getattr(self, "_pv_vote_ev_floor", 0.004),
+                pv_chop_yes_frac_min=getattr(self, "_pv_chop_yes_frac_min", 0.70),
+                pv_chop_top3_mean_min=getattr(self, "_pv_chop_top3_mean_min", 0.75),
+                pv_chop_pred_return_min=getattr(self, "_pv_chop_pred_return_min", 0.01),
+                pv_chop_ev_min=getattr(self, "_pv_chop_ev_min", 0.01),
             )
             if result is None:
                 continue
@@ -878,10 +858,10 @@ class VoxAlgorithm(QCAlgorithm):
             if result.get("confirm_reason"):
                 self._ruthless_confirm_reasons[sym] = result["confirm_reason"]
 
-        n_pass_disp     = counters["n_pass_disp"]
-        n_pass_agree    = counters["n_pass_agree"]
-        n_pass_score    = counters["n_pass_score"]
-        n_pass_ev       = counters["n_pass_ev"]
+        n_pass_disp = counters["n_pass_disp"]
+        n_pass_agree = counters["n_pass_agree"]
+        n_pass_score = counters["n_pass_score"]
+        n_pass_ev = counters["n_pass_ev"]
         n_pass_pred_ret = counters["n_pass_pred_ret"]
         n_momentum_override = counters["n_momentum_override"]
 
@@ -903,14 +883,13 @@ class VoxAlgorithm(QCAlgorithm):
                 f" class_proba={top_cd['class_proba']:.3f}"
                 f" std_proba={top_cd['std_proba']:.3f}"
                 f" n_agree={top_cd['n_agree']}"
+                f" vote_score={top_cd.get('vote_score',0):.4f}"
                 f" tp={top_tp:.4f} sl={top_sl:.4f}"
                 + (f" tp_floor={_tp_fl}" if _tp_fl else "")
                 + (f" sl_floor={_sl_fl}" if _sl_fl else "")
                 + (f" mo_overrides={n_momentum_override}" if n_momentum_override else "")
             )
         else:
-            # Throttle no-candidate summary to at most once per DIAG_INTERVAL_HOURS
-            # to protect QuantConnect's 100KB log cap during multi-year backtests.
             _emit_diag = (
                 self._last_nocandidate_diag_time is None
                 or (self.time - self._last_nocandidate_diag_time).total_seconds()
@@ -1107,6 +1086,9 @@ class VoxAlgorithm(QCAlgorithm):
             "model_votes":  _cd_top.get("per_model", {}),
             "active_votes": _cd_top.get("active_votes", {}),
             "shadow_votes": _cd_top.get("shadow_votes", {}),
+            "vote_score":         _cd_top.get("vote_score", 0.0),
+            "vote_yes_fraction":  _cd_top.get("vote_yes_fraction", 0.0),
+            "top3_mean":          _cd_top.get("top3_mean", 0.0),
             "tp":           tp_use,
             "sl":           sl_use,
             "ev_score":     ev_top,
@@ -1118,6 +1100,17 @@ class VoxAlgorithm(QCAlgorithm):
         })
         if self._log_model_votes and _cd_top.get("per_model"):
             self.log(format_vote_log(top_sym.value, _cd_top, market_mode=_market_mode))
+
+        # Record candidate journal (top-N candidates for post-hoc analysis)
+        if getattr(_cfg_module, "PERSIST_CANDIDATE_JOURNAL", True):
+            _cj_records = build_candidate_records(
+                ranked_results=ranked[:getattr(_cfg_module, "CANDIDATE_JOURNAL_TOP_N", 5)],
+                conf_data=conf_data, ev_data=ev_data, entry_path_data=entry_path_data,
+                scores=scores, market_mode=_market_mode,
+                confirm_reasons=getattr(self, "_ruthless_confirm_reasons", {}),
+                selected_sym=top_sym,
+            )
+            self._candidate_journal.record_cycle(self.time, _cj_records)
 
     # ── Retrain ───────────────────────────────────────────────────────────────
 
@@ -1181,13 +1174,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Per-symbol penalty cooldown ───────────────────────────────────────────
 
     def _is_in_penalty_cooldown(self, sym):
-        """
-        Return True if *sym* is currently blocked by the penalty cooldown.
-
-        The penalty cooldown is applied when a symbol has had
-        ``_penalty_losses`` consecutive SL exits.  It is independent of the
-        per-coin SL cooldown in RiskManager (which is much shorter).
-        """
+        """Return True if sym is currently blocked by the penalty cooldown."""
         penalty_until = self._sym_penalty_until.get(sym)
         if penalty_until is None:
             return False
@@ -1201,7 +1188,6 @@ class VoxAlgorithm(QCAlgorithm):
         """Apply penalty cooldown if sym has had _penalty_losses consecutive SL exits."""
         if not is_sl:
             return   # Only SL exits contribute to penalty counting
-
         outcomes = list(self._sym_outcomes.get(sym, []))
         if len(outcomes) < self._penalty_losses:
             return   # Not enough history yet
@@ -1221,15 +1207,7 @@ class VoxAlgorithm(QCAlgorithm):
     # ── Throttled diagnostic helper ───────────────────────────────────────────
 
     def _throttled_skip_debug(self, message: str) -> None:
-        """
-        Emit a debug-level diagnostic message for routine trade skips, but only
-        if at least SKIP_DIAG_INTERVAL_SECS seconds have elapsed since the last
-        such message.  This prevents QuantConnect from rate-limiting the browser
-        log during normal backtests where skip conditions fire every 15 minutes.
-
-        Important events (fills, exits, errors) must NOT use this helper — call
-        self.debug() or self.log() directly for those.
-        """
+        """Emit debug diagnostic for routine skips, throttled to SKIP_DIAG_INTERVAL_SECS."""
         now = self.time
         if (
             self._last_skip_diag_time is None

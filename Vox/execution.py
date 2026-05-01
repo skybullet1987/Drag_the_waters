@@ -1,6 +1,7 @@
 """Exit and entry execution helpers for Vox ruthless mode."""
 import numpy as np
 from datetime import timedelta
+from profit_voting import check_profit_voting_gate, format_profit_vote_log
 
 
 # ── Breakeven stop ──────────────────────────────────────────────────────────
@@ -135,6 +136,16 @@ def evaluate_candidate(
     ruthless_good_mode_relaxation=True,
     ruthless_good_mode_ev_min=0.004,
     ruthless_good_mode_volr_min=1.3,
+    # Profit-voting mode parameters (ruthless only)
+    ruthless_profit_voting_mode=False,
+    pv_vote_threshold=0.55,
+    pv_vote_yes_frac_min=0.50,
+    pv_top3_mean_min=0.62,
+    pv_vote_ev_floor=0.004,
+    pv_chop_yes_frac_min=0.70,
+    pv_chop_top3_mean_min=0.75,
+    pv_chop_pred_return_min=0.01,
+    pv_chop_ev_min=0.01,
 ):
     """Evaluate a single candidate for entry. Returns a result dict or None if filtered.
 
@@ -259,6 +270,29 @@ def evaluate_candidate(
         if confirm_reason is None:
             return None
 
+    # ── Profit-voting gate (ruthless profit-voting mode) ──────────────────────
+    # In profit-voting mode, entries additionally require a minimum vote-score
+    # ranking (vote_yes_fraction + top3_mean).  Chop entries require a
+    # stricter supermajority.  This gate is applied AFTER the standard ruthless
+    # confirmation gate so existing behavior is preserved in non-PV mode.
+    pv_reject_reason = None
+    if risk_profile == "ruthless" and ruthless_profit_voting_mode:
+        _pv_approved, _pv_reason = check_profit_voting_gate(
+            conf=conf,
+            market_mode=market_mode,
+            vote_thr=pv_vote_threshold,
+            vote_yes_frac_min=pv_vote_yes_frac_min,
+            top3_mean_min=pv_top3_mean_min,
+            chop_vote_yes_frac_min=pv_chop_yes_frac_min,
+            chop_top3_mean_min=pv_chop_top3_mean_min,
+            chop_pred_return_min=pv_chop_pred_return_min,
+            chop_ev_min=pv_chop_ev_min,
+            ev_score=ev_after_costs,
+        )
+        if not _pv_approved:
+            pv_reject_reason = _pv_reason
+            return None
+
     # Final score
     if use_momentum_score:
         momentum_score = compute_momentum_score_fn(feat)
@@ -281,6 +315,11 @@ def evaluate_candidate(
             confidence_adj = max(0.0, 1.0 - std_proba)
             final_score = ev_after_costs * confidence_adj
 
+    # Incorporate vote_score as a tiebreaker in final_score for ruthless PV mode
+    if risk_profile == "ruthless" and ruthless_profit_voting_mode:
+        vote_sc = conf.get("vote_score", 0.0)
+        final_score = 0.85 * final_score + 0.15 * vote_sc
+
     return {
         "sym":               sym,
         "final_score":       final_score,
@@ -293,4 +332,7 @@ def evaluate_candidate(
         "sl_floor_applied":  sl_floor_applied,
         "entry_path":        entry_path,
         "confirm_reason":    confirm_reason,
+        "vote_score":        conf.get("vote_score", 0.0),
+        "vote_yes_fraction": conf.get("vote_yes_fraction", 0.0),
+        "top3_mean":         conf.get("top3_mean", 0.0),
     }

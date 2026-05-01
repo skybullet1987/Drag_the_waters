@@ -141,17 +141,22 @@ USE_XGBOOST                      = False  # enable if xgboost installed
 USE_CATBOOST                     = False  # disabled: CatBoost is not available in the QC cloud environment
 
 # ── Per-model static weights (optional weighted ensemble) ─────────────────────
-# Default 1.0 for all models → unweighted mean (preserves current behavior).
-# Reduce a weak model's weight (e.g. 0.5) or zero it out (0.0) to exclude it.
-# Increase a strong model's weight (e.g. 2.0) to boost its influence.
-# CatBoost is never loaded by default; its weight is ignored unless USE_CATBOOST.
-MODEL_WEIGHT_LR           = 1.0
+# Default 1.0 for active models → unweighted mean (preserves current behavior).
+# GNB and LR are 0.0 by default: both are diagnostic-only (always-bullish /
+# always-bearish observed in live data) and must NOT inflate active consensus.
+MODEL_WEIGHT_LR           = 0.0   # diagnostic-only: was always-bearish (~0.006-0.023)
 MODEL_WEIGHT_HGBC         = 1.0
 MODEL_WEIGHT_ET           = 1.0
 MODEL_WEIGHT_RF           = 1.0
+MODEL_WEIGHT_GNB          = 0.0   # diagnostic-only: always-bullish (vote_gnb=1.0)
 MODEL_WEIGHT_LGBM         = 1.0
 MODEL_WEIGHT_XGB          = 1.0
 MODEL_WEIGHT_CATBOOST     = 1.0
+# Shadow model weights used in ruthless active pool if promoted
+MODEL_WEIGHT_HGBC_L2      = 1.0
+MODEL_WEIGHT_CAL_ET       = 0.75
+MODEL_WEIGHT_CAL_RF       = 0.75
+MODEL_WEIGHT_LGBM_BAL     = 1.0
 
 # ── Model roles ────────────────────────────────────────────────────────────────
 # Roles: "active" | "shadow" | "diagnostic" | "disabled"
@@ -173,12 +178,64 @@ MODEL_ROLE_LGBM     = "shadow"
 MODEL_ROLE_XGB      = "shadow"
 MODEL_ROLE_CATBOOST = "shadow"
 
+# ── Ruthless profit-voting mode ───────────────────────────────────────────────
+# When True and risk_profile=ruthless, use explicit profit-voting/vote-ranking
+# behavior instead of balanced-like cautious thresholds.
+# Has no effect on balanced / conservative / aggressive profiles.
+RUTHLESS_PROFIT_VOTING_MODE     = True
+
+# Ruthless active voting pool (promoted from shadow when available).
+# These models are used for vote_yes_fraction / top3_mean / vote_score ranking.
+# The pool is informational; actual active decisions are driven by model roles.
+RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "cal_et", "cal_rf", "lgbm_bal"]
+RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal"]
+RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
+
+# ── Profit-voting gate thresholds ─────────────────────────────────────────────
+# Used in ruthless profit-voting mode to gate entries via vote_score ranking.
+# vote_yes_fraction = fraction of active models with P >= RUTHLESS_VOTE_THRESHOLD.
+# top3_mean         = mean of the top-3 active model probabilities.
+RUTHLESS_VOTE_THRESHOLD         = 0.55   # per-model yes/no split threshold
+RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.50   # min yes-fraction for trend/pump entries
+RUTHLESS_TOP3_MEAN_MIN          = 0.62   # min top-3 mean for trend/pump entries
+RUTHLESS_VOTE_EV_FLOOR          = 0.004  # minimum EV required for profit-voting pass
+
+# ── Chop supermajority requirements (ruthless profit-voting mode) ─────────────
+# Chop entries are rare and require exceptional votes to proceed.
+RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.70   # supermajority yes-fraction in chop
+RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.75   # high top-3-mean required in chop
+RUTHLESS_CHOP_PRED_RETURN_MIN   = 0.01   # positive pred_return required in chop
+RUTHLESS_CHOP_EV_MIN            = 0.01   # stronger EV floor required in chop
+
+# ── Ruthless payoff floors ─────────────────────────────────────────────────────
+# Prevent ruthless mode from scalping tiny +0.2% wins (fixes collapsed avg_win).
+# These are MINIMUM values; ATR-based TP/SL may be larger.
+RUTHLESS_MIN_TP                 = 0.04   # do not intentionally target wins < +4 %
+# Trail and timeout parameters are already in the ruthless section above (v4).
+
+# ── Multi-position scaffold ───────────────────────────────────────────────────
+# SAFE SCAFFOLD — current implementation is single-position only.
+# Set RUTHLESS_MAX_CONCURRENT_POSITIONS = 1 for current behavior.
+# Set to 2 to opt into experimental 2-position mode (TODO: full multi-pos refactor).
+RUTHLESS_MAX_CONCURRENT_POSITIONS = 1    # scaffold only; >1 requires refactor
+RUTHLESS_MAX_NEW_ENTRIES_PER_DAY  = 3    # reference cap (informational for now)
+RUTHLESS_MAX_SYMBOL_ALLOCATION    = 0.45 # reference single-symbol cap (informational)
+
+# ── Candidate journal ─────────────────────────────────────────────────────────
+# When True, each decision cycle records the top-N candidates (selected + skipped)
+# for post-hoc analysis of missed opportunities.
+PERSIST_CANDIDATE_JOURNAL  = True
+CANDIDATE_JOURNAL_TOP_N    = 5     # candidates journaled per cycle
+CANDIDATE_JOURNAL_MAX_SIZE = 2000  # rolling memory cap
+
 # ── Shadow model lab ───────────────────────────────────────────────────────────
 # When True, additional shadow models (ET/RF variants, calibrated variants, etc.)
 # are trained and predicted alongside the active ensemble.  Shadow predictions
 # are logged but never affect trading.  Disable to reduce training time.
+# shadow_lab_extended: also enables gbc/ada/markov/hmm/kmeans/isoforest models.
 ENABLE_SHADOW_MODEL_LAB    = True
-SHADOW_MODEL_MAX_COUNT     = 12   # cap on total shadow models trained
+SHADOW_MODEL_MAX_COUNT     = 16   # increased cap for new shadow+diagnostic models
+ENABLE_SHADOW_LAB_EXTENDED = True  # enable gbc/ada/regime diagnostic models
 
 # ── Model health diagnostics ──────────────────────────────────────────────────
 # Track per-model rolling probability statistics to flag degenerate models.
@@ -403,6 +460,27 @@ def setup_risk_profile(algo):
         algo._good_mode_meta_min_proba      = RUTHLESS_GOOD_MODE_META_MIN_PROBA
         algo._good_mode_min_ev              = RUTHLESS_GOOD_MODE_MIN_EV
         algo._good_mode_volume_min          = RUTHLESS_GOOD_MODE_VOLUME_MIN
+        # Profit-voting mode — explicit vote-ranking instead of cautious thresholds
+        _pv_raw = algo.get_parameter("ruthless_profit_voting_mode")
+        if _pv_raw is not None:
+            algo._ruthless_profit_voting_mode = str(_pv_raw).lower() in ("true","1","yes")
+        else:
+            algo._ruthless_profit_voting_mode = RUTHLESS_PROFIT_VOTING_MODE
+        # Payoff floor — ruthless should not scalp tiny wins
+        algo._ruthless_min_tp = RUTHLESS_MIN_TP
+        # Profit-voting gate thresholds
+        algo._pv_vote_threshold        = RUTHLESS_VOTE_THRESHOLD
+        algo._pv_vote_yes_frac_min     = RUTHLESS_VOTE_YES_FRACTION_MIN
+        algo._pv_top3_mean_min         = RUTHLESS_TOP3_MEAN_MIN
+        algo._pv_vote_ev_floor         = RUTHLESS_VOTE_EV_FLOOR
+        # Chop supermajority thresholds
+        algo._pv_chop_yes_frac_min     = RUTHLESS_CHOP_VOTE_YES_FRAC_MIN
+        algo._pv_chop_top3_mean_min    = RUTHLESS_CHOP_TOP3_MEAN_MIN
+        algo._pv_chop_pred_return_min  = RUTHLESS_CHOP_PRED_RETURN_MIN
+        algo._pv_chop_ev_min           = RUTHLESS_CHOP_EV_MIN
+        # Enforce TP floor for ruthless (prevents tiny scalp exits)
+        if algo._tp < RUTHLESS_MIN_TP:
+            algo._tp = max(algo._tp, RUTHLESS_MIN_TP)
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -428,28 +506,58 @@ def setup_risk_profile(algo):
     )
     algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless")
 
-    # ── Startup profile log (unthrottled — important config visibility) ────────
+    # ── Startup profile audit log (unthrottled — important config visibility) ───
     _runner_mode_val   = getattr(algo, "_runner_mode",   False)
     _trail_after_tp    = getattr(algo, "_trail_after_tp", 0.0)
     _trail_pct         = getattr(algo, "_trail_pct",      0.0)
     _min_alloc         = getattr(algo, "_min_alloc",      0.0)
+    _pv_mode           = getattr(algo, "_ruthless_profit_voting_mode", False)
     algo.log(
-        f"[vox] PROFILE ACTIVE: risk_profile={algo._risk_profile}"
-        f"  score_min={algo._s_min}"
-        f"  min_ev={algo._min_ev:.5f}"
-        f"  pred_return_min={algo._pred_return_min:.5f}"
-        f"  allocation={algo._alloc}"
-        f"  min_alloc={_min_alloc}"
-        f"  max_alloc={algo._max_alloc}"
-        f"  use_kelly={algo._use_kelly}"
-        f"  take_profit={algo._tp}"
-        f"  stop_loss={algo._sl}"
-        f"  timeout_hours={algo._toh}"
-        f"  runner_mode={_runner_mode_val}"
-        f"  trail_after_tp={_trail_after_tp}"
-        f"  trail_pct={_trail_pct}"
+        f"[profile] risk_profile={algo._risk_profile}"
+        f" profit_voting={_pv_mode}"
+    )
+    algo.log(
+        f"[profile] tp={algo._tp:.3f} sl={algo._sl:.3f}"
+        f" timeout={algo._toh}h"
+        f" trail_after={_trail_after_tp:.3f}"
+        f" trail_pct={_trail_pct:.3f}"
+    )
+    algo.log(
+        f"[profile] alloc={algo._alloc:.2f}"
+        f" min_alloc={_min_alloc:.2f}"
+        f" max_alloc={algo._max_alloc:.2f}"
+        f" use_kelly={algo._use_kelly}"
+        f" runner_mode={_runner_mode_val}"
+    )
+    # Model role audit (active vs shadow vs diagnostic)
+    algo.log(
+        f"[profile] active_models=rf,et,hgbc"
+        f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lr_bal,lgbm_bal,gbc,ada"
+        f" diagnostic_models=gnb,lr,markov_regime,hmm_regime,kmeans_regime,isoforest_risk"
     )
     if algo._risk_profile == "ruthless":
+        _chop_rule = "supermajority_only" if _pv_mode else "standard"
+        algo.log(
+            f"[profile] chop_rule={_chop_rule}"
+            f" vote_threshold={getattr(algo, '_pv_vote_threshold', RUTHLESS_VOTE_THRESHOLD)}"
+            f" yes_frac_min={getattr(algo, '_pv_vote_yes_frac_min', RUTHLESS_VOTE_YES_FRACTION_MIN)}"
+            f" top3_mean_min={getattr(algo, '_pv_top3_mean_min', RUTHLESS_TOP3_MEAN_MIN)}"
+        )
+        algo.log(
+            f"[profile] chop_yes_frac_min={getattr(algo, '_pv_chop_yes_frac_min', RUTHLESS_CHOP_VOTE_YES_FRAC_MIN)}"
+            f" chop_top3_min={getattr(algo, '_pv_chop_top3_mean_min', RUTHLESS_CHOP_TOP3_MEAN_MIN)}"
+            f" chop_ev_min={getattr(algo, '_pv_chop_ev_min', RUTHLESS_CHOP_EV_MIN)}"
+        )
+        algo.log(
+            f"[vox] PROFILE ACTIVE: risk_profile={algo._risk_profile}"
+            f"  score_min={algo._s_min}"
+            f"  min_ev={algo._min_ev:.5f}"
+            f"  pred_return_min={algo._pred_return_min:.5f}"
+            f"  allocation={algo._alloc}"
+            f"  take_profit={algo._tp}"
+            f"  stop_loss={algo._sl}"
+            f"  timeout_hours={algo._toh}"
+        )
         algo.log(
             f"[vox] RUTHLESS v4 ACTIVE:"
             f"  sl_cooldown_mins={algo._sl_cd}"
@@ -477,4 +585,21 @@ def setup_risk_profile(algo):
             f"  use={getattr(algo, '_use_entry_limit_orders', False)}"
             f"  offset={ENTRY_LIMIT_OFFSET}"
             f"  ttl_min={ENTRY_LIMIT_TTL_MINUTES}"
+        )
+    else:
+        algo.log(
+            f"[vox] PROFILE ACTIVE: risk_profile={algo._risk_profile}"
+            f"  score_min={algo._s_min}"
+            f"  min_ev={algo._min_ev:.5f}"
+            f"  pred_return_min={algo._pred_return_min:.5f}"
+            f"  allocation={algo._alloc}"
+            f"  min_alloc={_min_alloc}"
+            f"  max_alloc={algo._max_alloc}"
+            f"  use_kelly={algo._use_kelly}"
+            f"  take_profit={algo._tp}"
+            f"  stop_loss={algo._sl}"
+            f"  timeout_hours={algo._toh}"
+            f"  runner_mode={_runner_mode_val}"
+            f"  trail_after_tp={_trail_after_tp}"
+            f"  trail_pct={_trail_pct}"
         )
