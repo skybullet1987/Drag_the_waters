@@ -198,3 +198,51 @@ def build_candidate_records(
             "final_score":       round(final_sc, 6),
         })
     return records
+
+
+def build_rejected_candidate_records(conf_dict, market_mode=None, top_n=5):
+    """Build rejected candidate records for cycles where no trades pass all gates.
+
+    Parameters
+    ----------
+    conf_dict   : dict[sym, conf] — all evaluated candidates (sym→conf from predict)
+    market_mode : str or None
+    top_n       : int — max records to build
+
+    Returns
+    -------
+    list[dict] — ready for CandidateJournal.record_cycle(), all with selected=False
+    """
+    if not conf_dict:
+        return []
+    # Sort by vote_score descending so the best rejected candidate is rank=1
+    ranked = sorted(
+        conf_dict.items(),
+        key=lambda kv: kv[1].get("vote_score", 0.0),
+        reverse=True,
+    )
+    records = []
+    for rank, (sym, conf) in enumerate(ranked[:top_n], start=1):
+        records.append({
+            "symbol":            getattr(sym, "value", str(sym)),
+            "rank":              rank,
+            "selected":          False,
+            "reject_reason":     "pv_no_pass",
+            "market_mode":       market_mode,
+            "confirm":           None,
+            "vote_score":        round(conf.get("vote_score", 0.0), 6),
+            "active_mean":       round(conf.get("active_mean", conf.get("class_proba", 0.0)), 4),
+            "active_std":        round(conf.get("active_std", conf.get("std_proba", 0.0)), 4),
+            "active_n_agree":    conf.get("active_n_agree", conf.get("n_agree", 0)),
+            "vote_yes_fraction": round(conf.get("vote_yes_fraction", 0.0), 4),
+            "top3_mean":         round(conf.get("top3_mean", 0.0), 4),
+            "pred_return":       round(conf.get("pred_return", 0.0), 6),
+            "ev_score":          0.0,
+            "active_votes":      conf.get("active_votes", {}),
+            "shadow_votes":      conf.get("shadow_votes", {}),
+            "diagnostic_votes":  conf.get("diagnostic_votes", {}),
+            "entry_path":        "ml",
+            "active_model_count": conf.get("active_model_count", 0),
+        })
+    return records
+
