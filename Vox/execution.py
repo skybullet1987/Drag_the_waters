@@ -1,7 +1,15 @@
 """Exit and entry execution helpers for Vox ruthless mode."""
 import numpy as np
 from datetime import timedelta
-from profit_voting import check_profit_voting_gate, format_profit_vote_log
+from profit_voting import (
+    check_profit_voting_gate,
+    format_profit_vote_log,
+    apply_ruthless_active_promotion,
+    make_pv_counters,
+    increment_pv_counter,
+    format_pv_reject_log,
+    DEFAULT_VOTE_EV_FLOOR,
+)
 
 
 # ── Breakeven stop ──────────────────────────────────────────────────────────
@@ -138,14 +146,17 @@ def evaluate_candidate(
     ruthless_good_mode_volr_min=1.3,
     # Profit-voting mode parameters (ruthless only)
     ruthless_profit_voting_mode=False,
-    pv_vote_threshold=0.55,
-    pv_vote_yes_frac_min=0.50,
-    pv_top3_mean_min=0.62,
-    pv_vote_ev_floor=0.004,
-    pv_chop_yes_frac_min=0.70,
-    pv_chop_top3_mean_min=0.75,
-    pv_chop_pred_return_min=0.01,
-    pv_chop_ev_min=0.01,
+    pv_vote_threshold=0.50,
+    pv_vote_yes_frac_min=0.34,
+    pv_top3_mean_min=0.55,
+    pv_vote_ev_floor=DEFAULT_VOTE_EV_FLOOR,
+    pv_chop_yes_frac_min=0.50,
+    pv_chop_top3_mean_min=0.60,
+    pv_chop_pred_return_min=0.000,
+    pv_chop_ev_min=0.002,
+    # Ruthless active model promotion (PV mode)
+    ruthless_active_models=None,
+    ruthless_diagnostic_models=None,
 ):
     """Evaluate a single candidate for entry. Returns a result dict or None if filtered.
 
@@ -275,8 +286,20 @@ def evaluate_candidate(
     # ranking (vote_yes_fraction + top3_mean).  Chop entries require a
     # stricter supermajority.  This gate is applied AFTER the standard ruthless
     # confirmation gate so existing behavior is preserved in non-PV mode.
+    #
+    # First, promote shadow models listed in RUTHLESS_ACTIVE_MODELS into the
+    # active voting pool (modifies conf in-place).
     pv_reject_reason = None
     if risk_profile == "ruthless" and ruthless_profit_voting_mode:
+        # Active-model promotion — makes RUTHLESS_ACTIVE_MODELS real, not informational
+        if ruthless_active_models:
+            apply_ruthless_active_promotion(conf, ruthless_active_models, ruthless_diagnostic_models)
+
+        # Warn if active pool is still empty after promotion
+        if not conf.get("active_votes"):
+            pv_reject_reason = "no_active_votes"
+            return None
+
         _pv_approved, _pv_reason = check_profit_voting_gate(
             conf=conf,
             market_mode=market_mode,
@@ -288,6 +311,7 @@ def evaluate_candidate(
             chop_pred_return_min=pv_chop_pred_return_min,
             chop_ev_min=pv_chop_ev_min,
             ev_score=ev_after_costs,
+            ev_floor=pv_vote_ev_floor,
         )
         if not _pv_approved:
             pv_reject_reason = _pv_reason

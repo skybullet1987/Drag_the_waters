@@ -22,6 +22,11 @@ from profit_voting import (
     check_profit_voting_gate,
     compute_vote_score as pv_compute_vote_score,
     format_profit_vote_log,
+    apply_ruthless_active_promotion,
+    make_pv_counters,
+    increment_pv_counter,
+    format_pv_reject_log,
+    format_pv_summary_log,
     DEFAULT_VOTE_THRESHOLD,
     DEFAULT_VOTE_YES_FRACTION_MIN,
     DEFAULT_TOP3_MEAN_MIN,
@@ -31,6 +36,7 @@ from profit_voting import (
 from candidate_journal import (
     CandidateJournal,
     build_candidate_records,
+    build_rejected_candidate_records,
     CANDIDATE_JOURNAL_TOP_N,
 )
 from shadow_lab import (
@@ -269,6 +275,24 @@ class TestProfileDifferences:
         """Balanced profile should not have ruthless settings."""
         balanced = self._get_profile_values("balanced")
         assert balanced._tp < 0.10   # balanced TP is low
+
+    def test_ruthless_stores_active_model_lists(self):
+        """Ruthless profile must store active and diagnostic model lists."""
+        ruthless = self._get_profile_values("ruthless")
+        assert hasattr(ruthless, "_ruthless_active_models")
+        assert hasattr(ruthless, "_ruthless_diagnostic_models")
+        active = ruthless._ruthless_active_models
+        diag   = ruthless._ruthless_diagnostic_models
+        assert len(active) >= 3
+        # Core promoted models must be present
+        for m in ("rf", "et", "hgbc_l2"):
+            assert m in active, f"{m} missing from _ruthless_active_models"
+        # Diagnostic models must include gnb, lr, and lr_bal
+        for m in ("gnb", "lr", "lr_bal"):
+            assert m in diag, f"{m} missing from _ruthless_diagnostic_models"
+        # gnb, lr, and lr_bal must NOT be in active
+        for m in ("gnb", "lr", "lr_bal"):
+            assert m not in active, f"{m} must not be in _ruthless_active_models"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,3 +618,326 @@ class TestConfigConstants:
         assert hasattr(_cfg, "RUTHLESS_MAX_CONCURRENT_POSITIONS")
         # Currently scaffold only (single position)
         assert _cfg.RUTHLESS_MAX_CONCURRENT_POSITIONS >= 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruthless active-model promotion
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRuthlessActivePromotion:
+    """Tests for profit_voting.apply_ruthless_active_promotion."""
+
+    def _make_conf(self, active_votes, shadow_votes=None, pred_return=0.02):
+        vs = pv_compute_vote_score(active_votes)
+        conf = dict(active_votes=dict(active_votes), pred_return=pred_return)
+        if shadow_votes:
+            conf["shadow_votes"] = dict(shadow_votes)
+        conf.update(vs)
+        return conf
+
+    def test_promotes_shadow_to_active(self):
+        shadow = {"hgbc_l2": 0.72, "cal_et": 0.65, "lgbm_bal": 0.68}
+        conf = self._make_conf(
+            active_votes={"rf": 0.60, "et": 0.58, "hgbc": 0.65},
+            shadow_votes=shadow,
+        )
+        added = apply_ruthless_active_promotion(conf, ["rf", "et", "hgbc_l2", "cal_et", "lgbm_bal"])
+        assert added >= 2
+        assert "hgbc_l2" in conf["active_votes"]
+        assert "cal_et" in conf["active_votes"]
+        assert "lgbm_bal" in conf["active_votes"]
+
+    def test_excludes_diagnostic_models(self):
+        shadow = {"gnb": 1.0, "lr": 0.01, "hgbc_l2": 0.72}
+        conf = self._make_conf(
+            active_votes={"rf": 0.60, "et": 0.58},
+            shadow_votes=shadow,
+        )
+        apply_ruthless_active_promotion(
+            conf,
+            active_models=["rf", "et", "hgbc_l2", "gnb", "lr"],
+            diagnostic_models=["gnb", "lr", "lr_bal"],
+        )
+        assert "gnb" not in conf["active_votes"]
+        assert "lr" not in conf["active_votes"]
+        assert "hgbc_l2" in conf["active_votes"]
+
+    def test_backward_compat_fields_updated(self):
+        shadow = {"hgbc_l2": 0.80, "cal_et": 0.75}
+        conf = self._make_conf(
+            active_votes={"rf": 0.60},
+            shadow_votes=shadow,
+        )
+        apply_ruthless_active_promotion(conf, ["rf", "hgbc_l2", "cal_et"])
+        assert "class_proba" in conf
+        assert "n_agree" in conf
+        assert "std_proba" in conf
+        # Active pool now has 3 models; mean should be between 0.6 and 0.8
+        assert 0.60 <= conf["class_proba"] <= 0.85
+
+    def test_no_promotion_if_nothing_in_shadow(self):
+        conf = self._make_conf(active_votes={"rf": 0.60, "et": 0.55})
+        original_active = dict(conf["active_votes"])
+        added = apply_ruthless_active_promotion(conf, ["hgbc_l2", "lgbm_bal"])
+        assert added == 0
+        assert conf["active_votes"] == original_active
+
+    def test_empty_active_models_is_noop(self):
+        conf = self._make_conf(active_votes={"rf": 0.60})
+        original_active = dict(conf["active_votes"])
+        added = apply_ruthless_active_promotion(conf, [])
+        assert added == 0
+        assert conf["active_votes"] == original_active
+
+    def test_vote_score_updated_after_promotion(self):
+        shadow = {"hgbc_l2": 0.90, "lgbm_bal": 0.85}
+        conf = self._make_conf(
+            active_votes={"rf": 0.40, "et": 0.38},  # weak votes
+            shadow_votes=shadow,
+        )
+        old_vs = conf["vote_score"]
+        apply_ruthless_active_promotion(conf, ["rf", "et", "hgbc_l2", "lgbm_bal"])
+        # vote_score should increase after adding strong shadow models
+        assert conf["vote_score"] > old_vs
+
+    def test_gnb_and_lr_never_promoted_by_default(self):
+        shadow = {"gnb": 1.0, "lr": 0.02, "lr_bal": 0.50}
+        conf = self._make_conf(
+            active_votes={"rf": 0.60, "et": 0.55, "hgbc": 0.65},
+            shadow_votes=shadow,
+        )
+        # Try to promote gnb/lr — should be blocked by diagnostic_models
+        apply_ruthless_active_promotion(
+            conf,
+            active_models=["rf", "et", "hgbc", "gnb", "lr"],
+            diagnostic_models=["gnb", "lr", "lr_bal"],
+        )
+        assert "gnb" not in conf["active_votes"]
+        assert "lr" not in conf["active_votes"]
+        assert "lr_bal" not in conf["active_votes"]
+
+    def test_active_model_count_reflects_promoted_pool(self):
+        shadow = {"hgbc_l2": 0.70, "cal_et": 0.65, "cal_rf": 0.68, "lgbm_bal": 0.72}
+        conf = self._make_conf(
+            active_votes={"rf": 0.60, "et": 0.58, "hgbc": 0.62},
+            shadow_votes=shadow,
+        )
+        apply_ruthless_active_promotion(
+            conf,
+            active_models=["rf", "et", "hgbc", "hgbc_l2", "cal_et", "cal_rf", "lgbm_bal"],
+        )
+        assert conf["active_model_count"] == 7
+
+    def test_config_ruthless_active_models_excludes_gnb_lr(self):
+        import config as _cfg
+        assert "gnb" not in _cfg.RUTHLESS_ACTIVE_MODELS
+        assert "lr" not in _cfg.RUTHLESS_ACTIVE_MODELS
+        assert "lr_bal" not in _cfg.RUTHLESS_ACTIVE_MODELS
+
+    def test_config_ruthless_diagnostic_models_includes_gnb_lr(self):
+        import config as _cfg
+        assert "gnb" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
+        assert "lr" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
+        assert "lr_bal" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Relaxed bootstrap thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRelaxedBootstrapThresholds:
+    """Tests that thresholds are at bootstrap-relaxed levels."""
+
+    def test_config_vote_threshold_relaxed(self):
+        import config as _cfg
+        assert _cfg.RUTHLESS_VOTE_THRESHOLD <= 0.50
+
+    def test_config_yes_frac_min_relaxed(self):
+        import config as _cfg
+        assert _cfg.RUTHLESS_VOTE_YES_FRACTION_MIN <= 0.34
+
+    def test_config_top3_mean_relaxed(self):
+        import config as _cfg
+        assert _cfg.RUTHLESS_TOP3_MEAN_MIN <= 0.55
+
+    def test_config_ev_floor_relaxed(self):
+        import config as _cfg
+        assert _cfg.RUTHLESS_VOTE_EV_FLOOR <= 0.001
+
+    def test_config_chop_thresholds_still_stricter(self):
+        import config as _cfg
+        # Chop thresholds must be stricter than trend thresholds
+        assert _cfg.RUTHLESS_CHOP_VOTE_YES_FRAC_MIN > _cfg.RUTHLESS_VOTE_YES_FRACTION_MIN
+        assert _cfg.RUTHLESS_CHOP_TOP3_MEAN_MIN > _cfg.RUTHLESS_TOP3_MEAN_MIN
+
+    def test_pv_gate_passes_3_model_setup(self):
+        """3-model setup should pass at bootstrap thresholds."""
+        conf = {"rf": 0.60, "et": 0.55, "hgbc": 0.62}
+        vs = pv_compute_vote_score(conf, vote_thr=0.50)
+        gate_conf = {"active_votes": conf, "pred_return": 0.01}
+        gate_conf.update(vs)
+        approved, reason = check_profit_voting_gate(
+            gate_conf, market_mode="risk_on_trend",
+            vote_thr=0.50, vote_yes_frac_min=0.34, top3_mean_min=0.55,
+            require_min_active_models=3,
+        )
+        assert approved, f"Gate blocked with reason: {reason}"
+
+    def test_pv_gate_passes_6_model_setup(self):
+        """6-model promoted pool should pass with typical probas."""
+        votes = {"rf": 0.62, "et": 0.58, "hgbc_l2": 0.70, "cal_et": 0.55,
+                 "cal_rf": 0.57, "lgbm_bal": 0.66}
+        vs = pv_compute_vote_score(votes, vote_thr=0.50)
+        gate_conf = {"active_votes": votes, "pred_return": 0.01}
+        gate_conf.update(vs)
+        approved, reason = check_profit_voting_gate(
+            gate_conf, market_mode="risk_on_trend",
+            vote_thr=0.50, vote_yes_frac_min=0.34, top3_mean_min=0.55,
+            require_min_active_models=3,
+        )
+        assert approved, f"Gate blocked with reason: {reason}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Profit-voting reject counters and log formatting
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPvRejectCounters:
+    """Tests for make_pv_counters / increment_pv_counter / format helpers."""
+
+    def test_make_pv_counters_has_expected_keys(self):
+        c = make_pv_counters()
+        for key in ("candidates", "pass", "fail_active_count", "fail_yes_frac",
+                    "fail_top3", "no_active_votes"):
+            assert key in c, f"Missing key: {key}"
+
+    def test_increment_active_count_reason(self):
+        c = make_pv_counters()
+        increment_pv_counter(c, "active_count=2 < 3")
+        assert c["fail_active_count"] == 1
+
+    def test_increment_yes_frac_reason(self):
+        c = make_pv_counters()
+        increment_pv_counter(c, "vote_yes_frac=0.25 < 0.34")
+        assert c["fail_yes_frac"] == 1
+
+    def test_increment_top3_reason(self):
+        c = make_pv_counters()
+        increment_pv_counter(c, "top3_mean=0.50 < 0.55")
+        assert c["fail_top3"] == 1
+
+    def test_increment_chop_yes_frac(self):
+        c = make_pv_counters()
+        increment_pv_counter(c, "chop: vote_yes_frac=0.30 < 0.50")
+        assert c["fail_chop_yes_frac"] == 1
+
+    def test_increment_ev_floor(self):
+        c = make_pv_counters()
+        increment_pv_counter(c, "ev_floor=0.0000 < 0.001")
+        assert c["fail_ev_floor"] == 1
+
+    def test_format_pv_reject_log_returns_string(self):
+        conf = {"vote_yes_fraction": 0.33, "top3_mean": 0.52,
+                "active_model_count": 5, "pred_return": 0.005}
+        log = format_pv_reject_log("ADAUSD", conf, "chop", "top3_mean")
+        assert "[pv_reject]" in log
+        assert "ADAUSD" in log
+        assert "top3_mean" in log
+
+    def test_format_pv_summary_log_returns_string(self):
+        c = make_pv_counters()
+        c["candidates"] = 18
+        c["pass"] = 0
+        c["fail_yes_frac"] = 7
+        log = format_pv_summary_log(c)
+        assert "[pv_summary]" in log
+        assert "candidates=18" in log
+        assert "fail_yes_frac=7" in log
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rejected candidate journal (empty-scores cycle)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRejectedCandidateJournal:
+    """Tests for build_rejected_candidate_records and empty-scores journaling."""
+
+    class FakeSym:
+        def __init__(self, name):
+            self.value = name
+        def __hash__(self):
+            return hash(self.value)
+        def __eq__(self, other):
+            return self.value == getattr(other, "value", other)
+
+    def _make_conf(self, vote_score=0.0, active_votes=None):
+        return {
+            "vote_score": vote_score,
+            "active_mean": 0.60,
+            "class_proba": 0.60,
+            "std_proba": 0.05,
+            "n_agree": 2,
+            "vote_yes_fraction": 0.50,
+            "top3_mean": 0.62,
+            "pred_return": 0.01,
+            "active_model_count": 3,
+            "active_votes": active_votes or {"rf": 0.60, "et": 0.58},
+            "shadow_votes": {},
+            "diagnostic_votes": {},
+        }
+
+    def test_build_rejected_records_empty_conf_dict(self):
+        records = build_rejected_candidate_records({})
+        assert records == []
+
+    def test_build_rejected_records_returns_not_selected(self):
+        sym = self.FakeSym("BTCUSD")
+        conf_dict = {sym: self._make_conf(vote_score=0.7)}
+        records = build_rejected_candidate_records(conf_dict)
+        assert len(records) == 1
+        assert records[0]["selected"] is False
+        assert records[0]["symbol"] == "BTCUSD"
+        assert records[0]["reject_reason"] == "pv_no_pass"
+
+    def test_build_rejected_records_sorted_by_vote_score(self):
+        s1 = self.FakeSym("LOW")
+        s2 = self.FakeSym("HIGH")
+        conf_dict = {
+            s1: self._make_conf(vote_score=0.30),
+            s2: self._make_conf(vote_score=0.80),
+        }
+        records = build_rejected_candidate_records(conf_dict)
+        assert records[0]["symbol"] == "HIGH"
+        assert records[1]["symbol"] == "LOW"
+
+    def test_build_rejected_records_respects_top_n(self):
+        conf_dict = {self.FakeSym(f"SYM{i}"): self._make_conf(vote_score=i/10) for i in range(10)}
+        records = build_rejected_candidate_records(conf_dict, top_n=3)
+        assert len(records) == 3
+
+    def test_build_rejected_records_includes_active_votes(self):
+        sym = self.FakeSym("ETHUSD")
+        av = {"rf": 0.65, "et": 0.70}
+        conf_dict = {sym: self._make_conf(active_votes=av)}
+        records = build_rejected_candidate_records(conf_dict)
+        assert records[0]["active_votes"] == av
+
+    def test_rejected_journal_recorded_via_record_cycle(self):
+        journal = CandidateJournal()
+        sym = self.FakeSym("SOLUSD")
+        conf_dict = {sym: self._make_conf(vote_score=0.65)}
+        records = build_rejected_candidate_records(conf_dict, market_mode="chop")
+        journal.record_cycle("2025-01-01", records)
+        assert len(journal) == 1
+        assert journal.get_records()[0]["reject_reason"] == "pv_no_pass"
+        assert journal.get_records()[0]["market_mode"] == "chop"
+
+    def test_no_active_votes_produces_safe_record(self):
+        sym = self.FakeSym("XRPUSD")
+        conf = self._make_conf(vote_score=0.0)
+        conf["active_votes"] = {}  # explicitly empty after make_conf
+        conf["active_model_count"] = 0
+        records = build_rejected_candidate_records({sym: conf})
+        assert len(records) == 1
+        assert records[0]["active_votes"] == {}
+

@@ -184,28 +184,30 @@ MODEL_ROLE_CATBOOST = "shadow"
 # Has no effect on balanced / conservative / aggressive profiles.
 RUTHLESS_PROFIT_VOTING_MODE     = True
 
-# Ruthless active voting pool (promoted from shadow when available).
-# These models are used for vote_yes_fraction / top3_mean / vote_score ranking.
-# The pool is informational; actual active decisions are driven by model roles.
+# Ruthless active voting pool — promoted from shadow in ruthless PV mode.
+# Models listed here that are available in shadow_votes are moved into
+# active_votes before the profit-voting gate is evaluated.
+# GNB, LR, LR_BAL remain diagnostic-only (never promoted).
 RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "cal_et", "cal_rf", "lgbm_bal"]
 RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal"]
 RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
 
-# ── Profit-voting gate thresholds ─────────────────────────────────────────────
-# Used in ruthless profit-voting mode to gate entries via vote_score ranking.
+# ── Profit-voting gate thresholds (bootstrap defaults) ────────────────────────
+# Bootstrap / test defaults — intentionally relaxed to restore trading and gather
+# candidate journal / reject diagnostic data.  Tighten after analysing results.
 # vote_yes_fraction = fraction of active models with P >= RUTHLESS_VOTE_THRESHOLD.
 # top3_mean         = mean of the top-3 active model probabilities.
-RUTHLESS_VOTE_THRESHOLD         = 0.55   # per-model yes/no split threshold
-RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.50   # min yes-fraction for trend/pump entries
-RUTHLESS_TOP3_MEAN_MIN          = 0.62   # min top-3 mean for trend/pump entries
-RUTHLESS_VOTE_EV_FLOOR          = 0.004  # minimum EV required for profit-voting pass
+RUTHLESS_VOTE_THRESHOLD         = 0.50   # per-model yes/no split threshold
+RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.34   # min yes-fraction for trend/pump entries
+RUTHLESS_TOP3_MEAN_MIN          = 0.55   # min top-3 mean for trend/pump entries
+RUTHLESS_VOTE_EV_FLOOR          = 0.001  # minimum EV required for profit-voting pass
 
 # ── Chop supermajority requirements (ruthless profit-voting mode) ─────────────
-# Chop entries are rare and require exceptional votes to proceed.
-RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.70   # supermajority yes-fraction in chop
-RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.75   # high top-3-mean required in chop
-RUTHLESS_CHOP_PRED_RETURN_MIN   = 0.01   # positive pred_return required in chop
-RUTHLESS_CHOP_EV_MIN            = 0.01   # stronger EV floor required in chop
+# Chop entries require a stricter vote than trend (still bootstrap-relaxed).
+RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.50   # yes-fraction in chop
+RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.60   # top-3-mean required in chop
+RUTHLESS_CHOP_PRED_RETURN_MIN   = 0.000  # positive pred_return (disabled)
+RUTHLESS_CHOP_EV_MIN            = 0.002  # EV floor required in chop
 
 # ── Ruthless payoff floors ─────────────────────────────────────────────────────
 # Prevent ruthless mode from scalping tiny +0.2% wins (fixes collapsed avg_win).
@@ -466,6 +468,10 @@ def setup_risk_profile(algo):
             algo._ruthless_profit_voting_mode = str(_pv_raw).lower() in ("true","1","yes")
         else:
             algo._ruthless_profit_voting_mode = RUTHLESS_PROFIT_VOTING_MODE
+        # Active / diagnostic / shadow model lists for ruthless promotion
+        algo._ruthless_active_models      = list(RUTHLESS_ACTIVE_MODELS)
+        algo._ruthless_diagnostic_models  = list(RUTHLESS_DIAGNOSTIC_MODELS)
+        algo._ruthless_shadow_models      = list(RUTHLESS_SHADOW_MODELS)
         # Payoff floor — ruthless should not scalp tiny wins
         algo._ruthless_min_tp = RUTHLESS_MIN_TP
         # Profit-voting gate thresholds
@@ -530,17 +536,31 @@ def setup_risk_profile(algo):
         f" runner_mode={_runner_mode_val}"
     )
     # Model role audit (active vs shadow vs diagnostic) — built from config lists
-    _active_str     = ",".join(getattr(algo, "_ruthless_active_models",
+    if algo._risk_profile == "ruthless" and getattr(algo, "_ruthless_profit_voting_mode", False):
+        _active_str = ",".join(getattr(algo, "_ruthless_active_models", RUTHLESS_ACTIVE_MODELS))
+        _diag_str   = ",".join(getattr(algo, "_ruthless_diagnostic_models", RUTHLESS_DIAGNOSTIC_MODELS))
+        _shadow_str = ",".join(getattr(algo, "_ruthless_shadow_models", RUTHLESS_SHADOW_MODELS))
+        _active_cnt = len(getattr(algo, "_ruthless_active_models", RUTHLESS_ACTIVE_MODELS))
+        algo.log(
+            f"[profile] effective_active_models={_active_str}"
+            f" active_count={_active_cnt}"
+        )
+        algo.log(
+            f"[profile] effective_diagnostic_models={_diag_str}"
+            f" effective_shadow_models={_shadow_str}"
+        )
+    else:
+        _active_str = ",".join(getattr(algo, "_ruthless_active_models",
                                        ["rf", "et", "hgbc"]) if algo._risk_profile == "ruthless"
                                else ["rf", "et", "hgbc"])
-    _diag_str       = ",".join(getattr(algo, "_ruthless_diagnostic_models",
+        _diag_str   = ",".join(getattr(algo, "_ruthless_diagnostic_models",
                                        ["gnb", "lr"]) if algo._risk_profile == "ruthless"
                                else ["gnb", "lr"])
-    algo.log(
-        f"[profile] active_models={_active_str}"
-        f" diagnostic_models={_diag_str}"
-        f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lgbm_bal,gbc,ada"
-    )
+        algo.log(
+            f"[profile] active_models={_active_str}"
+            f" diagnostic_models={_diag_str}"
+            f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lgbm_bal,gbc,ada"
+        )
     if algo._risk_profile == "ruthless":
         _chop_rule = "supermajority_only" if _pv_mode else "standard"
         algo.log(

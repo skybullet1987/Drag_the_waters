@@ -25,7 +25,7 @@ from meta_model     import MetaFilter
 from infra          import hydrate_state_from_history
 from diagnostics    import format_vote_log, _feature_diag_suffix
 from model_registry import format_model_registry_log, build_roles_dict_from_config
-from candidate_journal import CandidateJournal, build_candidate_records
+from candidate_journal import CandidateJournal, build_candidate_records, build_rejected_candidate_records
 import config as _cfg_module
 
 np.random.seed(42)
@@ -786,6 +786,7 @@ class VoxAlgorithm(QCAlgorithm):
             "n_pass_disp": 0, "n_pass_agree": 0, "n_pass_score": 0,
             "n_pass_ev": 0, "n_pass_pred_ret": 0, "n_momentum_override": 0,
         }
+        all_cand_conf = {}   # all evaluated sym→conf (for journal when scores empty)
 
         _ruthless_allowed_modes = getattr(self, "_ruthless_allowed_modes", [])
         for (sym, feat), conf in zip(candidates, confs):
@@ -831,15 +832,18 @@ class VoxAlgorithm(QCAlgorithm):
                 ruthless_good_mode_ev_min=getattr(self, "_good_mode_min_ev", 0.004),
                 ruthless_good_mode_volr_min=getattr(self, "_good_mode_volume_min", 1.3),
                 ruthless_profit_voting_mode=getattr(self, "_ruthless_profit_voting_mode", False),
-                pv_vote_threshold=getattr(self, "_pv_vote_threshold", 0.55),
-                pv_vote_yes_frac_min=getattr(self, "_pv_vote_yes_frac_min", 0.50),
-                pv_top3_mean_min=getattr(self, "_pv_top3_mean_min", 0.62),
-                pv_vote_ev_floor=getattr(self, "_pv_vote_ev_floor", 0.004),
-                pv_chop_yes_frac_min=getattr(self, "_pv_chop_yes_frac_min", 0.70),
-                pv_chop_top3_mean_min=getattr(self, "_pv_chop_top3_mean_min", 0.75),
-                pv_chop_pred_return_min=getattr(self, "_pv_chop_pred_return_min", 0.01),
-                pv_chop_ev_min=getattr(self, "_pv_chop_ev_min", 0.01),
+                pv_vote_threshold=getattr(self, "_pv_vote_threshold", 0.50),
+                pv_vote_yes_frac_min=getattr(self, "_pv_vote_yes_frac_min", 0.34),
+                pv_top3_mean_min=getattr(self, "_pv_top3_mean_min", 0.55),
+                pv_vote_ev_floor=getattr(self, "_pv_vote_ev_floor", 0.001),
+                pv_chop_yes_frac_min=getattr(self, "_pv_chop_yes_frac_min", 0.50),
+                pv_chop_top3_mean_min=getattr(self, "_pv_chop_top3_mean_min", 0.60),
+                pv_chop_pred_return_min=getattr(self, "_pv_chop_pred_return_min", 0.000),
+                pv_chop_ev_min=getattr(self, "_pv_chop_ev_min", 0.002),
+                ruthless_active_models=getattr(self, "_ruthless_active_models", None),
+                ruthless_diagnostic_models=getattr(self, "_ruthless_diagnostic_models", None),
             )
+            all_cand_conf[sym] = conf
             if result is None:
                 continue
             ev_cand = result.get("ev", float("-inf"))
@@ -917,6 +921,15 @@ class VoxAlgorithm(QCAlgorithm):
                 )
 
         if not scores:
+            # Journal top-N rejected candidates so the user can diagnose gate rejects
+            if getattr(_cfg_module, "PERSIST_CANDIDATE_JOURNAL", True) and all_cand_conf:
+                _rej = build_rejected_candidate_records(
+                    all_cand_conf,
+                    market_mode=_market_mode,
+                    top_n=getattr(_cfg_module, "CANDIDATE_JOURNAL_TOP_N", 5),
+                )
+                if _rej:
+                    self._candidate_journal.record_cycle(self.time, _rej)
             return
 
         ranked   = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
