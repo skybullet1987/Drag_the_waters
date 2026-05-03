@@ -1745,3 +1745,302 @@ If a file is over the limit, move helper logic to a new module.  Current files:
 - `shadow_lab.py` — ~12,900 chars
 - `model_registry.py`, `diagnostics.py`, `market_mode.py`, `meta_model.py` — < 13,000 each
 - `candidate_journal.py`, `profit_voting.py` — < 8,000 each
+
+---
+
+## Ruthless V2 — Aggressive Multi-Position Opportunity Engine
+
+### Overview
+
+Ruthless V2 is a **separate, opt-in** aggressive opportunity engine built on
+top of the existing ruthless V1 profile.  V1 behavior is completely preserved
+unless V2 is explicitly activated.
+
+**Activation** (either method works):
+```
+risk_profile = ruthless_v2
+```
+or:
+```
+risk_profile = ruthless
+ruthless_v2_mode = true
+```
+
+**Startup log confirms V2 is active:**
+```
+[profile] risk_profile=ruthless v2=True max_positions=4 active_models=rf,et,hgbc_l2,lgbm_bal,gbc,ada
+[v2_weights] ada=0.700 et=0.800 gbc=0.850 hgbc_l2=1.100 lgbm_bal=1.000 rf=1.350
+```
+
+### V2 vs V1 Differences
+
+| Feature | V1 (ruthless) | V2 (ruthless_v2) |
+|---------|---------------|------------------|
+| Max concurrent positions | 1 | 4 |
+| Max entries/day | 3 (informational) | 8 (enforced) |
+| Active voter pool | rf, et, hgbc_l2, lgbm_bal | rf, et, hgbc_l2, lgbm_bal, gbc, ada |
+| Diagnostic models | gnb, lr, lr_bal | gnb, lr, lr_bal, cal_et, cal_rf |
+| Dynamic voter weighting | No | Yes (contextual bandit) |
+| Multi-horizon lanes | No | Yes (scalp/continuation/runner) |
+| Cross-sectional ranking | No | Yes (top-N by v2_opportunity_score) |
+| Pump continuation/exhaustion | No | Yes |
+| Split exits (partial TP + runner) | No | Yes |
+| True vote audit | No | Yes (trade_vote_audit.jsonl) |
+
+### V2 Config Parameters
+
+```python
+# ruthless_v2.py defaults (importable from ruthless_v2)
+RUTHLESS_V2_MAX_CONCURRENT_POSITIONS   = 4
+RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY    = 8
+RUTHLESS_V2_MAX_ENTRIES_PER_SYMBOL_PER_DAY = 2
+RUTHLESS_V2_MAX_SYMBOL_ALLOCATION      = 0.30
+RUTHLESS_V2_MIN_SYMBOL_ALLOCATION      = 0.08
+RUTHLESS_V2_MAX_TOTAL_EXPOSURE         = 1.25
+RUTHLESS_V2_REENTRY_COOLDOWN_MIN       = 30
+
+# Partial TP / split-exit
+RUTHLESS_V2_PARTIAL_TP_ENABLED         = True
+RUTHLESS_V2_PARTIAL_TP_FRACTION        = 0.50
+RUTHLESS_V2_SCALP_TP                   = 0.015   # scalp lane TP target
+RUTHLESS_V2_CONTINUATION_TP            = 0.04    # continuation lane TP
+RUTHLESS_V2_RUNNER_INITIAL_TP          = 0.06    # runner initial partial TP
+RUTHLESS_V2_RUNNER_TRAIL_PCT           = 0.04    # runner remainder trail
+RUTHLESS_V2_PUMP_RUNNER_TRAIL_PCT      = 0.06    # wider trail in pump mode
+```
+
+### V2 Active Voter Pool
+
+V2 uses a more aggressive active voter pool. Conservative/degenerate models
+are **diagnostic-only** and never affect trading:
+
+| Model | V2 Role | Base Weight | Notes |
+|-------|---------|------------|-------|
+| `rf` | active | 1.35 | Core tree model |
+| `hgbc_l2` | active | 1.10 | HistGradientBoosting with L2 |
+| `lgbm_bal` | active | 1.00 | LightGBM balanced (if available) |
+| `gbc` | active | 0.85 | GradientBoostingClassifier |
+| `et` | active | 0.80 | ExtraTreesClassifier |
+| `ada` | active | 0.70 | AdaBoost |
+| `xgb_bal` | optional active | 0.75 | XGBoost (if available) |
+| `catboost_bal` | optional active | 0.75 | CatBoost (if available) |
+| `gnb` | diagnostic | — | Always-bullish; degenerate |
+| `lr` / `lr_bal` | diagnostic | — | Always-bearish; unreliable |
+| `cal_et` / `cal_rf` | diagnostic | — | Calibration overlays only |
+
+### V2 Opportunity Score Formula
+
+```python
+ruthless_v2_score = (
+    0.25 * dynamic_vote_score       # weighted model votes
+    + 0.20 * continuation_score     # 2-8h momentum lane
+    + 0.20 * runner_score           # 12-48h breakout lane
+    + 0.15 * breakout_score         # price/volume breakout signal
+    + 0.10 * volume_expansion_score # volume surge above rolling avg
+    + 0.10 * regime_score           # BTC market regime quality
+    - cost_penalty                  # proportional to cost_bps
+    - exhaustion_penalty            # pump exhaustion (late-chase penalty)
+)
+```
+
+### Multi-Horizon Lanes
+
+Each V2 entry is assigned to a lane based on the dominant score:
+
+| Lane | Target Hold | TP Target | Trail Stop |
+|------|-------------|-----------|-----------|
+| scalp | 30–90 min | +1.5% | — |
+| continuation | 2–8 h | +4.0% | — |
+| runner | 12–48 h | +6.0% initial | 4% (6% in pump mode) |
+
+Split exits: sell `PARTIAL_TP_FRACTION` (default 50%) at initial TP, hold
+remainder as runner with trailing stop.
+
+### Dynamic Voter Weighting
+
+After each selected trade closes, voter weights are updated using an
+exponential-decay payoff tracker:
+
+```python
+# Reward: model voted yes → trade won
+# Penalty: model voted yes → trade lost
+effective_weight = base_weight * perf_score
+# perf_score ∈ [MIN_WEIGHT_MULTIPLIER, MAX_WEIGHT_MULTIPLIER] = [0.25, 2.0]
+# Minimum 5 observations before weight changes (min_obs guard)
+```
+
+### Pump Continuation / Exhaustion System
+
+V2 tracks same-symbol activity to distinguish real pump continuations from
+late-chase exhaustion:
+
+- **Continuation**: High volume, intact momentum, strong RF/hgbc_l2 — re-entry allowed
+- **Exhaustion**: Repeated entries in 2h, many trail wins, fading volume — re-entry blocked or allocation reduced
+- `exhaustion_override_allowed()`: Returns True if continuation is strong enough (≥0.55) to override the `reentry_cooldown` block
+
+---
+
+## Trade Vote Audit — Research Analysis
+
+**File**: `vox/trade_vote_audit.jsonl` (ObjectStore)
+
+Unlike `trade_log.jsonl` which logs all *attempts*, the vote audit records only
+**confirmed filled selected trades**, paired entry + exit, with a unique `trade_id`.
+Use this for accurate model accuracy analysis — no duplicate attempt pollution.
+
+### Copy-Paste Research Snippets
+
+#### Load and inspect selected trades
+
+```python
+import json
+import pandas as pd
+
+# Read from ObjectStore in Research
+audit_raw = qb.object_store.read("vox/trade_vote_audit.jsonl")
+records = [json.loads(l) for l in audit_raw.split("\n") if l.strip()]
+
+entries = pd.DataFrame([r for r in records if r.get("entry_type") == "entry"])
+exits   = pd.DataFrame([r for r in records if r.get("entry_type") == "exit"])
+
+print(f"Selected entries: {len(entries)}, Closed trades: {len(exits)}")
+print(entries[["trade_id","symbol","entry_time","entry_price","allocation",
+               "risk_profile","market_mode","confirm","vote_score","lane_selected"]].to_string())
+```
+
+#### Model accuracy by closed selected trade
+
+```python
+# Pair entries with exits
+paired = exits.merge(entries[["trade_id","active_votes","shadow_votes",
+                               "diagnostic_votes","effective_model_weights"]],
+                     on="trade_id", how="left")
+
+# Expand per-model votes
+model_rows = []
+for _, row in paired.iterrows():
+    ret   = row.get("realized_return")
+    winner = row.get("winner")
+    for vote_col in ["active_votes", "shadow_votes", "diagnostic_votes"]:
+        votes = row.get(vote_col)
+        if not isinstance(votes, dict):
+            continue
+        for model_id, proba in votes.items():
+            model_rows.append({
+                "trade_id":    row["trade_id"],
+                "model_id":    model_id,
+                "vote_source": vote_col.replace("_votes",""),
+                "proba":       float(proba),
+                "voted_yes":   float(proba) >= 0.50,
+                "realized_return": ret,
+                "winner":      winner,
+            })
+
+mdf = pd.DataFrame(model_rows)
+yes_only = mdf[mdf["voted_yes"]]
+attr = yes_only.groupby("model_id").agg(
+    yes_count      = ("voted_yes","sum"),
+    win_rate       = ("winner","mean"),
+    avg_return     = ("realized_return","mean"),
+).sort_values("win_rate", ascending=False)
+print(attr.to_string())
+```
+
+#### Symbol performance summary
+
+```python
+sym_perf = exits.groupby("symbol").agg(
+    trades        = ("trade_id", "count"),
+    wins          = ("winner",   "sum"),
+    avg_return    = ("realized_return", "mean"),
+    total_pnl     = ("realized_pnl",    "sum"),
+    avg_hold_min  = ("hold_minutes",    "mean"),
+).assign(win_rate=lambda x: x["wins"] / x["trades"])
+print(sym_perf.sort_values("total_pnl", ascending=False).to_string())
+```
+
+#### Lane performance (scalp / continuation / runner)
+
+```python
+# Join lane info from entries onto exits
+lane_df = exits.merge(entries[["trade_id","lane_selected","scalp_score",
+                                "continuation_score","runner_score"]],
+                      on="trade_id", how="left")
+lane_perf = lane_df.groupby("lane_selected").agg(
+    trades    = ("trade_id", "count"),
+    wins      = ("winner",   "sum"),
+    avg_ret   = ("realized_return", "mean"),
+    avg_hold  = ("hold_minutes",    "mean"),
+).assign(win_rate=lambda x: x["wins"] / x["trades"])
+print(lane_perf.to_string())
+```
+
+#### Threshold analysis (find optimal vote_score cutoff)
+
+```python
+full = exits.merge(entries[["trade_id","vote_score","dynamic_vote_score",
+                              "v2_opportunity_score","meta_entry_score"]],
+                   on="trade_id", how="left")
+
+for col in ["vote_score","v2_opportunity_score"]:
+    for thr in [0.4, 0.5, 0.55, 0.6, 0.65, 0.7]:
+        subset = full[full[col] >= thr]
+        if len(subset) == 0:
+            continue
+        print(f"{col}>={thr:.2f}: n={len(subset)} wr={subset['winner'].mean():.2f} "
+              f"avg_ret={subset['realized_return'].mean():.4f}")
+```
+
+#### Runner capture analysis
+
+```python
+runner_df = exits.merge(
+    entries[["trade_id","runner_score","lane_selected","pump_continuation_score"]],
+    on="trade_id", how="left"
+)
+print(runner_df[runner_df["lane_selected"]=="runner"][
+    ["symbol","entry_time","exit_time","realized_return","exit_reason",
+     "runner_score","pump_continuation_score","hold_minutes"]
+].to_string())
+```
+
+#### Same-symbol pump / exhaustion stats
+
+```python
+sym_history = exits.merge(
+    entries[["trade_id","symbol","pump_continuation_score","pump_exhaustion_score",
+             "exhaustion_score"]],
+    on="trade_id", how="left"
+)
+pump_agg = sym_history.groupby("symbol").agg(
+    trades       = ("trade_id","count"),
+    avg_exh      = ("pump_exhaustion_score","mean"),
+    avg_cont     = ("pump_continuation_score","mean"),
+    avg_ret      = ("realized_return","mean"),
+    win_rate     = ("winner","mean"),
+).sort_values("avg_ret", ascending=False)
+print(pump_agg.to_string())
+```
+
+---
+
+## Module Size Tracking
+
+Every Python file must remain under 63,000 characters.
+Check before deploying to QC Cloud:
+
+```bash
+wc -c Vox/*.py | sort -rn | head -15
+```
+
+Current approximate sizes (after Ruthless V2 addition):
+- `main.py` — ~62,600 chars (critical; monitor closely)
+- `models.py` — ~62,700 chars (critical)
+- `config.py` — ~42,000 chars
+- `ruthless_v2.py` — ~33,500 chars (new)
+- `trade_vote_audit.py` — ~22,000 chars (new)
+- `execution.py` — ~14,000 chars
+- `shadow_lab.py` — ~13,600 chars
+- `profit_voting.py` — ~14,200 chars
+- `trade_journal.py` — ~14,000 chars
+- `infra.py`, `model_registry.py`, `diagnostics.py` — < 21,000 each

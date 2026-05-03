@@ -66,9 +66,16 @@ AGGRESSIVE_PENALTY_COOLDOWN_LOSSES = 3
 AGGRESSIVE_PENALTY_COOLDOWN_HOURS  = 24
 AGGRESSIVE_MAX_DD_PCT              = 0.20
 
-# ── Ruthless v2 profile defaults ──────────────────────────────────────────────
+# ── Ruthless V2 aggressive opportunity engine ─────────────────────────────────
+# Separate from the existing "ruthless" (now V1) profile.
+# Activate via:  risk_profile=ruthless_v2
+#            OR  risk_profile=ruthless  +  ruthless_v2_mode=true
+# V1 ruthless behavior is preserved when V2 is not explicitly enabled.
+RUTHLESS_V2_MODE                 = False  # default off; activated by profile/param
+
+# ── Ruthless v1 profile defaults ──────────────────────────────────────────────
 # WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.
-# Ruthless v2 targets large asymmetric winners:
+# Ruthless v1 targets large asymmetric winners:
 #   • Wider TP/SL (9% / 3%) → P/L ratio ≈ 3.0 — meaningfully above break-even
 #   • 24h timeout — winners have room to run
 #   • Runner mode — trailing stop replaces instant TP exit
@@ -188,8 +195,8 @@ RUTHLESS_PROFIT_VOTING_MODE     = True
 # Models listed here that are available in shadow_votes are moved into
 # active_votes before the profit-voting gate is evaluated.
 # GNB, LR, LR_BAL remain diagnostic-only (never promoted).
-RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "cal_et", "cal_rf", "lgbm_bal"]
-RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal"]
+RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "lgbm_bal", "gbc", "ada"]
+RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal", "cal_et", "cal_rf"]
 RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
 
 # ── Profit-voting gate thresholds (bootstrap defaults) ────────────────────────
@@ -327,6 +334,10 @@ def setup_risk_profile(algo):
         str(_cm_raw).lower() in ("true", "1", "yes")
     ) if _cm_raw else CONSERVATIVE_MODE
 
+    # Detect explicit V2 mode request (via ruthless_v2_mode param or risk_profile=ruthless_v2)
+    _v2_raw = algo.get_parameter("ruthless_v2_mode")
+    _v2_explicit = (str(_v2_raw).lower() in ("true", "1", "yes")) if _v2_raw else False
+
     # Priority: ruthless_mode > aggressive_mode > conservative_mode
     #           > risk_profile param > RISK_PROFILE default
     if _ruthless_mode:
@@ -337,14 +348,24 @@ def setup_risk_profile(algo):
         algo._risk_profile = "conservative"
     elif _rp_raw:
         _rp_val = _rp_raw.lower().strip()
-        if _rp_val in ("conservative", "balanced", "aggressive", "ruthless"):
+        if _rp_val in ("conservative", "balanced", "aggressive", "ruthless", "ruthless_v2"):
             algo._risk_profile = _rp_val
             if _rp_val == "conservative":
                 algo._conservative_mode = True
+            if _rp_val == "ruthless_v2":
+                _v2_explicit = True
         else:
             algo._risk_profile = RISK_PROFILE
     else:
         algo._risk_profile = RISK_PROFILE
+
+    # Normalize ruthless_v2 -> ruthless (V2 is an extension, not a separate profile branch)
+    if algo._risk_profile == "ruthless_v2":
+        algo._risk_profile = "ruthless"
+
+    # Store V2 mode flag on algo — used by execution path
+    # V2 is only meaningful when combined with ruthless profile.
+    algo._ruthless_v2_mode = _v2_explicit and (algo._risk_profile == "ruthless")
 
     if algo._risk_profile == "conservative":
         algo._conservative_mode = True
@@ -487,6 +508,46 @@ def setup_risk_profile(algo):
         # Enforce TP floor for ruthless (prevents tiny scalp exits)
         if algo._tp < RUTHLESS_MIN_TP:
             algo._tp = max(algo._tp, RUTHLESS_MIN_TP)
+        # ── Ruthless V2 engine initialization ────────────────────────────────
+        # V2 adds multi-position management, dynamic voter weighting, and
+        # multi-horizon scoring.  It activates only when _ruthless_v2_mode=True.
+        if getattr(algo, "_ruthless_v2_mode", False):
+            try:
+                from ruthless_v2 import (
+                    MultiPositionManager,
+                    DynamicVoterWeighting,
+                    RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
+                    RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY,
+                    RUTHLESS_V2_MAX_ENTRIES_PER_SYMBOL_PER_DAY,
+                    RUTHLESS_V2_MAX_SYMBOL_ALLOCATION,
+                    RUTHLESS_V2_MIN_SYMBOL_ALLOCATION,
+                    RUTHLESS_V2_MAX_TOTAL_EXPOSURE,
+                    RUTHLESS_V2_REENTRY_COOLDOWN_MIN,
+                    RUTHLESS_V2_ACTIVE_MODELS,
+                    RUTHLESS_V2_BASE_WEIGHTS,
+                )
+                algo._v2_position_mgr = MultiPositionManager(
+                    max_concurrent=RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
+                    max_new_per_day=RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY,
+                    max_per_symbol_per_day=RUTHLESS_V2_MAX_ENTRIES_PER_SYMBOL_PER_DAY,
+                    max_symbol_alloc=RUTHLESS_V2_MAX_SYMBOL_ALLOCATION,
+                    min_symbol_alloc=RUTHLESS_V2_MIN_SYMBOL_ALLOCATION,
+                    max_total_exposure=RUTHLESS_V2_MAX_TOTAL_EXPOSURE,
+                    reentry_cooldown_min=RUTHLESS_V2_REENTRY_COOLDOWN_MIN,
+                )
+                algo._v2_voter_weighting = DynamicVoterWeighting(
+                    base_weights=RUTHLESS_V2_BASE_WEIGHTS,
+                )
+                # Override active model list with V2 aggressive pool
+                algo._ruthless_active_models = list(RUTHLESS_V2_ACTIVE_MODELS)
+                algo.log(
+                    f"[profile] risk_profile=ruthless_v2 v2=True"
+                    f" max_positions={RUTHLESS_V2_MAX_CONCURRENT_POSITIONS}"
+                    f" active_models={','.join(RUTHLESS_V2_ACTIVE_MODELS)}"
+                )
+            except ImportError:
+                algo.log("[profile] WARNING: ruthless_v2 module not found; V2 disabled.")
+                algo._ruthless_v2_mode = False
 
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
@@ -518,9 +579,11 @@ def setup_risk_profile(algo):
     _trail_pct         = getattr(algo, "_trail_pct",      0.0)
     _min_alloc         = getattr(algo, "_min_alloc",      0.0)
     _pv_mode           = getattr(algo, "_ruthless_profit_voting_mode", False)
+    _v2_mode           = getattr(algo, "_ruthless_v2_mode", False)
     algo.log(
         f"[profile] risk_profile={algo._risk_profile}"
         f" profit_voting={_pv_mode}"
+        f" v2={_v2_mode}"
     )
     algo.log(
         f"[profile] tp={algo._tp:.3f} sl={algo._sl:.3f}"
