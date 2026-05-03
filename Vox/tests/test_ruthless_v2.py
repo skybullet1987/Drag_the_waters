@@ -36,6 +36,19 @@ from ruthless_v2 import (
     RUTHLESS_V2_MAX_WEIGHT_MULTIPLIER,
     RUTHLESS_V2_MIN_WEIGHT_MULTIPLIER,
     RUTHLESS_V2_MIN_OBS_BEFORE_ADJUST,
+    # Machine-gun mode constants
+    RUTHLESS_V2_MACHINE_GUN_MODE,
+    RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES,
+    RUTHLESS_V2_MIN_SCORE_TO_TRADE,
+    RUTHLESS_V2_REGIME_HARD_BLOCK,
+    RUTHLESS_V2_META_HARD_FILTER,
+    RUTHLESS_V2_META_AS_SCORE_PENALTY,
+    RUTHLESS_V2_ALLOW_CHOP_SCALPS,
+    RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC,
+    RUTHLESS_V2_BASE_ALLOCATION,
+    RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION,
+    RUTHLESS_V2_SOFT_REGIME_PENALTY,
+    RUTHLESS_V2_HARD_BLOCK_MODES,
     MultiPositionManager,
     DynamicVoterWeighting,
     compute_multihorizon_scores,
@@ -50,6 +63,11 @@ from ruthless_v2 import (
     SplitExitHelper,
     rank_candidates_v2,
     format_v2_startup_log,
+    # Machine-gun helpers
+    apply_regime_soft_penalty,
+    apply_meta_soft_penalty,
+    select_top_n_machine_gun,
+    compute_machine_gun_allocation,
 )
 from trade_vote_audit import (
     TradeVoteAudit,
@@ -890,3 +908,484 @@ class TestStartupLog:
         combined = " ".join(lines)
         assert "rf=1.400" in combined
         assert "et=0.750" in combined
+
+    def test_startup_log_machine_gun_line_present(self):
+        lines = format_v2_startup_log(
+            risk_profile="ruthless",
+            v2_mode=True,
+            max_positions=5,
+            active_models=RUTHLESS_V2_ACTIVE_MODELS,
+            machine_gun_mode=True,
+            regime_hard_block=False,
+            meta_hard_filter=False,
+            force_top_n=2,
+            min_score_to_trade=-0.25,
+        )
+        combined = " ".join(lines)
+        assert "v2_machine_gun" in combined
+        assert "enabled=True" in combined
+        assert "regime_hard_block=False" in combined
+        assert "meta_hard_filter=False" in combined
+        assert "force_top_n=2" in combined
+
+    def test_startup_log_machine_gun_defaults_are_reflected(self):
+        # Default call with no overrides should still emit machine-gun line
+        lines = format_v2_startup_log(
+            risk_profile="ruthless",
+            v2_mode=True,
+            max_positions=RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
+            active_models=RUTHLESS_V2_ACTIVE_MODELS,
+        )
+        combined = " ".join(lines)
+        assert "v2_machine_gun" in combined
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Machine-gun mode config defaults
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMachineGunConfigDefaults:
+    """Machine-gun config defaults exist, are enabled, and have correct types."""
+
+    def test_machine_gun_mode_is_true_by_default(self):
+        assert RUTHLESS_V2_MACHINE_GUN_MODE is True
+
+    def test_regime_hard_block_is_false_by_default(self):
+        assert RUTHLESS_V2_REGIME_HARD_BLOCK is False
+
+    def test_meta_hard_filter_is_false_by_default(self):
+        assert RUTHLESS_V2_META_HARD_FILTER is False
+
+    def test_meta_as_score_penalty_is_true_by_default(self):
+        assert RUTHLESS_V2_META_AS_SCORE_PENALTY is True
+
+    def test_allow_chop_scalps_is_true_by_default(self):
+        assert RUTHLESS_V2_ALLOW_CHOP_SCALPS is True
+
+    def test_chop_scalp_max_alloc_is_small(self):
+        assert 0.0 < RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC <= 0.15
+
+    def test_force_top_n_is_positive(self):
+        assert RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES >= 1
+
+    def test_min_score_threshold_is_negative(self):
+        # Machine-gun mode uses a very low floor, must be below 0
+        assert RUTHLESS_V2_MIN_SCORE_TO_TRADE < 0.0
+
+    def test_max_concurrent_positions_at_least_5(self):
+        assert RUTHLESS_V2_MAX_CONCURRENT_POSITIONS >= 5
+
+    def test_max_entries_per_day_at_least_12(self):
+        assert RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY >= 12
+
+    def test_base_allocation_is_small(self):
+        assert 0.05 < RUTHLESS_V2_BASE_ALLOCATION <= 0.20
+
+    def test_high_conviction_allocation_larger_than_base(self):
+        assert RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION > RUTHLESS_V2_BASE_ALLOCATION
+
+    def test_hard_block_modes_contains_danger_words(self):
+        for word in ("risk_off_crash", "dump", "emergency"):
+            assert word in RUTHLESS_V2_HARD_BLOCK_MODES, (
+                f"'{word}' should be in RUTHLESS_V2_HARD_BLOCK_MODES"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft regime filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRegimeSoftPenalty:
+    """Regime filter returns soft penalty instead of hard reject in V2 machine-gun mode."""
+
+    def test_chop_gives_soft_penalty_not_hard_block(self):
+        score_before = 0.30
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="ADAUSD",
+            score=score_before,
+            market_mode="chop",
+            machine_gun_mode=True,
+            regime_hard_block=False,
+        )
+        assert blocked is False, "chop must not hard-block in machine-gun mode"
+        assert score < score_before, "chop must reduce score (soft penalty)"
+        assert msg is not None and "v2_soft_regime" in msg
+
+    def test_risk_on_no_penalty(self):
+        score_before = 0.50
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="BTCUSD",
+            score=score_before,
+            market_mode="risk_on_trend",
+            machine_gun_mode=True,
+        )
+        assert blocked is False
+        assert score == pytest.approx(score_before), "risk_on_trend should not be penalized"
+
+    def test_dump_hard_blocks_even_in_machine_gun(self):
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="SOLUSD",
+            score=0.50,
+            market_mode="dump",
+            machine_gun_mode=True,
+            regime_hard_block=False,
+        )
+        assert blocked is True, "dump must always hard-block"
+
+    def test_emergency_hard_blocks_even_in_machine_gun(self):
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="SOLUSD",
+            score=0.50,
+            market_mode="emergency_risk_off",
+            machine_gun_mode=True,
+            regime_hard_block=False,
+        )
+        assert blocked is True
+
+    def test_v1_mode_hard_blocks_chop(self):
+        # machine_gun_mode=False should behave like V1 (hard block)
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="ADAUSD",
+            score=0.30,
+            market_mode="chop",
+            machine_gun_mode=False,
+        )
+        assert blocked is True, "V1 mode must still hard-block chop"
+
+    def test_regime_hard_block_true_hard_blocks_chop(self):
+        score, blocked, msg = apply_regime_soft_penalty(
+            symbol="ADAUSD",
+            score=0.30,
+            market_mode="chop",
+            machine_gun_mode=True,
+            regime_hard_block=True,  # explicit override
+        )
+        assert blocked is True
+
+    def test_selloff_penalty_larger_than_chop(self):
+        score_ref = 0.50
+        score_after_chop, _, _ = apply_regime_soft_penalty(
+            "ADAUSD", score_ref, "chop", machine_gun_mode=True)
+        score_after_sell, _, _ = apply_regime_soft_penalty(
+            "ADAUSD", score_ref, "selloff", machine_gun_mode=True)
+        chop_penalty   = score_ref - score_after_chop
+        selloff_penalty = score_ref - score_after_sell
+        # Selloff should inflict a larger penalty than chop
+        assert selloff_penalty > chop_penalty, (
+            f"selloff penalty {selloff_penalty:.4f} should exceed chop penalty {chop_penalty:.4f}"
+        )
+
+    def test_soft_penalty_log_fn_called(self):
+        logs = []
+        apply_regime_soft_penalty(
+            "ADAUSD", 0.40, "chop", machine_gun_mode=True, _log_fn=logs.append)
+        assert len(logs) == 1
+        assert "ADAUSD" in logs[0]
+
+    def test_no_log_fn_does_not_raise(self):
+        # Should work fine without a log function
+        score, blocked, msg = apply_regime_soft_penalty(
+            "LTCUSD", 0.30, "chop", machine_gun_mode=True)
+        assert blocked is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft meta filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMetaSoftPenalty:
+    """Meta filter returns soft penalty/alloc multiplier instead of hard reject in V2 machine-gun mode."""
+
+    def test_negative_meta_reduces_allocation(self):
+        _, alloc, blocked, _ = apply_meta_soft_penalty(
+            symbol="SOLUSD",
+            score=0.30,
+            allocation=0.20,
+            meta_score=-0.388,
+            machine_gun_mode=True,
+            meta_hard_filter=False,
+        )
+        assert blocked is False
+        assert alloc < 0.20, "negative meta must reduce allocation"
+
+    def test_negative_meta_modifies_score(self):
+        score_before = 0.30
+        score, _, blocked, _ = apply_meta_soft_penalty(
+            symbol="SOLUSD",
+            score=score_before,
+            allocation=0.20,
+            meta_score=-0.388,
+            machine_gun_mode=True,
+            meta_hard_filter=False,
+            meta_as_score_penalty=True,
+        )
+        assert blocked is False
+        assert score < score_before, "negative meta_score must lower final score"
+
+    def test_positive_meta_does_not_block(self):
+        score, alloc, blocked, _ = apply_meta_soft_penalty(
+            symbol="DOTUSD",
+            score=0.40,
+            allocation=0.15,
+            meta_score=0.389,
+            machine_gun_mode=True,
+            meta_hard_filter=False,
+        )
+        assert blocked is False
+        assert alloc == pytest.approx(0.15), "positive meta must not reduce allocation"
+
+    def test_v1_meta_hard_filter_does_not_modify(self):
+        # meta_hard_filter=True → V1 behavior; no modification applied here
+        score_before, alloc_before = 0.30, 0.20
+        score, alloc, blocked, _ = apply_meta_soft_penalty(
+            symbol="ADAUSD",
+            score=score_before,
+            allocation=alloc_before,
+            meta_score=-0.5,
+            machine_gun_mode=True,
+            meta_hard_filter=True,
+        )
+        assert blocked is False
+        assert score == pytest.approx(score_before)
+        assert alloc == pytest.approx(alloc_before)
+
+    def test_machine_gun_false_does_not_modify(self):
+        score_before, alloc_before = 0.30, 0.20
+        score, alloc, blocked, _ = apply_meta_soft_penalty(
+            symbol="ADAUSD",
+            score=score_before,
+            allocation=alloc_before,
+            meta_score=-0.5,
+            machine_gun_mode=False,
+        )
+        assert blocked is False
+        assert score == pytest.approx(score_before)
+
+    def test_emergency_floor_hard_rejects(self):
+        _, _, blocked, _ = apply_meta_soft_penalty(
+            symbol="SOLUSD",
+            score=0.50,
+            allocation=0.20,
+            meta_score=-0.99,
+            machine_gun_mode=True,
+            meta_hard_filter=False,
+            meta_score_floor=-0.80,
+        )
+        assert blocked is True, "score below emergency floor must hard-reject"
+
+    def test_log_fn_called(self):
+        logs = []
+        apply_meta_soft_penalty(
+            "SOLUSD", 0.30, 0.20, -0.30,
+            machine_gun_mode=True, _log_fn=logs.append)
+        assert len(logs) == 1
+        assert "v2_soft_meta" in logs[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Top-N candidate selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSelectTopNMachineGun:
+    """Top-N selection chooses candidates above floor when slots exist."""
+
+    def _make_candidates(self, scores):
+        return [{"symbol": f"SYM{i}", "v2_opportunity_score": s}
+                for i, s in enumerate(scores)]
+
+    def test_selects_up_to_force_top_n(self):
+        cands = self._make_candidates([0.50, 0.40, 0.30, 0.20, 0.10])
+        selected = select_top_n_machine_gun(cands, open_slots=4, force_top_n=2, min_score=-0.25)
+        assert len(selected) == 2
+
+    def test_limited_by_open_slots(self):
+        cands = self._make_candidates([0.50, 0.40, 0.30])
+        selected = select_top_n_machine_gun(cands, open_slots=1, force_top_n=3, min_score=-0.25)
+        assert len(selected) == 1
+
+    def test_score_floor_filters_below_floor(self):
+        cands = self._make_candidates([0.50, -0.30, 0.10])
+        selected = select_top_n_machine_gun(cands, open_slots=3, force_top_n=3, min_score=-0.25)
+        scores = [c["v2_opportunity_score"] for c in selected]
+        assert all(s >= -0.25 for s in scores)
+        assert -0.30 not in scores
+
+    def test_empty_candidates_returns_empty(self):
+        selected = select_top_n_machine_gun([], open_slots=3, force_top_n=2)
+        assert selected == []
+
+    def test_zero_slots_returns_empty(self):
+        cands = self._make_candidates([0.50, 0.40])
+        selected = select_top_n_machine_gun(cands, open_slots=0, force_top_n=2)
+        assert selected == []
+
+    def test_log_fn_called(self):
+        logs = []
+        cands = self._make_candidates([0.50, 0.40, 0.30])
+        select_top_n_machine_gun(cands, open_slots=3, force_top_n=2, _log_fn=logs.append)
+        assert len(logs) == 1
+        assert "v2_rank" in logs[0]
+
+    def test_all_below_floor_returns_empty(self):
+        cands = self._make_candidates([-0.50, -0.40])
+        selected = select_top_n_machine_gun(cands, open_slots=3, force_top_n=2, min_score=-0.25)
+        assert selected == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Allocation scaling
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMachineGunAllocation:
+    """Allocation scaling returns small for low-score/chop, larger for high-conviction."""
+
+    def test_low_score_scalp_alloc_is_small(self):
+        alloc = compute_machine_gun_allocation(score=-0.10, lane="scalp")
+        assert alloc <= 0.12, f"low-score scalp alloc should be small, got {alloc}"
+
+    def test_high_conviction_runner_alloc_large(self):
+        alloc = compute_machine_gun_allocation(score=0.70, lane="runner")
+        assert alloc >= 0.25, f"high-conviction runner should get large alloc, got {alloc}"
+
+    def test_chop_scalp_capped(self):
+        alloc = compute_machine_gun_allocation(
+            score=0.60, lane="runner", market_mode="chop", allow_chop_scalps=True)
+        assert alloc <= RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC + 1e-6
+
+    def test_chop_no_cap_when_allow_false(self):
+        alloc_no_cap = compute_machine_gun_allocation(
+            score=0.60, lane="runner", market_mode="chop", allow_chop_scalps=False)
+        alloc_cap = compute_machine_gun_allocation(
+            score=0.60, lane="runner", market_mode="chop", allow_chop_scalps=True)
+        assert alloc_no_cap >= alloc_cap
+
+    def test_medium_score_returns_base_alloc(self):
+        alloc = compute_machine_gun_allocation(score=0.10, lane="scalp")
+        # Should be near base allocation
+        assert RUTHLESS_V2_MIN_SYMBOL_ALLOCATION <= alloc <= RUTHLESS_V2_MAX_SYMBOL_ALLOCATION
+
+    def test_alloc_always_in_bounds(self):
+        for score in (-0.30, -0.10, 0.0, 0.20, 0.50, 0.80):
+            for lane in ("scalp", "continuation", "runner"):
+                alloc = compute_machine_gun_allocation(score=score, lane=lane)
+                assert RUTHLESS_V2_MIN_SYMBOL_ALLOCATION <= alloc <= RUTHLESS_V2_MAX_SYMBOL_ALLOCATION, (
+                    f"score={score} lane={lane} alloc={alloc} out of bounds"
+                )
+
+    def test_higher_score_gives_higher_alloc(self):
+        low_alloc  = compute_machine_gun_allocation(score=0.05, lane="continuation")
+        high_alloc = compute_machine_gun_allocation(score=0.70, lane="continuation")
+        assert high_alloc > low_alloc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exposure / position limits still block in machine-gun mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestExposureLimitsBlockInMachineGun:
+    """Exposure / position limits still enforce hard caps even in machine-gun mode."""
+
+    def _make_mgr(self):
+        return MultiPositionManager(
+            max_concurrent=5,
+            max_new_per_day=12,
+            max_per_symbol_per_day=3,
+            max_symbol_alloc=0.35,
+            min_symbol_alloc=0.08,
+            max_total_exposure=1.50,
+            reentry_cooldown_min=30,
+        )
+
+    def test_max_concurrent_blocks_when_full(self):
+        mgr = self._make_mgr()
+        t = _now()
+        for i in range(5):
+            mgr.open_position(f"SYM{i}", 0.10, f"t{i}", t)
+        ok, reason = mgr.can_enter("NEWSYM", 0.10, t)
+        assert not ok
+        assert "max_concurrent" in reason
+
+    def test_total_exposure_blocks_when_exceeded(self):
+        mgr = MultiPositionManager(
+            max_concurrent=10,
+            max_new_per_day=20,
+            max_symbol_alloc=0.35,
+            max_total_exposure=1.50,
+            reentry_cooldown_min=0,
+        )
+        t = _now()
+        # Fill up to near cap
+        for i in range(5):
+            sym = f"SYM{i}"
+            mgr.open_position(sym, 0.30, f"t{i}", t)
+        ok, reason = mgr.can_enter("NEWSYM", 0.30, t)
+        assert not ok
+        assert "total_exposure" in reason
+
+    def test_max_entries_per_day_blocks(self):
+        mgr = MultiPositionManager(
+            max_concurrent=20, max_new_per_day=3,
+            max_symbol_alloc=0.50, max_total_exposure=10.0,
+            reentry_cooldown_min=0,
+        )
+        t = _now()
+        for i in range(3):
+            mgr.open_position(f"S{i}", 0.10, f"t{i}", t)
+        ok, reason = mgr.can_enter("NEWSYM", 0.10, t)
+        assert not ok
+        assert "max_new_per_day" in reason
+
+    def test_per_symbol_daily_limit_blocks(self):
+        mgr = MultiPositionManager(
+            max_concurrent=10, max_new_per_day=20,
+            max_per_symbol_per_day=2,
+            max_symbol_alloc=0.50, max_total_exposure=5.0,
+            reentry_cooldown_min=0,
+        )
+        t = _now()
+        mgr.open_position("ADAUSD", 0.10, "t1", t)
+        mgr.open_position("ADAUSD", 0.10, "t2", t)
+        ok, reason = mgr.can_enter("ADAUSD", 0.10, t)
+        assert not ok
+        assert "max_per_symbol_per_day" in reason
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V1 ruthless behavior unchanged in non-machine-gun mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestV1BehaviorUnchanged:
+    """V1 ruthless still uses hard filters when machine-gun mode is not enabled."""
+
+    def test_v1_chop_hard_blocks(self):
+        score, blocked, msg = apply_regime_soft_penalty(
+            "ADAUSD", 0.30, "chop",
+            machine_gun_mode=False,
+        )
+        assert blocked is True
+
+    def test_v1_regime_hard_block_true_still_blocks(self):
+        score, blocked, msg = apply_regime_soft_penalty(
+            "ADAUSD", 0.30, "chop",
+            machine_gun_mode=True,
+            regime_hard_block=True,
+        )
+        assert blocked is True
+
+    def test_v1_meta_hard_filter_true_no_modification(self):
+        score_before, alloc_before = 0.35, 0.20
+        score, alloc, blocked, _ = apply_meta_soft_penalty(
+            "ADAUSD", score_before, alloc_before, -0.50,
+            machine_gun_mode=True,
+            meta_hard_filter=True,
+        )
+        assert blocked is False
+        # V1 path: no modification when hard filter is on
+        assert score == pytest.approx(score_before)
+        assert alloc == pytest.approx(alloc_before)
+
+    def test_v2_mode_defaults_are_machine_gun_on(self):
+        """Ensure the module-level defaults are machine-gun=True."""
+        assert RUTHLESS_V2_MACHINE_GUN_MODE is True
+        assert RUTHLESS_V2_REGIME_HARD_BLOCK is False
+        assert RUTHLESS_V2_META_HARD_FILTER is False

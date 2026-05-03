@@ -24,15 +24,52 @@ import math
 
 RUTHLESS_V2_MODE                       = False  # global default off; activated by profile/param
 
-RUTHLESS_V2_MAX_CONCURRENT_POSITIONS   = 4
-RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY    = 8
-RUTHLESS_V2_MAX_ENTRIES_PER_SYMBOL_PER_DAY = 2
-RUTHLESS_V2_MAX_SYMBOL_ALLOCATION      = 0.30
+RUTHLESS_V2_MAX_CONCURRENT_POSITIONS   = 5
+RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY    = 12
+RUTHLESS_V2_MAX_ENTRIES_PER_SYMBOL_PER_DAY = 3
+RUTHLESS_V2_MAX_SYMBOL_ALLOCATION      = 0.35
 RUTHLESS_V2_MIN_SYMBOL_ALLOCATION      = 0.08
-RUTHLESS_V2_MAX_TOTAL_EXPOSURE         = 1.25
+RUTHLESS_V2_MAX_TOTAL_EXPOSURE         = 1.50
 RUTHLESS_V2_DECISION_INTERVAL_MIN      = 15
-RUTHLESS_V2_MIN_SCORE_TO_TRADE         = 0.005
+RUTHLESS_V2_MIN_SCORE_TO_TRADE         = -0.25
 RUTHLESS_V2_REENTRY_COOLDOWN_MIN       = 30
+
+# ── V2 machine-gun mode ───────────────────────────────────────────────────────
+# When True, V2 acts as an aggressive "machine-gun" opportunity engine:
+#   - Regime blocks become soft score penalties instead of hard rejects.
+#   - Meta-filter rejections become score/allocation penalties instead of hard rejects.
+#   - Top-N candidates are forced when slots are open, even at low scores.
+#   - Smaller allocations by default; scales up only for high conviction.
+RUTHLESS_V2_MACHINE_GUN_MODE          = True
+
+# Force top-N entries when candidates exist and slots are available.
+RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES = 2
+
+# Regime blocks become score penalties (not hard rejects) in machine-gun mode.
+# Only truly dangerous modes (risk_off_crash, dump, emergency) remain hard blocks.
+RUTHLESS_V2_REGIME_HARD_BLOCK         = False
+
+# Meta-filter becomes a score/allocation modifier instead of hard reject.
+RUTHLESS_V2_META_HARD_FILTER          = False
+RUTHLESS_V2_META_AS_SCORE_PENALTY     = True
+RUTHLESS_V2_META_SCORE_WEIGHT         = 0.20
+RUTHLESS_V2_LOW_META_ALLOC_MULT       = 0.50
+
+# Allow entries in chop regime (capped at RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC).
+RUTHLESS_V2_ALLOW_CHOP_SCALPS         = True
+RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC      = 0.10
+
+# Allocation tiers for machine-gun mode.
+RUTHLESS_V2_BASE_ALLOCATION           = 0.12
+RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION = 0.30
+
+# Regime penalty applied to score in soft-block mode.
+RUTHLESS_V2_SOFT_REGIME_PENALTY          = 0.12
+RUTHLESS_V2_SELLOFF_PENALTY_MULTIPLIER   = 1.5   # extra weight for selloff/bear regimes
+RUTHLESS_V2_WEAK_REGIME_PENALTY_MULT     = 0.5   # reduced penalty for mild weak regimes
+
+# Dangerous market-mode strings that always hard-block even in machine-gun mode.
+RUTHLESS_V2_HARD_BLOCK_MODES          = frozenset(["risk_off_crash", "dump", "emergency"])
 
 # Partial TP / split-exit defaults
 RUTHLESS_V2_PARTIAL_TP_ENABLED         = True
@@ -892,11 +929,302 @@ def rank_candidates_v2(candidates):
     return sorted(candidates, key=lambda c: c.get("v2_opportunity_score", 0.0), reverse=True)
 
 
+# ── Machine-gun mode helpers ──────────────────────────────────────────────────
+
+def apply_regime_soft_penalty(
+    symbol,
+    score,
+    market_mode,
+    machine_gun_mode=True,
+    regime_hard_block=False,
+    soft_penalty=None,
+    hard_block_modes=None,
+    _log_fn=None,
+):
+    """Apply regime filter in machine-gun mode.
+
+    In machine-gun mode with regime_hard_block=False, normal regime blocks
+    (e.g. chop) become soft score penalties instead of hard rejects.  Only
+    truly dangerous modes (risk_off_crash, dump, emergency) remain hard blocks.
+
+    Parameters
+    ----------
+    symbol         : str
+    score          : float — current opportunity score
+    market_mode    : str or None
+    machine_gun_mode : bool
+    regime_hard_block : bool — if True, always hard-block (V1 behavior)
+    soft_penalty   : float or None — score deduction for soft block;
+                     defaults to RUTHLESS_V2_SOFT_REGIME_PENALTY
+    hard_block_modes : set or None — modes that always hard-block;
+                     defaults to RUTHLESS_V2_HARD_BLOCK_MODES
+    _log_fn        : callable(str) or None — optional compact log function
+
+    Returns
+    -------
+    (score: float, blocked: bool, log_msg: str or None)
+      blocked=True  → hard reject (do not trade)
+      blocked=False → candidate still eligible (score may be penalized)
+    """
+    if soft_penalty is None:
+        soft_penalty = RUTHLESS_V2_SOFT_REGIME_PENALTY
+    if hard_block_modes is None:
+        hard_block_modes = RUTHLESS_V2_HARD_BLOCK_MODES
+
+    mm = str(market_mode).lower() if market_mode else ""
+
+    # Always hard-block truly dangerous modes
+    for danger in hard_block_modes:
+        if danger in mm:
+            msg = f"[v2_hard_regime] {symbol} mode={market_mode} hard_block=True"
+            if _log_fn:
+                _log_fn(msg)
+            return score, True, msg
+
+    # If not in machine-gun mode or hard block is configured, use V1 behavior
+    if not machine_gun_mode or regime_hard_block:
+        # V1 hard block for non-allowed modes
+        if mm and mm not in ("risk_on_trend", "pump", "trend"):
+            return score, True, None
+        return score, False, None
+
+    # Machine-gun soft penalty
+    is_chop    = "chop" in mm
+    is_selloff = "selloff" in mm or "bear" in mm
+    is_weak    = mm and mm not in ("risk_on_trend", "pump", "trend")
+
+    penalty = 0.0
+    if is_selloff:
+        penalty = soft_penalty * RUTHLESS_V2_SELLOFF_PENALTY_MULTIPLIER
+    elif is_chop:
+        penalty = soft_penalty
+    elif is_weak:
+        penalty = soft_penalty * RUTHLESS_V2_WEAK_REGIME_PENALTY_MULT
+
+    if penalty > 0.0:
+        score_before = score
+        score        = score - penalty
+        msg = (
+            f"[v2_soft_regime] {symbol} mode={market_mode}"
+            f" penalty={penalty:.2f}"
+            f" score_before={score_before:.4f}"
+            f" score_after={score:.4f}"
+        )
+        if _log_fn:
+            _log_fn(msg)
+        return score, False, msg
+
+    return score, False, None
+
+
+def apply_meta_soft_penalty(
+    symbol,
+    score,
+    allocation,
+    meta_score,
+    machine_gun_mode=True,
+    meta_hard_filter=False,
+    meta_as_score_penalty=True,
+    meta_score_weight=None,
+    low_meta_alloc_mult=None,
+    meta_score_floor=-1.0,
+    _log_fn=None,
+):
+    """Apply meta-filter in machine-gun mode.
+
+    In machine-gun mode with meta_hard_filter=False, meta-score modifies
+    score and allocation instead of hard-rejecting the candidate.
+
+    Parameters
+    ----------
+    symbol              : str
+    score               : float — current opportunity score
+    allocation          : float — current intended allocation
+    meta_score          : float — meta-entry score (typically -1..1 or 0..1)
+    machine_gun_mode    : bool
+    meta_hard_filter    : bool — if True, use V1 hard-reject behavior
+    meta_as_score_penalty : bool — blend meta_score into final score
+    meta_score_weight   : float or None — weight of meta in score blend
+    low_meta_alloc_mult : float or None — alloc multiplier when meta is low
+    meta_score_floor    : float — scores below this are still hard-rejected
+                          (emergency safety; default -1.0 = never hard-reject)
+    _log_fn             : callable(str) or None
+
+    Returns
+    -------
+    (score: float, allocation: float, blocked: bool, log_msg: str or None)
+    """
+    if meta_score_weight is None:
+        meta_score_weight = RUTHLESS_V2_META_SCORE_WEIGHT
+    if low_meta_alloc_mult is None:
+        low_meta_alloc_mult = RUTHLESS_V2_LOW_META_ALLOC_MULT
+
+    # Hard reject floor (emergency safety, applies even in machine-gun mode)
+    if meta_score < meta_score_floor:
+        msg = f"[v2_meta_emergency_reject] {symbol} meta={meta_score:.3f} < floor={meta_score_floor:.3f}"
+        if _log_fn:
+            _log_fn(msg)
+        return score, allocation, True, msg
+
+    # If not machine-gun mode or hard filter configured, use V1 behavior
+    if not machine_gun_mode or meta_hard_filter:
+        return score, allocation, False, None
+
+    # Soft mode: blend meta score into opportunity score
+    alloc_mult = 1.0
+    if meta_as_score_penalty:
+        score = score + meta_score_weight * meta_score
+
+    # Low meta → reduce allocation
+    if meta_score < 0.0:
+        alloc_mult = low_meta_alloc_mult
+        allocation = allocation * alloc_mult
+
+    msg = (
+        f"[v2_soft_meta] {symbol}"
+        f" meta={meta_score:.3f}"
+        f" score_after={score:.4f}"
+        f" alloc_mult={alloc_mult:.2f}"
+    )
+    if _log_fn:
+        _log_fn(msg)
+    return score, allocation, False, msg
+
+
+def select_top_n_machine_gun(
+    ranked_candidates,
+    open_slots,
+    force_top_n=None,
+    min_score=None,
+    _log_fn=None,
+):
+    """Select up to force_top_n candidates from ranked list for machine-gun entries.
+
+    Parameters
+    ----------
+    ranked_candidates : list of dict — sorted descending by v2_opportunity_score;
+                        each dict must have 'v2_opportunity_score' key and optionally
+                        'symbol', 'lane'.
+    open_slots        : int — number of available concurrent position slots
+    force_top_n       : int or None — max candidates to take; defaults to
+                        RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES
+    min_score         : float or None — minimum score floor; defaults to
+                        RUTHLESS_V2_MIN_SCORE_TO_TRADE
+    _log_fn           : callable(str) or None
+
+    Returns
+    -------
+    list of dict — the selected candidate dicts (may be empty)
+    """
+    if force_top_n is None:
+        force_top_n = RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES
+    if min_score is None:
+        min_score = RUTHLESS_V2_MIN_SCORE_TO_TRADE
+
+    n_candidates = len(ranked_candidates)
+    take          = min(force_top_n, open_slots, n_candidates)
+
+    # Filter by score floor
+    eligible = [
+        c for c in ranked_candidates
+        if c.get("v2_opportunity_score", 0.0) >= min_score
+    ]
+
+    selected = eligible[:take]
+
+    msg = (
+        f"[v2_rank] candidates={n_candidates}"
+        f" eligible={len(eligible)}"
+        f" slots={open_slots}"
+        f" force_top_n={force_top_n}"
+        f" taking={len(selected)}"
+    )
+    if _log_fn:
+        _log_fn(msg)
+
+    return selected
+
+
+def compute_machine_gun_allocation(
+    score,
+    lane,
+    market_mode=None,
+    base_alloc=None,
+    high_conviction_alloc=None,
+    max_symbol_alloc=None,
+    chop_scalp_max_alloc=None,
+    allow_chop_scalps=True,
+):
+    """Compute allocation for machine-gun mode based on score and lane.
+
+    Allocation tiers:
+      low score scalp/chop      -> 0.08–0.10
+      medium score              -> 0.12–0.18
+      high score continuation   -> 0.20–0.25
+      high conviction runner    -> up to high_conviction_alloc
+
+    Parameters
+    ----------
+    score                : float — v2_opportunity_score (may be negative)
+    lane                 : str — 'scalp', 'continuation', or 'runner'
+    market_mode          : str or None
+    base_alloc           : float or None — defaults to RUTHLESS_V2_BASE_ALLOCATION
+    high_conviction_alloc: float or None — defaults to RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION
+    max_symbol_alloc     : float or None — defaults to RUTHLESS_V2_MAX_SYMBOL_ALLOCATION
+    chop_scalp_max_alloc : float or None — cap for chop scalps;
+                           defaults to RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC
+    allow_chop_scalps    : bool
+
+    Returns
+    -------
+    float — allocation fraction in [RUTHLESS_V2_MIN_SYMBOL_ALLOCATION, max_symbol_alloc]
+    """
+    if base_alloc is None:
+        base_alloc = RUTHLESS_V2_BASE_ALLOCATION
+    if high_conviction_alloc is None:
+        high_conviction_alloc = RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION
+    if max_symbol_alloc is None:
+        max_symbol_alloc = RUTHLESS_V2_MAX_SYMBOL_ALLOCATION
+    if chop_scalp_max_alloc is None:
+        chop_scalp_max_alloc = RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC
+
+    mm = str(market_mode).lower() if market_mode else ""
+    is_chop = "chop" in mm
+
+    # Runner lane at high conviction
+    if lane == "runner" and score >= 0.50:
+        alloc = min(high_conviction_alloc + (score - 0.50) * 0.10, max_symbol_alloc)
+    elif lane == "runner" and score >= 0.30:
+        alloc = 0.20 + (score - 0.30) * 0.25
+    elif lane == "continuation" and score >= 0.35:
+        alloc = 0.14 + (score - 0.35) * 0.22
+    elif score >= 0.20:
+        alloc = base_alloc + (score - 0.20) * 0.10
+    elif score >= 0.05:
+        alloc = base_alloc
+    else:
+        # Low score / scalp
+        alloc = max(RUTHLESS_V2_MIN_SYMBOL_ALLOCATION, 0.08 + max(score, 0.0) * 0.20)
+
+    # Chop cap
+    if is_chop and allow_chop_scalps:
+        alloc = min(alloc, chop_scalp_max_alloc)
+
+    # Clip to allowed range
+    alloc = max(RUTHLESS_V2_MIN_SYMBOL_ALLOCATION, min(alloc, max_symbol_alloc))
+    return round(alloc, 4)
+
+
 # ── Startup log helper ────────────────────────────────────────────────────────
 
 def format_v2_startup_log(
     risk_profile, v2_mode, max_positions, active_models,
     dynamic_weights=None,
+    machine_gun_mode=None,
+    regime_hard_block=None,
+    meta_hard_filter=None,
+    force_top_n=None,
+    min_score_to_trade=None,
 ):
     """Format V2 startup audit log lines (returns list of strings)."""
     lines = [
@@ -907,4 +1235,21 @@ def format_v2_startup_log(
     if dynamic_weights:
         w_str = " ".join(f"{m}={w:.3f}" for m, w in sorted(dynamic_weights.items()))
         lines.append(f"[v2_weights] {w_str}")
+
+    # Machine-gun mode diagnostics
+    mg = machine_gun_mode if machine_gun_mode is not None else RUTHLESS_V2_MACHINE_GUN_MODE
+    rh = regime_hard_block if regime_hard_block is not None else RUTHLESS_V2_REGIME_HARD_BLOCK
+    mh = meta_hard_filter  if meta_hard_filter  is not None else RUTHLESS_V2_META_HARD_FILTER
+    fn = force_top_n       if force_top_n        is not None else RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES
+    ms = min_score_to_trade if min_score_to_trade is not None else RUTHLESS_V2_MIN_SCORE_TO_TRADE
+    lines.append(
+        f"[v2_machine_gun] enabled={mg}"
+        f" regime_hard_block={rh}"
+        f" meta_hard_filter={mh}"
+        f" force_top_n={fn}"
+        f" min_score={ms}"
+        f" max_entries_day={RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY}"
+        f" max_concurrent={RUTHLESS_V2_MAX_CONCURRENT_POSITIONS}"
+        f" reentry_cooldown_min={RUTHLESS_V2_REENTRY_COOLDOWN_MIN}"
+    )
     return lines
