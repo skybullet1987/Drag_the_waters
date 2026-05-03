@@ -8,7 +8,6 @@ except ImportError:
     pass
 
 
-
 # ===============================================================================
 # aggressive_config
 # ===============================================================================
@@ -112,38 +111,7 @@ def compute_weighted_yes_fraction(
     vote_threshold=0.50,
     weights=None,
 ):
-    """Compute the weighted yes-fraction from a dict of per-model vote probabilities.
-
-    For each model in *model_votes*:
-      - if its probability >= vote_threshold  → counts as YES with its weight
-      - otherwise                             → counts as NO with its weight
-
-    weighted_yes_fraction = sum(weight_i for yes models)
-                            / sum(weight_i for all present models)
-
-    Models with zero weight in the weight map are present but contribute 0.
-    Models absent from *model_votes* are excluded from both numerator and
-    denominator so the result correctly normalises to the present voters.
-
-    Parameters
-    ----------
-    model_votes    : dict[str, float]
-        Per-model probability values, e.g. {"lgbm_bal": 0.72, "hgbc_l2": 0.58, ...}
-    vote_threshold : float
-        Probability floor to count a model as voting YES (default 0.50).
-    weights        : dict[str, float] or None
-        Model weights.  If None, uses APEX_WEIGHTED_VOTE_WEIGHTS.
-
-    Returns
-    -------
-    dict with keys:
-        "weighted_yes_fraction" : float — 0.0 if no present models
-        "yes_weight"            : float — sum of weights for YES voters
-        "total_weight"          : float — sum of weights for present voters
-        "yes_models"            : list[str] — models that voted YES
-        "no_models"             : list[str] — models that voted NO
-        "zero_weight_models"    : list[str] — present but zero-weight models
-    """
+    """Compute the weighted yes-fraction from a dict of per-model vote probabilities."""
     if weights is None:
         weights = APEX_WEIGHTED_VOTE_WEIGHTS
 
@@ -189,39 +157,7 @@ def apex_voting_decision(
     combo_lgbm_min=None,
     weights=None,
 ):
-    """Evaluate the apex voting decision using the weighted ensemble rule.
-
-    Fires if ANY of:
-      1. weighted_yes_fraction >= yes_threshold (0.45)
-      2. momentum_override is True
-      3. hgbc_l2 >= combo_hgbc_min (0.55) AND lgbm_bal >= combo_lgbm_min (0.55)
-
-    Parameters
-    ----------
-    model_votes      : dict[str, float] — per-model probability values
-    momentum_override: bool — if True, always fires
-    vote_threshold   : float — per-model YES/NO threshold (default 0.50)
-    yes_threshold    : float or None — weighted-fraction threshold; defaults to
-                       APEX_WEIGHTED_YES_THRESHOLD (0.45)
-    combo_hgbc_min   : float or None — hgbc_l2 combo floor; defaults to 0.55
-    combo_lgbm_min   : float or None — lgbm_bal combo floor; defaults to 0.55
-    weights          : dict or None — model weight map; defaults to
-                       APEX_WEIGHTED_VOTE_WEIGHTS
-
-    Returns
-    -------
-    dict with keys:
-        "triggered"              : bool
-        "trigger_path"           : str or None — which path fired first
-        "weighted_yes_fraction"  : float
-        "yes_threshold"          : float
-        "momentum_override"      : bool
-        "combo_fired"            : bool
-        "yes_models"             : list[str]
-        "no_models"              : list[str]
-        "zero_weight_models"     : list[str]
-        "reject_reason"          : str or None
-    """
+    """Evaluate the apex voting decision using the weighted ensemble rule."""
     if yes_threshold is None:
         yes_threshold = APEX_WEIGHTED_YES_THRESHOLD
     if combo_hgbc_min is None:
@@ -290,40 +226,12 @@ def apex_voting_decision(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # REGIME FILTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class RegimeFilter:
-    """
-    Bitcoin-based macro regime filter.
-
-    Logic
-    -----
-    The filter collects 4-hour BTC bars via a QC consolidator.  On each
-    decision call it evaluates two conditions:
-
-    1. **SMA gate** — the latest 4h close must be above the 20-bar SMA.
-    2. **Slope gate** — a linear slope over the last 5 bars must be positive.
-
-    If either condition fails the filter returns False (block alt longs).
-    BTC itself is always permitted regardless of regime.
-
-    Insufficient history (< 20 bars) is treated as "risk on".
-
-    Usage
-    -----
-    In ``initialize``::
-
-        self._regime = RegimeFilter()
-        self._regime.update_btc(self, self._btc_sym)
-
-    In entry logic::
-
-        if not self._regime.is_risk_on(self._btc_sym, sym=top_sym):
-            return
-    """
+    """Bitcoin-based macro regime filter."""
 
     _SMA_PERIOD   = 20
     _SLOPE_PERIOD = 5
@@ -385,29 +293,7 @@ class RegimeFilter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def kelly_fraction(p, tp, sl, kelly_frac=0.25, max_alloc=0.80):
-    """
-    Compute the fractional-Kelly allocation for a long trade.
-
-    Full-Kelly formula::
-
-        b       = tp / sl          (payoff ratio)
-        f_full  = (p × (b + 1) − 1) / b
-
-    The result is scaled by *kelly_frac* (quarter-Kelly) and clamped to
-    [0, max_alloc].
-
-    Parameters
-    ----------
-    p          : float — model probability P(win) in (0, 1).
-    tp         : float — take-profit fraction (e.g. 0.020).
-    sl         : float — stop-loss fraction   (e.g. 0.012).
-    kelly_frac : float — fractional-Kelly multiplier (default 0.25).
-    max_alloc  : float — hard ceiling on allocation  (default 0.80).
-
-    Returns
-    -------
-    float — allocation fraction in [0, max_alloc].
-    """
+    """Compute the fractional-Kelly allocation for a long trade."""
     if sl <= 0:
         return 0.0
     b      = tp / sl
@@ -428,32 +314,7 @@ def compute_qty(
     allocation,
     min_alloc=0.0,
 ):
-    """
-    Compute the quantity (in coin units) to purchase.
-
-    Sizing logic
-    ────────────
-    1. If *use_kelly* is True, compute the Kelly allocation.
-       - If Kelly <= 0 (negative edge), fall back to flat *allocation*.
-       - If Kelly > 0 and *min_alloc* > 0, apply the floor:
-         ``alloc = max(kelly_alloc, min_alloc)``
-    2. If *use_kelly* is False, use flat *allocation* directly.
-    3. Apply *max_alloc* cap (always honoured, even after min_alloc floor).
-    4. Apply *cash_buffer* to leave headroom for fees.
-    5. Convert dollar value to coin units.
-
-    Parameters
-    ----------
-    min_alloc : float
-        Minimum allocation fraction when Kelly is positive (default 0.0).
-        Set to e.g. 0.75 for ruthless mode so Kelly cannot shrink trades
-        below 75 % of portfolio.  Ignored when use_kelly=False.
-
-    Returns
-    -------
-    tuple[float, float]
-        ``(qty, alloc_fraction)`` where qty is in coin units.
-    """
+    """Compute the quantity (in coin units) to purchase."""
     if use_kelly:
         alloc = kelly_fraction(mean_proba, tp, sl, kelly_frac, max_alloc)
         if alloc <= 0.0:
@@ -474,19 +335,7 @@ def compute_qty(
 
 
 class RiskManager:
-    """
-    Pre-trade risk guardrails for the Vox strategy.
-
-    Parameters
-    ----------
-    max_daily_sl    : int   — halt new entries after this many SL hits.
-    cooldown_mins   : float — global cooldown (minutes) after any exit.
-    sl_cooldown_mins: float — per-coin cooldown (minutes) specifically after
-                              a stop-loss exit.
-    max_dd_pct      : float — circuit-breaker threshold (e.g. 0.08 = 8 %).
-    cash_buffer     : float — reserved; not used internally but stored for
-                              consistency with config.
-    """
+    """Pre-trade risk guardrails for the Vox strategy."""
 
     def __init__(
         self,
@@ -567,22 +416,7 @@ class RiskManager:
         return dd > self._max_dd_pct
 
     def can_enter(self, sym, current_time, portfolio_value, rolling_high=None):
-        """
-        Evaluate all pre-trade risk checks for a potential long entry.
-
-        Parameters
-        ----------
-        sym             : Symbol  — the symbol to be traded.
-        current_time    : datetime — current algorithm time.
-        portfolio_value : float   — current total portfolio value.
-        rolling_high    : float or None — caller-provided rolling high; if None
-                          the internally tracked value is used.
-
-        Returns
-        -------
-        tuple[bool, str]
-            ``(allowed, reason)`` where *reason* describes the decision.
-        """
+        """Evaluate all pre-trade risk checks for a potential long entry."""
         # Update rolling high with caller-provided value if given
         if rolling_high is not None:
             self.update_rolling_high(rolling_high)
@@ -630,7 +464,6 @@ class RiskManager:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-
 # ── Vote score constants (defaults; override via config) ──────────────────────
 # Bootstrap defaults — intentionally relaxed to restore trading and gather data.
 # Tighten after observing candidate journal / reject diagnostics.
@@ -652,23 +485,7 @@ _W_TOP3_MEAN     = 0.30
 
 
 def compute_vote_score(active_votes, vote_thr=DEFAULT_VOTE_THRESHOLD):
-    """Compute profit-voting score fields from active-model votes.
-
-    Parameters
-    ----------
-    active_votes : dict[str, float]
-        Model-id → P(class=1) for active-role models only.
-    vote_thr : float
-        Probability threshold used to classify a model as "voting yes".
-
-    Returns
-    -------
-    dict with keys:
-        active_model_count  — int
-        vote_yes_fraction   — float in [0, 1]
-        top3_mean           — float: mean of top-3 active probabilities
-        vote_score          — float: weighted composite (active_mean, yes_frac, top3_mean)
-    """
+    """Compute profit-voting score fields from active-model votes."""
     if not active_votes:
         return {
             "active_model_count": 0,
@@ -706,40 +523,7 @@ def check_profit_voting_gate(
     ev_floor=0.0,
     require_min_active_models=3,
 ):
-    """Check profit-voting entry gate for ruthless profit-voting mode.
-
-    Parameters
-    ----------
-    conf : dict
-        Output of VoxEnsemble.predict_with_confidence — must contain
-        active_votes, vote_yes_fraction, top3_mean, pred_return, active_model_count.
-    market_mode : str or None
-        Current BTC market mode (e.g. "risk_on_trend", "pump", "chop").
-    vote_thr : float
-        Per-model yes/no threshold.
-    vote_yes_frac_min : float
-        Minimum yes-fraction for trend/pump markets.
-    top3_mean_min : float
-        Minimum top-3 mean for trend/pump markets.
-    chop_vote_yes_frac_min : float
-        Minimum yes-fraction in chop (supermajority).
-    chop_top3_mean_min : float
-        Minimum top-3 mean in chop.
-    chop_pred_return_min : float
-        Minimum predicted return in chop.
-    chop_ev_min : float
-        Minimum EV floor in chop.
-    ev_score : float
-        Candidate ev_after_costs (used for chop EV check and ev_floor check).
-    ev_floor : float
-        Minimum EV required for all profit-voting entries (trend + chop).
-    require_min_active_models : int
-        Minimum number of active models required for a valid vote.
-
-    Returns
-    -------
-    (approved: bool, reason: str)
-    """
+    """Check profit-voting entry gate for ruthless profit-voting mode."""
     active_votes     = conf.get("active_votes", {})
     active_count     = conf.get("active_model_count", len(active_votes))
     vote_yes_frac    = conf.get("vote_yes_fraction", 0.0)
@@ -841,22 +625,7 @@ def format_profit_vote_log(sym_str, conf, vote_score_fields, market_mode=None, a
 # Models in RUTHLESS_DIAGNOSTIC_MODELS are never promoted.
 
 def apply_ruthless_active_promotion(conf, active_models, diagnostic_models=None):
-    """Promote shadow models to active pool in ruthless profit-voting mode.
-
-    Modifies *conf* in-place.  Models listed in *active_models* that are
-    currently in conf['shadow_votes'] are moved to conf['active_votes'] for
-    vote-score computation.  Models in *diagnostic_models* are never promoted.
-
-    Parameters
-    ----------
-    conf              : dict — from predict_with_confidence (modified in-place)
-    active_models     : list[str] — model IDs to include as active
-    diagnostic_models : list[str] or None — model IDs never promoted (gnb, lr, lr_bal)
-
-    Returns
-    -------
-    int — number of models added to active pool by promotion
-    """
+    """Promote shadow models to active pool in ruthless profit-voting mode."""
     if not active_models:
         return 0
 
@@ -991,7 +760,6 @@ def format_pv_summary_log(pv_counters):
         f" fail_chop_ev={c['fail_chop_ev']}"
         f" no_active={c['no_active_votes']}"
     )
-
 
 
 # ===============================================================================
@@ -1147,15 +915,7 @@ def evaluate_candidate(
     ruthless_active_models=None,
     ruthless_diagnostic_models=None,
 ):
-    """Evaluate a single candidate for entry. Returns a result dict or None if filtered.
-
-    counters: dict with keys n_pass_disp, n_pass_agree, n_pass_score,
-              n_pass_ev, n_pass_pred_ret, n_momentum_override — mutated in-place.
-
-    When risk_profile=ruthless and market_mode is pump/risk_on_trend and
-    ruthless_good_mode_relaxation is True, the confirmation thresholds are
-    slightly relaxed to carefully increase sample size in favorable modes.
-    """
+    """Evaluate a single candidate for entry. Returns a result dict or None if filtered."""
     class_proba = conf["class_proba"]
     std_proba   = conf["std_proba"]
     n_agree     = conf["n_agree"]
@@ -1426,16 +1186,7 @@ def _make_ada(logger=None):
 # never affect active trading decisions.
 
 class MarkovRegimeDiagnostic:
-    """Lightweight Markov-inspired regime diagnostic.
-
-    Uses a multinomial logistic regression trained on regime-related features
-    (ret_4, ret_16, volatility, volume_ratio) to estimate probabilities of
-    being in uptrend/downtrend/chop/high_vol states.
-
-    Outputs a pseudo-probability for the "risk_on" regime (states 0=up, 1=chop,
-    2=down) rather than a direct buy probability.  Persisted as a diagnostic
-    probability.
-    """
+    """Lightweight Markov-inspired regime diagnostic."""
 
     def __init__(self):
         from sklearn.linear_model import LogisticRegression

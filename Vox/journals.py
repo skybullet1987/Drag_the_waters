@@ -3,7 +3,6 @@ import json
 import uuid
 
 
-
 # ===============================================================================
 # candidate_journal
 # ===============================================================================
@@ -30,27 +29,7 @@ CANDIDATE_JOURNAL_TOP_N    = 5
 
 
 class CandidateJournal:
-    """Journal for candidate ranking and skipped-candidate diagnostics.
-
-    Usage
-    -----
-    At each decision cycle::
-
-        journal.record_cycle(time, candidates)
-
-    Retrieve records::
-
-        records = journal.get_records()
-        journal.to_json()
-
-    Each candidate record contains::
-
-        time, symbol, rank, selected, reject_reason,
-        market_mode, confirm, vote_score, active_mean, active_std,
-        active_n_agree, vote_yes_fraction, top3_mean, pred_return,
-        ev_score, active_votes, shadow_votes, diagnostic_votes,
-        entry_path
-    """
+    """Journal for candidate ranking and skipped-candidate diagnostics."""
 
     def __init__(self, max_size=CANDIDATE_JOURNAL_MAX_SIZE, top_n=CANDIDATE_JOURNAL_TOP_N,
                  logger=None):
@@ -62,21 +41,7 @@ class CandidateJournal:
     # ── Record a candidate decision cycle ─────────────────────────────────────
 
     def record_cycle(self, time, candidates):
-        """Record the top-N candidates from a decision cycle.
-
-        Parameters
-        ----------
-        time       : datetime-like or str — decision timestamp
-        candidates : list[dict]
-            Each dict must contain at minimum:
-              symbol (str), rank (int), selected (bool),
-              reject_reason (str or None)
-            Optional but journaled when present:
-              market_mode, confirm, vote_score, active_mean, active_std,
-              active_n_agree, vote_yes_fraction, top3_mean, pred_return,
-              ev_score, active_votes, shadow_votes, diagnostic_votes,
-              entry_path
-        """
+        """Record the top-N candidates from a decision cycle."""
         if not candidates:
             return
 
@@ -158,24 +123,7 @@ def build_candidate_records(
     selected_sym=None,
     rejected_reason=None,
 ):
-    """Build candidate record list for a single decision cycle.
-
-    Parameters
-    ----------
-    ranked_results   : list[(sym, final_score)] — sorted descending by score
-    conf_data        : dict[sym, conf_dict]
-    ev_data          : dict[sym, float]
-    entry_path_data  : dict[sym, str]
-    scores           : dict[sym, float]
-    market_mode      : str or None
-    confirm_reasons  : dict[sym, str] or None
-    selected_sym     : sym or None — the symbol chosen for entry
-    rejected_reason  : str or None — why no entry was taken (meta-filter, regime, etc.)
-
-    Returns
-    -------
-    list[dict] — ready for CandidateJournal.record_cycle()
-    """
+    """Build candidate record list for a single decision cycle."""
     if confirm_reasons is None:
         confirm_reasons = {}
     records = []
@@ -254,7 +202,6 @@ def build_rejected_candidate_records(conf_dict, market_mode=None, top_n=5):
             "active_model_count": conf.get("active_model_count", 0),
         })
     return records
-
 
 
 # ===============================================================================
@@ -393,23 +340,7 @@ class TradeJournal:
     # ── Model attribution ─────────────────────────────────────────────────────
 
     def compute_model_attribution(self):
-        """Compute per-model attribution metrics from completed journal records.
-
-        Returns
-        -------
-        dict[str, dict] — model_id -> attribution metrics:
-            vote_yes_count       — times model voted yes (proba >= threshold)
-            vote_no_count        — times model voted no
-            win_rate_when_yes    — win rate when model voted yes (None if no data)
-            avg_return_when_yes  — avg realized return when model voted yes
-            avg_return_when_no   — avg realized return when model voted no
-            precision_proxy      — fraction of yes-votes that resulted in wins
-
-        Notes
-        -----
-        With a small sample (< 50 trades), results are noisy.
-        See README.md for offline multi-window analysis guidance.
-        """
+        """Compute per-model attribution metrics from completed journal records."""
         model_stats = {}
 
         for rec in self._records:
@@ -714,27 +645,7 @@ def _make_trade_id():
 
 
 class TradeVoteAudit:
-    """True selected-trade vote audit.
-
-    Records only confirmed filled entry/exit events (not attempts).
-    Persists to ObjectStore as newline-delimited JSON for offline analysis.
-
-    Usage::
-
-        audit = TradeVoteAudit(logger=self.log)
-
-        # At entry fill:
-        trade_id = audit.record_entry(symbol, entry_snapshot)
-
-        # At exit fill:
-        audit.record_exit(trade_id, exit_outcome)
-
-        # Persist to ObjectStore:
-        audit.save(self.object_store)
-
-        # Restore from ObjectStore:
-        audit.load(self.object_store)
-    """
+    """True selected-trade vote audit."""
 
     def __init__(self, logger=None, max_memory=2000):
         self._logger   = logger
@@ -1075,28 +986,7 @@ def build_entry_snapshot(
     effective_model_weights=None,
     dynamic_vote_score=0.0,
 ):
-    """Build a complete entry snapshot dict for trade_vote_audit.record_entry().
-
-    Parameters
-    ----------
-    symbol, entry_order_id, entry_time, entry_price, entry_qty, allocation : basic trade info
-    risk_profile : str
-    ruthless_v2_mode : bool
-    conf : dict — predict_with_confidence output
-    ev_score, final_score : float
-    market_mode, confirm, entry_path : str or None
-    multihorizon_scores : dict or None — from compute_multihorizon_scores()
-    pump_scores : dict or None — from compute_pump_scores()
-    v2_opportunity_score, relative_strength_score : float
-    relative_strength_rank : int or None
-    meta_entry_score : float
-    effective_model_weights : dict or None — {model_id: weight}
-    dynamic_vote_score : float — weighted vote score from DynamicVoterWeighting
-
-    Returns
-    -------
-    dict
-    """
+    """Build a complete entry snapshot dict for trade_vote_audit.record_entry()."""
     mh = multihorizon_scores or {}
     ps = pump_scores or {}
 
@@ -1246,30 +1136,7 @@ def _feature_diag_suffix(ft):
 # ── Vote log formatting ───────────────────────────────────────────────────────
 
 def format_vote_log(symbol, conf, meta_score=None, market_mode=None):
-    """Format a compact per-model vote log line with role-separated vote groups.
-
-    Example output (with roles)::
-
-        [vote] ADAUSD active_mean=0.62 active_std=0.05 agree=3/3 mode=pump
-               active=hgbc:0.70,et:0.67,rf:0.61
-               shadow=et_shallow:0.64,cal_et:0.65 diag=lr:0.01
-
-    Falls back to legacy format when role fields are absent::
-
-        [vote] ADAUSD mean=0.64 std=0.05 agree=5/6 meta=0.59
-               votes=lr:0.55,hgbc:0.62,et:0.70,rf:0.58
-
-    Parameters
-    ----------
-    symbol     : str
-    conf       : dict — confidence dict from predict_with_confidence[_batch]
-    meta_score : float or None
-    market_mode: str or None
-
-    Returns
-    -------
-    str
-    """
+    """Format a compact per-model vote log line with role-separated vote groups."""
     # Prefer active-role statistics when available
     if "active_mean" in conf:
         mean    = conf["active_mean"]
@@ -1354,38 +1221,7 @@ def format_exit_diagnostic(
     breakeven_active=False,
     stop_price=None,
 ):
-    """Format a detailed exit diagnostic string.
-
-    This resolves ambiguous EXIT_SL tags by logging full context.
-    Useful for diagnosing suspicious exits (e.g. positive-fill tagged EXIT_SL,
-    or losses much larger than the configured stop).
-
-    Example output::
-
-        [exit_diag] SOLUSD entry=268.23 fill=268.34 ret=+0.04%
-                    tag=EXIT_SL sl=0.0300 tp=0.0900
-                    max_ret=+0.04% held=12.5m breakeven=active
-
-    Parameters
-    ----------
-    symbol           : str
-    entry_price      : float
-    exit_fill_price  : float
-    exit_reason      : str — raw exit tag
-    realized_return  : float
-    sl_use           : float — configured stop fraction
-    tp_use           : float — configured TP fraction
-    max_return_seen  : float — high-water mark return seen
-    elapsed_minutes  : float
-    trail_active     : bool
-    trail_high_px    : float or None
-    breakeven_active : bool
-    stop_price       : float or None — explicit stop price if available
-
-    Returns
-    -------
-    str
-    """
+    """Format a detailed exit diagnostic string."""
     # Classify why EXIT_SL may be firing on what looks like a flat/positive fill
     notes = []
     if exit_reason == "EXIT_SL":
@@ -1543,30 +1379,7 @@ def get_relaxed_thresholds(
     relaxed_volr_min=RUTHLESS_GOOD_MODE_VOLUME_MIN,
     relaxed_meta_min_proba=RUTHLESS_GOOD_MODE_META_MIN_PROBA,
 ):
-    """Return (confirm_ev_min, confirm_volr_min, meta_min_proba) for the current bar.
-
-    In favorable market modes (pump / risk_on_trend), returns slightly relaxed
-    thresholds.  In all other modes, returns the base (strict) thresholds.
-
-    Only active when ``risk_profile == 'ruthless'`` and ``relaxation_enabled``.
-
-    Parameters
-    ----------
-    market_mode           : str or None
-    risk_profile          : str
-    base_confirm_ev_min   : float — strict EV threshold
-    base_confirm_volr_min : float — strict volume-ratio threshold
-    base_meta_min_proba   : float — strict meta-filter threshold
-    good_modes            : list[str] or None — defaults to RUTHLESS_GOOD_MODES
-    relaxation_enabled    : bool
-    relaxed_ev_min        : float
-    relaxed_volr_min      : float
-    relaxed_meta_min_proba: float
-
-    Returns
-    -------
-    tuple (confirm_ev_min, confirm_volr_min, meta_min_proba)
-    """
+    """Return (confirm_ev_min, confirm_volr_min, meta_min_proba) for the current bar."""
     if risk_profile != "ruthless" or not relaxation_enabled:
         return base_confirm_ev_min, base_confirm_volr_min, base_meta_min_proba
 
