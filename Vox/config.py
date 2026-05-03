@@ -359,11 +359,14 @@ def setup_risk_profile(algo):
     else:
         algo._risk_profile = RISK_PROFILE
 
-    # Normalize ruthless_v2 -> ruthless (V2 is an extension, not a separate profile branch)
+    # Normalize ruthless_v2 -> ruthless.
+    # V2 is an extension of ruthless, not a separate profile branch.
+    # The profile is normalized to "ruthless" first so all ruthless V1 settings
+    # are applied; the V2 flag then determines the behavior variant.
     if algo._risk_profile == "ruthless_v2":
         algo._risk_profile = "ruthless"
 
-    # Store V2 mode flag on algo — used by execution path
+    # Store V2 mode flag on algo — used by execution path.
     # V2 is only meaningful when combined with ruthless profile.
     algo._ruthless_v2_mode = _v2_explicit and (algo._risk_profile == "ruthless")
 

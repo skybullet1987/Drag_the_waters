@@ -534,7 +534,7 @@ def build_exit_outcome(
     if entry_price and entry_price > 0 and exit_price:
         try:
             realized_return = (float(exit_price) - float(entry_price)) / float(entry_price)
-            realized_pnl    = realized_return * float(entry_qty or 0) * float(entry_price)
+            realized_pnl    = (float(exit_price) - float(entry_price)) * float(entry_qty or 0)
             winner          = realized_return > 0.0
         except (TypeError, ZeroDivisionError):
             pass

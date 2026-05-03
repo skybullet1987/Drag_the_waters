@@ -571,6 +571,22 @@ class TestTradeVoteAudit:
         assert outcome["realized_return"] == pytest.approx(0.10, rel=1e-4)
         assert outcome["winner"] is True
 
+    def test_realized_pnl_computed_correctly(self):
+        """PnL = (exit_price - entry_price) * qty, not return * qty * entry_price."""
+        outcome = build_exit_outcome(
+            trade_id="tid_pnl",
+            symbol="BTCUSD",
+            exit_order_id="exit_pnl",
+            exit_time=_now(),
+            exit_price=110.0,
+            exit_reason="EXIT_TRAIL",
+            entry_price=100.0,
+            entry_qty=10.0,
+        )
+        # Expected PnL = (110 - 100) * 10 = 100.0
+        assert outcome["realized_pnl"] == pytest.approx(100.0, rel=1e-4)
+        assert outcome["realized_return"] == pytest.approx(0.10, rel=1e-4)
+
     def test_loser_exit_winner_is_false(self):
         outcome = build_exit_outcome(
             trade_id="tid001",

@@ -69,7 +69,7 @@ RUTHLESS_V2_BASE_WEIGHTS = {
 RUTHLESS_V2_MAX_WEIGHT_MULTIPLIER  = 2.0
 RUTHLESS_V2_MIN_WEIGHT_MULTIPLIER  = 0.25
 RUTHLESS_V2_MIN_OBS_BEFORE_ADJUST  = 5    # min trades before weight changes
-RUTHLESS_V2_DECAY_FACTOR           = 0.85  # exponential decay for old performance
+RUTHLESS_V2_DECAY_FACTOR           = 0.85  # exponential decay weight for historical performance (lower = more emphasis on recent trades)
 
 
 # ── Multi-position manager ────────────────────────────────────────────────────
@@ -355,8 +355,9 @@ class DynamicVoterWeighting:
             # Compute performance multiplier
             if s["yes_count"] >= self.min_obs:
                 win_rate = s["yes_wins"] / s["yes_count"]
-                # Blend win_rate and recent_decay_score for multiplier
-                raw_mult = 0.5 * win_rate / 0.5 + 0.5 * s["recent_decay_score"]
+                # Blend normalized win_rate [0,2] and recent_decay_score [0,1] for multiplier.
+                # win_rate/0.5 normalizes a 50% win_rate to 1.0 (neutral); above/below shifts weight.
+                raw_mult = 0.5 * (win_rate / 0.5) + 0.5 * s["recent_decay_score"]
                 s["perf_score"] = max(
                     self.min_multiplier,
                     min(self.max_multiplier, raw_mult),
