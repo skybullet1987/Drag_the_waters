@@ -968,7 +968,7 @@ class TestMachineGunConfigDefaults:
     def test_force_top_n_is_positive(self):
         assert RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES >= 1
 
-    def test_min_score_allows_negatives(self):
+    def test_min_score_threshold_is_negative(self):
         # Machine-gun mode uses a very low floor, must be below 0
         assert RUTHLESS_V2_MIN_SCORE_TO_TRADE < 0.0
 
@@ -985,8 +985,10 @@ class TestMachineGunConfigDefaults:
         assert RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION > RUTHLESS_V2_BASE_ALLOCATION
 
     def test_hard_block_modes_contains_danger_words(self):
-        for word in ("dump", "emergency"):
-            assert any(word in m for m in RUTHLESS_V2_HARD_BLOCK_MODES)
+        for word in ("risk_off_crash", "dump", "emergency"):
+            assert word in RUTHLESS_V2_HARD_BLOCK_MODES, (
+                f"'{word}' should be in RUTHLESS_V2_HARD_BLOCK_MODES"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1061,13 +1063,17 @@ class TestRegimeSoftPenalty:
         assert blocked is True
 
     def test_selloff_penalty_larger_than_chop(self):
-        _, _, chop_msg = apply_regime_soft_penalty(
-            "ADAUSD", 0.50, "chop", machine_gun_mode=True)
-        _, _, sell_msg = apply_regime_soft_penalty(
-            "ADAUSD", 0.50, "selloff", machine_gun_mode=True)
-        # Both should log soft regime with different penalties
-        assert "v2_soft_regime" in (chop_msg or "")
-        assert "v2_soft_regime" in (sell_msg or "")
+        score_ref = 0.50
+        score_after_chop, _, _ = apply_regime_soft_penalty(
+            "ADAUSD", score_ref, "chop", machine_gun_mode=True)
+        score_after_sell, _, _ = apply_regime_soft_penalty(
+            "ADAUSD", score_ref, "selloff", machine_gun_mode=True)
+        chop_penalty   = score_ref - score_after_chop
+        selloff_penalty = score_ref - score_after_sell
+        # Selloff should inflict a larger penalty than chop
+        assert selloff_penalty > chop_penalty, (
+            f"selloff penalty {selloff_penalty:.4f} should exceed chop penalty {chop_penalty:.4f}"
+        )
 
     def test_soft_penalty_log_fn_called(self):
         logs = []
@@ -1183,22 +1189,22 @@ class TestMetaSoftPenalty:
 class TestSelectTopNMachineGun:
     """Top-N selection chooses candidates above floor when slots exist."""
 
-    def _cands(self, scores):
+    def _make_candidates(self, scores):
         return [{"symbol": f"SYM{i}", "v2_opportunity_score": s}
                 for i, s in enumerate(scores)]
 
     def test_selects_up_to_force_top_n(self):
-        cands = self._cands([0.50, 0.40, 0.30, 0.20, 0.10])
+        cands = self._make_candidates([0.50, 0.40, 0.30, 0.20, 0.10])
         selected = select_top_n_machine_gun(cands, open_slots=4, force_top_n=2, min_score=-0.25)
         assert len(selected) == 2
 
     def test_limited_by_open_slots(self):
-        cands = self._cands([0.50, 0.40, 0.30])
+        cands = self._make_candidates([0.50, 0.40, 0.30])
         selected = select_top_n_machine_gun(cands, open_slots=1, force_top_n=3, min_score=-0.25)
         assert len(selected) == 1
 
     def test_score_floor_filters_below_floor(self):
-        cands = self._cands([0.50, -0.30, 0.10])
+        cands = self._make_candidates([0.50, -0.30, 0.10])
         selected = select_top_n_machine_gun(cands, open_slots=3, force_top_n=3, min_score=-0.25)
         scores = [c["v2_opportunity_score"] for c in selected]
         assert all(s >= -0.25 for s in scores)
@@ -1209,19 +1215,19 @@ class TestSelectTopNMachineGun:
         assert selected == []
 
     def test_zero_slots_returns_empty(self):
-        cands = self._cands([0.50, 0.40])
+        cands = self._make_candidates([0.50, 0.40])
         selected = select_top_n_machine_gun(cands, open_slots=0, force_top_n=2)
         assert selected == []
 
     def test_log_fn_called(self):
         logs = []
-        cands = self._cands([0.50, 0.40, 0.30])
+        cands = self._make_candidates([0.50, 0.40, 0.30])
         select_top_n_machine_gun(cands, open_slots=3, force_top_n=2, _log_fn=logs.append)
         assert len(logs) == 1
         assert "v2_rank" in logs[0]
 
     def test_all_below_floor_returns_empty(self):
-        cands = self._cands([-0.50, -0.40])
+        cands = self._make_candidates([-0.50, -0.40])
         selected = select_top_n_machine_gun(cands, open_slots=3, force_top_n=2, min_score=-0.25)
         assert selected == []
 

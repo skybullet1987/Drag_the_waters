@@ -64,7 +64,9 @@ RUTHLESS_V2_BASE_ALLOCATION           = 0.12
 RUTHLESS_V2_HIGH_CONVICTION_ALLOCATION = 0.30
 
 # Regime penalty applied to score in soft-block mode.
-RUTHLESS_V2_SOFT_REGIME_PENALTY       = 0.12
+RUTHLESS_V2_SOFT_REGIME_PENALTY          = 0.12
+RUTHLESS_V2_SELLOFF_PENALTY_MULTIPLIER   = 1.5   # extra weight for selloff/bear regimes
+RUTHLESS_V2_WEAK_REGIME_PENALTY_MULT     = 0.5   # reduced penalty for mild weak regimes
 
 # Dangerous market-mode strings that always hard-block even in machine-gun mode.
 RUTHLESS_V2_HARD_BLOCK_MODES          = frozenset(["risk_off_crash", "dump", "emergency"])
@@ -993,11 +995,11 @@ def apply_regime_soft_penalty(
 
     penalty = 0.0
     if is_selloff:
-        penalty = soft_penalty * 1.5
+        penalty = soft_penalty * RUTHLESS_V2_SELLOFF_PENALTY_MULTIPLIER
     elif is_chop:
         penalty = soft_penalty
     elif is_weak:
-        penalty = soft_penalty * 0.5
+        penalty = soft_penalty * RUTHLESS_V2_WEAK_REGIME_PENALTY_MULT
 
     if penalty > 0.0:
         score_before = score
