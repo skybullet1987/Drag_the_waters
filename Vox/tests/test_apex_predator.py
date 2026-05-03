@@ -98,7 +98,7 @@ class TestApexConfigConstants:
     def test_apex_atr_tp_mult_positive(self):
         assert APEX_ATR_TP_MULT > 0
 
-    def test_apex_trail_arm_pct_small(self):
+    def test_apex_trail_arm_pct_within_valid_range(self):
         assert 0.0 < APEX_TRAIL_ARM_PCT < 0.10
 
     def test_apex_trail_atr_mult_positive(self):

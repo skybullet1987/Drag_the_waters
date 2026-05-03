@@ -386,10 +386,10 @@ diagnostics:
 
 | Column | Weight | Diagnostic PF |
 |--------|--------|---------------|
-| `vote_lr_bal` | 0.35 | ~8.0 at ≥ 0.50 |
-| `vote_hgbc_l2` | 0.25 | ~3.35 at ≥ 0.55 |
-| `active_rf` | 0.15 | ~2.76 at ≥ 0.60 |
-| `active_hgbc_l2` | 0.10 | ~3.38 at ≥ 0.50 |
+| `vote_lr_bal` | 0.35 | ~8.0 at >= 0.50 |
+| `vote_hgbc_l2` | 0.25 | ~3.35 at >= 0.55 |
+| `active_rf` | 0.15 | ~2.76 at >= 0.60 |
+| `active_hgbc_l2` | 0.10 | ~3.38 at >= 0.50 |
 | `active_lgbm_bal` | 0.10 | ~1.70 (always-on confirmer) |
 | `vote_et` | 0.05 | diversifier |
 
@@ -415,19 +415,19 @@ conf_mult = 1.0 + 0.5 * (n_agree >= 4)
 size_frac = clip(APEX_BASE_ALLOC * (1 + edge_mult) * conf_mult, 0.05, 0.45)
 ```
 
-Total gross exposure is capped at `APEX_MAX_GROSS` (2.0×).
-Pyramiding: add a second tranche at 50 % of original size when unrealised PnL
-≥ +1.5 % and `apex_score >= APEX_SCORE_PYRAMID` (max 2 adds per position).
+Total gross exposure is capped at `APEX_MAX_GROSS` (2.0x).
+Pyramiding: add a second tranche at 50% of original size when unrealised PnL
+>= +1.5% and `apex_score >= APEX_SCORE_PYRAMID` (max 2 adds per position).
 
 ### Stops / TP / Trail / Breakeven / Time-stop
 
 | Parameter | Formula / Default |
 |-----------|-------------------|
-| Stop-loss | `entry − APEX_ATR_SL_MULT × ATR(14)`; floor 0.8%, ceil 4% |
-| Take-profit | `entry + APEX_ATR_TP_MULT × ATR(14)`; floor 2.5%, ceil 15% |
-| Trail arms | once unrealised PnL ≥ `APEX_TRAIL_ARM_PCT` (1.0%) |
-| Trail distance | `max(APEX_TRAIL_ATR_MULT × ATR, 0.6%)` |
-| Breakeven move | once MFE ≥ `APEX_BREAKEVEN_MFE` (2%), stop → entry + 0.1% |
+| Stop-loss | `entry - APEX_ATR_SL_MULT x ATR(14)`; floor 0.8%, ceil 4% |
+| Take-profit | `entry + APEX_ATR_TP_MULT x ATR(14)`; floor 2.5%, ceil 15% |
+| Trail arms | once unrealised PnL >= `APEX_TRAIL_ARM_PCT` (1.0%) |
+| Trail distance | `max(APEX_TRAIL_ATR_MULT x ATR, 0.6%)` |
+| Breakeven move | once MFE >= `APEX_BREAKEVEN_MFE` (2%), stop -> entry + 0.1% |
 | Time-stop | close after `APEX_TIME_STOP_HRS` (48 h) if MFE < +1% |
 
 ### Concurrency
@@ -442,7 +442,7 @@ Pyramiding: add a second tranche at 50 % of original size when unrealised PnL
 |----------|---------|-------------|
 | `APEX_SCORE_ENTRY` | 0.55 | Minimum apex_score to trigger entry |
 | `APEX_SCORE_PYRAMID` | 0.55 | Minimum apex_score to pyramid |
-| `APEX_BASE_ALLOC` | 0.20 | Baseline position size (20 % of equity) |
+| `APEX_BASE_ALLOC` | 0.20 | Baseline position size (20% of equity) |
 | `APEX_MAX_GROSS` | 2.0 | Maximum total gross exposure |
 | `APEX_MAX_CONCURRENT` | 8 | Maximum simultaneous positions |
 | `APEX_MAX_PER_SYMBOL` | 2 | Maximum positions per symbol |

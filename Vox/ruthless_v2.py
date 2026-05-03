@@ -1336,8 +1336,11 @@ def compute_apex_score(votes):
 
     Returns
     -------
-    float in [0.0, 1.0] — weighted apex score.
-    float — total weight of present columns (1.0 when all columns present).
+    apex_score : float
+        Weighted ensemble vote score in [0.0, 1.0].
+    weight_present : float
+        Sum of weights for columns present in *votes* (1.0 when all columns
+        are present; < 1.0 when some are missing).
 
     Notes
     -----
