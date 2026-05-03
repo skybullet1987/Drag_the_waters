@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ruthless_v2 import (
+from strategy_ext import (
     _APEX_WEIGHTS,
     compute_apex_score,
     apex_entry_decision,
@@ -26,7 +26,7 @@ from ruthless_v2 import (
     apex_momentum_continuation_signal,
     apex_rejected_entry_log,
 )
-from config import (
+from core import (
     APEX_SCORE_ENTRY,
     APEX_SCORE_PYRAMID,
     APEX_BASE_ALLOC,

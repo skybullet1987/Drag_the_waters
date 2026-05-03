@@ -18,7 +18,7 @@ from sklearn.ensemble import (
 )
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
-from model_registry import compute_vote_score as _compute_vote_score
+from infra import compute_vote_score as _compute_vote_score
 
 # ── Optional external ML models with safe import guards ──────────────────────
 try:
@@ -520,7 +520,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
     list[tuple[str, estimator, str]]  — (id, estimator, role)
         role is "shadow" or "diagnostic" for each entry.
     """
-    from model_registry import ROLE_SHADOW, ROLE_DIAGNOSTIC
+    from infra import ROLE_SHADOW, ROLE_DIAGNOSTIC
     shadows = []
 
     def _cal(est):

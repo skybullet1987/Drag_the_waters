@@ -608,7 +608,7 @@ import types
 _stub = types.ModuleType("AlgorithmImports")
 sys.modules.setdefault("AlgorithmImports", _stub)
 
-from risk import compute_qty  # type: ignore  # noqa: E402
+from strategy import compute_qty  # type: ignore  # noqa: E402
 
 
 class TestComputeQtyMinAlloc:

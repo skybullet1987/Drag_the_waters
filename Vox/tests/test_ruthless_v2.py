@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ruthless_v2 import (
+from strategy_ext import (
     RUTHLESS_V2_MODE,
     RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
     RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY,
@@ -69,7 +69,7 @@ from ruthless_v2 import (
     select_top_n_machine_gun,
     compute_machine_gun_allocation,
 )
-from trade_vote_audit import (
+from journals import (
     TradeVoteAudit,
     build_entry_snapshot,
     build_exit_outcome,
@@ -77,7 +77,7 @@ from trade_vote_audit import (
     EXIT_RECORD_REQUIRED_FIELDS,
     AUDIT_STORE_KEY,
 )
-from config import (
+from core import (
     RUTHLESS_V2_MODE as CFG_V2_MODE,
     RUTHLESS_ACTIVE_MODELS,
     RUTHLESS_DIAGNOSTIC_MODELS,
