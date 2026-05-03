@@ -528,7 +528,56 @@ def setup_risk_profile(algo):
                     RUTHLESS_V2_REENTRY_COOLDOWN_MIN,
                     RUTHLESS_V2_ACTIVE_MODELS,
                     RUTHLESS_V2_BASE_WEIGHTS,
+                    RUTHLESS_V2_MACHINE_GUN_MODE,
+                    RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES,
+                    RUTHLESS_V2_MIN_SCORE_TO_TRADE,
+                    RUTHLESS_V2_REGIME_HARD_BLOCK,
+                    RUTHLESS_V2_META_HARD_FILTER,
+                    RUTHLESS_V2_META_AS_SCORE_PENALTY,
+                    RUTHLESS_V2_ALLOW_CHOP_SCALPS,
+                    RUTHLESS_V2_CHOP_SCALP_MAX_ALLOC,
+                    format_v2_startup_log,
                 )
+                # ── QC parameter overrides for machine-gun mode ───────────────
+                def _bool_param(name, default):
+                    raw = algo.get_parameter(name)
+                    if raw is not None:
+                        return str(raw).lower() in ("true", "1", "yes")
+                    return default
+
+                def _float_param(name, default):
+                    raw = algo.get_parameter(name)
+                    if raw is not None:
+                        try:
+                            return float(raw)
+                        except (ValueError, TypeError):
+                            pass
+                    return default
+
+                def _int_param(name, default):
+                    raw = algo.get_parameter(name)
+                    if raw is not None:
+                        try:
+                            return int(raw)
+                        except (ValueError, TypeError):
+                            pass
+                    return default
+
+                algo._v2_machine_gun_mode = _bool_param(
+                    "ruthless_v2_machine_gun_mode", RUTHLESS_V2_MACHINE_GUN_MODE)
+                algo._v2_force_top_n = _int_param(
+                    "ruthless_v2_force_top_n_when_candidates", RUTHLESS_V2_FORCE_TOP_N_WHEN_CANDIDATES)
+                algo._v2_min_score_to_trade = _float_param(
+                    "ruthless_v2_min_score_to_trade", RUTHLESS_V2_MIN_SCORE_TO_TRADE)
+                algo._v2_regime_hard_block = _bool_param(
+                    "ruthless_v2_regime_hard_block", RUTHLESS_V2_REGIME_HARD_BLOCK)
+                algo._v2_meta_hard_filter = _bool_param(
+                    "ruthless_v2_meta_hard_filter", RUTHLESS_V2_META_HARD_FILTER)
+                algo._v2_meta_as_score_penalty = _bool_param(
+                    "ruthless_v2_meta_as_score_penalty", RUTHLESS_V2_META_AS_SCORE_PENALTY)
+                algo._v2_allow_chop_scalps = _bool_param(
+                    "ruthless_v2_allow_chop_scalps", RUTHLESS_V2_ALLOW_CHOP_SCALPS)
+
                 algo._v2_position_mgr = MultiPositionManager(
                     max_concurrent=RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
                     max_new_per_day=RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY,
@@ -543,11 +592,19 @@ def setup_risk_profile(algo):
                 )
                 # Override active model list with V2 aggressive pool
                 algo._ruthless_active_models = list(RUTHLESS_V2_ACTIVE_MODELS)
-                algo.log(
-                    f"[profile] risk_profile=ruthless_v2 v2=True"
-                    f" max_positions={RUTHLESS_V2_MAX_CONCURRENT_POSITIONS}"
-                    f" active_models={','.join(RUTHLESS_V2_ACTIVE_MODELS)}"
-                )
+                # Emit machine-gun startup log
+                for line in format_v2_startup_log(
+                    risk_profile="ruthless",
+                    v2_mode=True,
+                    max_positions=RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
+                    active_models=RUTHLESS_V2_ACTIVE_MODELS,
+                    machine_gun_mode=algo._v2_machine_gun_mode,
+                    regime_hard_block=algo._v2_regime_hard_block,
+                    meta_hard_filter=algo._v2_meta_hard_filter,
+                    force_top_n=algo._v2_force_top_n,
+                    min_score_to_trade=algo._v2_min_score_to_trade,
+                ):
+                    algo.log(line)
             except ImportError:
                 algo.log("[profile] WARNING: ruthless_v2 module not found; V2 disabled.")
                 algo._ruthless_v2_mode = False
