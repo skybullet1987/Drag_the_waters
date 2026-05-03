@@ -11,14 +11,14 @@ import pytest
 # Add Vox to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from model_registry import (
+from infra import (
     compute_vote_score,
     compute_active_stats,
     ROLE_ACTIVE,
     ROLE_SHADOW,
     ROLE_DIAGNOSTIC,
 )
-from profit_voting import (
+from strategy import (
     check_profit_voting_gate,
     compute_vote_score as pv_compute_vote_score,
     format_profit_vote_log,
@@ -33,13 +33,13 @@ from profit_voting import (
     DEFAULT_CHOP_VOTE_YES_FRAC_MIN,
     DEFAULT_CHOP_TOP3_MEAN_MIN,
 )
-from candidate_journal import (
+from journals import (
     CandidateJournal,
     build_candidate_records,
     build_rejected_candidate_records,
     CANDIDATE_JOURNAL_TOP_N,
 )
-from shadow_lab import (
+from strategy import (
     extend_shadow_estimators,
     MarkovRegimeDiagnostic,
     KMeansRegimeDiagnostic,
@@ -210,7 +210,7 @@ class TestProfileDifferences:
 
     def _get_profile_values(self, profile):
         """Run setup_risk_profile on a mock algo and return key attrs."""
-        import config as _cfg
+        import core as _cfg
 
         class MockAlgo:
             def __init__(self, p):
@@ -497,7 +497,7 @@ class TestShadowLab:
         assert np.all(probs[:, 1] >= 0) and np.all(probs[:, 1] <= 1.0)
 
     def test_gbc_and_ada_train_and_predict(self):
-        from shadow_lab import _make_gbc, _make_ada
+        from strategy import _make_gbc, _make_ada
         X, y = self._make_training_data()
         gbc = _make_gbc()
         ada = _make_ada()
@@ -519,20 +519,20 @@ class TestGNBExcluded:
     """Tests that gnb=1.0 does NOT inflate active_n_agree / class_proba."""
 
     def test_gnb_not_in_active_votes_by_default(self):
-        from model_registry import DEFAULT_MODEL_ROLES, ROLE_DIAGNOSTIC, MODEL_ID_GNB
+        from infra import DEFAULT_MODEL_ROLES, ROLE_DIAGNOSTIC, MODEL_ID_GNB
         assert DEFAULT_MODEL_ROLES[MODEL_ID_GNB] == ROLE_DIAGNOSTIC
 
     def test_gnb_weight_zero_in_config(self):
-        import config as _cfg
+        import core as _cfg
         assert getattr(_cfg, "MODEL_WEIGHT_GNB", 1.0) == 0.0
 
     def test_lr_weight_zero_in_config(self):
-        import config as _cfg
+        import core as _cfg
         assert getattr(_cfg, "MODEL_WEIGHT_LR", 1.0) == 0.0
 
     def test_active_stats_ignores_diagnostic_models(self):
         # Simulate what models.py does: split votes by role, then compute active stats
-        from model_registry import split_votes_by_role, compute_active_stats, DEFAULT_MODEL_ROLES
+        from infra import split_votes_by_role, compute_active_stats, DEFAULT_MODEL_ROLES
 
         all_votes = {"rf": 0.65, "et": 0.60, "hgbc": 0.70, "gnb": 1.0, "lr": 0.01}
         roles = DEFAULT_MODEL_ROLES.copy()
@@ -578,43 +578,43 @@ class TestConfigConstants:
     """Tests for new config constants."""
 
     def test_ruthless_profit_voting_mode_exists(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "RUTHLESS_PROFIT_VOTING_MODE")
         assert _cfg.RUTHLESS_PROFIT_VOTING_MODE is True
 
     def test_ruthless_active_models_defined(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "RUTHLESS_ACTIVE_MODELS")
         assert len(_cfg.RUTHLESS_ACTIVE_MODELS) > 0
 
     def test_ruthless_diagnostic_models_defined(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "RUTHLESS_DIAGNOSTIC_MODELS")
         assert "gnb" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
         assert "lr" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
 
     def test_chop_thresholds_stricter(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.RUTHLESS_CHOP_VOTE_YES_FRAC_MIN > _cfg.RUTHLESS_VOTE_YES_FRACTION_MIN
         assert _cfg.RUTHLESS_CHOP_TOP3_MEAN_MIN > _cfg.RUTHLESS_TOP3_MEAN_MIN
 
     def test_candidate_journal_config(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "PERSIST_CANDIDATE_JOURNAL")
         assert hasattr(_cfg, "CANDIDATE_JOURNAL_TOP_N")
         assert _cfg.CANDIDATE_JOURNAL_TOP_N >= 1
 
     def test_shadow_model_max_count_increased(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.SHADOW_MODEL_MAX_COUNT >= 14  # increased for new models
 
     def test_ruthless_min_tp_exists(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "RUTHLESS_MIN_TP")
         assert _cfg.RUTHLESS_MIN_TP >= 0.03  # at least 3%
 
     def test_multi_position_scaffold_config(self):
-        import config as _cfg
+        import core as _cfg
         assert hasattr(_cfg, "RUTHLESS_MAX_CONCURRENT_POSITIONS")
         # Currently scaffold only (single position)
         assert _cfg.RUTHLESS_MAX_CONCURRENT_POSITIONS >= 1
@@ -729,13 +729,13 @@ class TestRuthlessActivePromotion:
         assert conf["active_model_count"] == 7
 
     def test_config_ruthless_active_models_excludes_gnb_lr(self):
-        import config as _cfg
+        import core as _cfg
         assert "gnb" not in _cfg.RUTHLESS_ACTIVE_MODELS
         assert "lr" not in _cfg.RUTHLESS_ACTIVE_MODELS
         assert "lr_bal" not in _cfg.RUTHLESS_ACTIVE_MODELS
 
     def test_config_ruthless_diagnostic_models_includes_gnb_lr(self):
-        import config as _cfg
+        import core as _cfg
         assert "gnb" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
         assert "lr" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
         assert "lr_bal" in _cfg.RUTHLESS_DIAGNOSTIC_MODELS
@@ -749,23 +749,23 @@ class TestRelaxedBootstrapThresholds:
     """Tests that thresholds are at bootstrap-relaxed levels."""
 
     def test_config_vote_threshold_relaxed(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.RUTHLESS_VOTE_THRESHOLD <= 0.50
 
     def test_config_yes_frac_min_relaxed(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.RUTHLESS_VOTE_YES_FRACTION_MIN <= 0.34
 
     def test_config_top3_mean_relaxed(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.RUTHLESS_TOP3_MEAN_MIN <= 0.55
 
     def test_config_ev_floor_relaxed(self):
-        import config as _cfg
+        import core as _cfg
         assert _cfg.RUTHLESS_VOTE_EV_FLOOR <= 0.001
 
     def test_config_chop_thresholds_still_stricter(self):
-        import config as _cfg
+        import core as _cfg
         # Chop thresholds must be stricter than trend thresholds
         assert _cfg.RUTHLESS_CHOP_VOTE_YES_FRAC_MIN > _cfg.RUTHLESS_VOTE_YES_FRACTION_MIN
         assert _cfg.RUTHLESS_CHOP_TOP3_MEAN_MIN > _cfg.RUTHLESS_TOP3_MEAN_MIN

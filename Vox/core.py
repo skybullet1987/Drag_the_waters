@@ -1,3 +1,14 @@
+# ── core.py: config + market_mode + momentum + meta_model ──────────────────
+import numpy as np
+from collections import deque
+from datetime import timedelta
+
+
+
+# ===============================================================================
+# config
+# ===============================================================================
+
 # ── Strategy constants (all overridable via the QC parameter panel) ───────────
 TAKE_PROFIT          = 0.030   # +3.0 %  close long on gain
 STOP_LOSS            = 0.015   # −1.5 %  close long on loss
@@ -570,7 +581,7 @@ def setup_risk_profile(algo):
         # multi-horizon scoring.  It activates only when _ruthless_v2_mode=True.
         if getattr(algo, "_ruthless_v2_mode", False):
             try:
-                from ruthless_v2 import (
+                from strategy_ext import (
                     MultiPositionManager,
                     DynamicVoterWeighting,
                     RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
@@ -806,3 +817,289 @@ def setup_risk_profile(algo):
             f"  trail_after_tp={_trail_after_tp}"
             f"  trail_pct={_trail_pct}"
         )
+
+
+# ===============================================================================
+# market_mode
+# ===============================================================================
+
+"""
+Market mode / regime detection for Vox ruthless mode.
+
+Detects market regime from BTC price data and supplies a
+mode string used by the ruthless confirmation gate.
+"""
+
+
+MARKET_MODES = ("risk_on_trend", "pump", "chop", "selloff", "high_vol_reversal")
+
+
+class MarketModeDetector:
+    """Lightweight rules-based market mode detector.
+
+    Uses BTC 4-hour closes to classify the current regime into one of:
+      risk_on_trend   — BTC trending up, moderate volatility
+      pump            — BTC rising fast, high volume
+      chop            — BTC oscillating, low directional momentum
+      selloff         — BTC trending down
+      high_vol_reversal — extreme volatility with conflicting signals
+
+    Call update_btc() from initialize() to register a consolidator,
+    or feed closes directly via detect() for testing.
+    """
+
+    _WINDOW = 24   # 4h bars ~ 4 days
+
+    def __init__(self):
+        self._closes  = deque(maxlen=self._WINDOW + 4)
+        self._volumes = deque(maxlen=self._WINDOW + 4)
+        self._mode    = "chop"   # default until enough data
+
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    def update_btc(self, algorithm, btc_sym):
+        """Register a 4-hour BTC consolidator feeding this detector."""
+        algorithm.consolidate(
+            btc_sym,
+            timedelta(hours=4),
+            self._on_4h_bar,
+        )
+
+    @property
+    def mode(self):
+        """Current detected market mode string."""
+        return self._mode
+
+    def detect(self, closes, volumes=None):
+        """Classify regime from *closes* (and optionally *volumes*).
+        Updates self._mode and returns the mode string.
+
+        Parameters
+        ----------
+        closes  : array-like of float, at least 5 bars
+        volumes : array-like of float or None
+        """
+        c = list(closes)
+        v = list(volumes) if volumes else []
+        if len(c) < 5:
+            return "chop"
+
+        ret_4  = (c[-1] - c[-5])  / c[-5]  if c[-5]  != 0 else 0.0
+        ret_1  = (c[-1] - c[-2])  / c[-2]  if c[-2]  != 0 else 0.0
+
+        if len(c) >= 13:
+            ret_12 = (c[-1] - c[-13]) / c[-13] if c[-13] != 0 else 0.0
+        else:
+            ret_12 = ret_4
+
+        # SMA slope
+        if len(c) >= 10:
+            sma_now  = float(np.mean(c[-5:]))
+            sma_prev = float(np.mean(c[-10:-5]))
+            sma_slope = (sma_now - sma_prev) / sma_prev if sma_prev != 0 else 0.0
+        else:
+            sma_slope = ret_4
+
+        # Volatility (normalised std of last 8 rets)
+        if len(c) >= 9:
+            rets = np.diff(c[-9:]) / np.where(np.array(c[-9:-1]) != 0,
+                                               np.array(c[-9:-1]), 1.0)
+            vol = float(np.std(rets))
+        else:
+            vol = abs(ret_1)
+
+        # Volume ratio
+        vol_ratio = 1.0
+        if len(v) >= 6:
+            avg_v = float(np.mean(v[-6:-1]))
+            if avg_v > 0:
+                vol_ratio = min(float(v[-1]) / avg_v, 10.0)
+
+        # Range efficiency (trend purity)
+        if len(c) >= 9:
+            net_move  = abs(c[-1] - c[-9])
+            sum_moves = float(np.sum(np.abs(np.diff(c[-9:]))))
+            range_eff = net_move / sum_moves if sum_moves > 0 else 0.0
+        else:
+            range_eff = 0.5
+
+        # ── Classification rules ──────────────────────────────────────────────
+        if ret_4 < -0.04 and sma_slope < -0.01:
+            mode = "selloff"
+        elif vol > 0.025 and range_eff < 0.30:
+            mode = "high_vol_reversal"
+        elif ret_4 > 0.05 and vol_ratio > 2.0:
+            mode = "pump"
+        elif ret_4 > 0.01 and sma_slope > 0.003 and range_eff > 0.40:
+            mode = "risk_on_trend"
+        else:
+            mode = "chop"
+
+        self._mode = mode
+        return mode
+
+    # ── Consolidator callback ─────────────────────────────────────────────────
+
+    def _on_4h_bar(self, bar):
+        self._closes.append(float(bar.close))
+        self._volumes.append(float(bar.volume))
+        self.detect(self._closes, self._volumes)
+
+
+# ===============================================================================
+# momentum
+# ===============================================================================
+
+"""Momentum override and scoring helpers for Vox aggressive/ruthless mode."""
+
+
+def check_momentum_override_conditions(feat, ret4_min, ret16_min, vol_min, btc_rel_min):
+    """Return True if momentum breakout override conditions are met.
+
+    Feature layout: [ret_1, ret_4, ret_8, ret_16, rsi_14, atr_n,
+                     vol_r, btc_rel, hour, ...]
+    """
+    return (
+        float(feat[1]) >= ret4_min
+        and float(feat[3]) >= ret16_min
+        and float(feat[6]) >= vol_min
+        and float(feat[7]) >= btc_rel_min
+    )
+
+
+def compute_momentum_score(feat):
+    """Compute bounded momentum score for aggressive/ruthless ranking.
+
+    Combines ret_4, ret_16, normalised volume excess and btc_rel.
+    Volume excess is normalised to [0, 1] and capped to prevent explosion.
+    Returns a float clipped to [-0.05, 0.10].
+    """
+    vol_excess = min(max(float(feat[6]) - 1.0, 0.0), 4.0) / 4.0  # [0, 1]
+    raw = (
+        0.40 * float(feat[1])    # ret_4
+        + 0.30 * float(feat[3])  # ret_16
+        + 0.20 * vol_excess      # normalised volume spike
+        + 0.10 * float(feat[7])  # btc_rel
+    )
+    return float(np.clip(raw, -0.05, 0.10))
+
+
+# ===============================================================================
+# meta_model
+# ===============================================================================
+
+"""
+Lightweight meta-filter / veto model for Vox ruthless entries.
+
+Uses a rules-based meta-score to veto low-conviction entry signals
+before committing large ruthless allocations.
+"""
+
+
+class MetaFilter:
+    """Rules-based meta-filter that vets entry candidates.
+
+    Given base model signals and contextual features, computes a
+    meta-score in [0, 1] and vetoes entries that fall below a threshold.
+
+    The meta-score combines:
+      - Model confidence (class_proba, n_agree, std_proba)
+      - Expected value (ev_score)
+      - Short-term momentum (ret_4, ret_16)
+      - Volume confirmation (volume_ratio)
+      - Market mode alignment
+    """
+
+    def __init__(self, min_proba=0.55, enabled=True):
+        self.min_proba = min_proba
+        self.enabled   = enabled
+
+    def compute_score(
+        self,
+        class_proba,
+        ev_score,
+        n_agree,
+        std_proba,
+        pred_return,
+        feat,
+        market_mode=None,
+        ruthless_allowed_modes=None,
+    ):
+        """Compute meta-score in [0, 1].
+
+        Parameters
+        ----------
+        class_proba   : float — weighted ensemble probability
+        ev_score      : float — expected value after costs
+        n_agree       : int   — number of agreeing models
+        std_proba     : float — standard deviation of model probabilities
+        pred_return   : float — regressor ensemble return prediction
+        feat          : array-like — feature vector (at least 7 elements)
+        market_mode   : str or None — current detected market mode
+        ruthless_allowed_modes : list[str] or None
+
+        Returns
+        -------
+        float  — meta-score in [0, 1]
+        """
+        score = 0.0
+
+        # Confidence component (0–0.35)
+        score += min(0.35, class_proba * 0.35 / 0.65)
+
+        # Model agreement bonus (0–0.20)
+        if n_agree >= 3:
+            score += 0.20
+        elif n_agree >= 2:
+            score += 0.10
+
+        # Dispersion penalty
+        score -= min(0.15, std_proba * 0.5)
+
+        # EV component (0–0.20)
+        score += min(0.20, max(0.0, ev_score * 20.0))
+
+        # Momentum confirmation (0–0.15) from feat
+        if feat is not None and len(feat) >= 7:
+            ret4  = float(feat[1])
+            ret16 = float(feat[3])
+            vol_r = float(feat[6])
+            if ret4 > 0.01 and ret16 > 0.02:
+                score += 0.10
+            elif ret4 > 0.005:
+                score += 0.05
+            if vol_r > 1.5:
+                score += 0.05
+
+        # Market mode alignment (0–0.10)
+        if market_mode is not None:
+            allowed = ruthless_allowed_modes or ["risk_on_trend", "pump"]
+            if market_mode in allowed:
+                score += 0.10
+            elif market_mode in ("chop", "selloff"):
+                score -= 0.10
+
+        return float(np.clip(score, 0.0, 1.0))
+
+    def approve(
+        self,
+        class_proba,
+        ev_score,
+        n_agree,
+        std_proba,
+        pred_return,
+        feat,
+        market_mode=None,
+        ruthless_allowed_modes=None,
+    ):
+        """Returns (approved: bool, meta_score: float).
+
+        When disabled, always returns (True, 1.0).
+        """
+        if not self.enabled:
+            return True, 1.0
+        score = self.compute_score(
+            class_proba, ev_score, n_agree, std_proba,
+            pred_return, feat, market_mode, ruthless_allowed_modes,
+        )
+        return score >= self.min_proba, score

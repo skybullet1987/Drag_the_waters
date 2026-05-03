@@ -10,23 +10,23 @@ from models  import (
     build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train,
     LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS, LABEL_COST_BPS,
 )
-from risk    import RegimeFilter, RiskManager, compute_qty
+from strategy import RegimeFilter, RiskManager, compute_qty
 # endregion
 
-from config   import *                       # noqa: F401,F403  strategy constants
-from config   import setup_risk_profile
-from momentum import check_momentum_override_conditions, compute_momentum_score
-from execution import (
+from core   import *                       # noqa: F401,F403  strategy constants
+from core   import setup_risk_profile
+from core import check_momentum_override_conditions, compute_momentum_score
+from strategy import (
     apply_breakeven, is_breakeven_active, should_exit_momentum_fail,
     evaluate_timeout, LimitOrderTracker, evaluate_candidate,
 )
-from market_mode    import MarketModeDetector
-from meta_model     import MetaFilter
+from core    import MarketModeDetector
+from core     import MetaFilter
 from infra          import hydrate_state_from_history
-from diagnostics    import format_vote_log, _feature_diag_suffix
-from model_registry import format_model_registry_log, build_roles_dict_from_config
-from candidate_journal import CandidateJournal, build_candidate_records, build_rejected_candidate_records
-import config as _cfg_module
+from journals    import format_vote_log, _feature_diag_suffix
+from infra import format_model_registry_log, build_roles_dict_from_config
+from journals import CandidateJournal, build_candidate_records, build_rejected_candidate_records
+import core as _cfg_module
 
 np.random.seed(42)
 random.seed(42)

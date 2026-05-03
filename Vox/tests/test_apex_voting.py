@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from apex_voting import (  # type: ignore  # noqa: E402
+from strategy import (  # type: ignore  # noqa: E402
     compute_weighted_yes_fraction,
     apex_voting_decision,
     APEX_WEIGHTED_VOTE_WEIGHTS,

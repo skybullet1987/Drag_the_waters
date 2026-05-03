@@ -98,7 +98,7 @@ class TestBreakeven:
 class TestMomentumFail:
     def test_no_exit_before_min_hold(self):
         """Momentum fail should not fire before min_hold_minutes."""
-        from execution import should_exit_momentum_fail
+        from strategy import should_exit_momentum_fail
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = -0.02; feat[3] = -0.03
         assert not should_exit_momentum_fail(
@@ -108,7 +108,7 @@ class TestMomentumFail:
 
     def test_no_exit_if_return_above_threshold(self):
         """No exit when return is better than fail_loss."""
-        from execution import should_exit_momentum_fail
+        from strategy import should_exit_momentum_fail
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = -0.02; feat[3] = -0.03
         assert not should_exit_momentum_fail(
@@ -118,7 +118,7 @@ class TestMomentumFail:
 
     def test_exit_on_momentum_fail(self):
         """Should exit when hold >= min_hold, return <= fail_loss, and momentum negative."""
-        from execution import should_exit_momentum_fail
+        from strategy import should_exit_momentum_fail
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = -0.02; feat[3] = -0.03
         assert should_exit_momentum_fail(
@@ -128,7 +128,7 @@ class TestMomentumFail:
 
     def test_no_exit_when_momentum_positive(self):
         """Should not exit if ret_4 is positive (momentum not failed)."""
-        from execution import should_exit_momentum_fail
+        from strategy import should_exit_momentum_fail
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.01; feat[3] = -0.03
         assert not should_exit_momentum_fail(
@@ -139,7 +139,7 @@ class TestMomentumFail:
 
 class TestTimeoutExtension:
     def test_hold_before_timeout(self):
-        from execution import evaluate_timeout
+        from strategy import evaluate_timeout
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.01
         result = evaluate_timeout(
@@ -149,7 +149,7 @@ class TestTimeoutExtension:
         assert result == 'hold'
 
     def test_exit_at_timeout_with_profit(self):
-        from execution import evaluate_timeout
+        from strategy import evaluate_timeout
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.01
         result = evaluate_timeout(
@@ -159,7 +159,7 @@ class TestTimeoutExtension:
         assert result == 'exit'
 
     def test_extend_at_timeout_with_small_loss(self):
-        from execution import evaluate_timeout
+        from strategy import evaluate_timeout
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.005  # positive ret_4 → worth extending
         result = evaluate_timeout(
@@ -170,7 +170,7 @@ class TestTimeoutExtension:
         assert result == 'extend'
 
     def test_exit_when_extension_cap_hit(self):
-        from execution import evaluate_timeout
+        from strategy import evaluate_timeout
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.005
         result = evaluate_timeout(
@@ -187,21 +187,21 @@ class TestTimeoutExtension:
 
 class TestMetaFilter:
     def test_disabled_always_approves(self):
-        from meta_model import MetaFilter
+        from core import MetaFilter
         mf = MetaFilter(enabled=False, min_proba=0.55)
         approved, score = mf.approve(0.1, 0.0, 0, 1.0, 0.0, None)
         assert approved
         assert score == 1.0
 
     def test_low_conviction_rejected(self):
-        from meta_model import MetaFilter
+        from core import MetaFilter
         mf = MetaFilter(enabled=True, min_proba=0.55)
         feat = np.zeros(FEATURE_COUNT)
         approved, score = mf.approve(0.1, -0.01, 0, 0.5, 0.0, feat)
         assert not approved
 
     def test_high_conviction_approved(self):
-        from meta_model import MetaFilter
+        from core import MetaFilter
         mf = MetaFilter(enabled=True, min_proba=0.55)
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.02; feat[3] = 0.03; feat[6] = 2.0
@@ -212,7 +212,7 @@ class TestMetaFilter:
         assert score > 0.55
 
     def test_chop_mode_penalises_score(self):
-        from meta_model import MetaFilter
+        from core import MetaFilter
         mf = MetaFilter(enabled=True, min_proba=0.55)
         feat = np.zeros(FEATURE_COUNT)
         feat[1] = 0.015; feat[3] = 0.025; feat[6] = 1.8
@@ -230,13 +230,13 @@ class TestMetaFilter:
 
 class TestMarketModeDetector:
     def test_insufficient_data_returns_chop(self):
-        from market_mode import MarketModeDetector
+        from core import MarketModeDetector
         det = MarketModeDetector()
         mode = det.detect([100.0, 101.0])
         assert mode == "chop"
 
     def test_downtrend_classified_as_selloff(self):
-        from market_mode import MarketModeDetector
+        from core import MarketModeDetector
         det = MarketModeDetector()
         # declining prices, negative SMA slope
         closes = [100, 97, 94, 91, 88, 85, 82, 79, 76, 73, 70, 67, 64]
@@ -244,14 +244,14 @@ class TestMarketModeDetector:
         assert mode == "selloff"
 
     def test_uptrend_classified_as_risk_on_trend(self):
-        from market_mode import MarketModeDetector
+        from core import MarketModeDetector
         det = MarketModeDetector()
         closes = [100, 101, 101.5, 102, 102.3, 102.8, 103.1, 103.6, 104.2, 104.8]
         mode = det.detect(closes)
         assert mode == "risk_on_trend"
 
     def test_pump_detected(self):
-        from market_mode import MarketModeDetector
+        from core import MarketModeDetector
         det = MarketModeDetector()
         # ret_4 must be > 0.05 (5% over 4 bars) and vol_ratio > 2.0
         base = list(np.linspace(100, 107, 9))   # ~7% over 8 bars, ~5% last 4
@@ -308,9 +308,9 @@ class TestFeatureCount:
 
 class TestVoxV5:
     def test_pure_functions(self):
-        from model_registry import compute_weighted_mean, format_model_registry_log
-        from trade_journal import TradeJournal
-        from tuning import get_relaxed_thresholds as grt
+        from infra import compute_weighted_mean, format_model_registry_log
+        from journals import TradeJournal
+        from journals import get_relaxed_thresholds as grt
         assert "lr" in format_model_registry_log([("lr", None)])
         v = {"lr": 0.6, "hgbc": 0.7}
         assert abs(compute_weighted_mean(v, {k: 0.0 for k in v}) - 0.65) < 1e-9
@@ -337,7 +337,7 @@ class TestFeatureDiagSuffix:
     """Tests for the _feature_diag_suffix helper in diagnostics.py."""
 
     def test_returns_formatted_suffix_for_valid_vector(self):
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         ft = np.zeros(FEATURE_COUNT)
         ft[1] = 0.0123
         ft[3] = 0.0234
@@ -348,7 +348,7 @@ class TestFeatureDiagSuffix:
         assert "vr=1.45" in result
 
     def test_returns_formatted_suffix_for_list(self):
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         ft = [0.0] * FEATURE_COUNT
         ft[1] = 0.05
         ft[3] = 0.10
@@ -359,25 +359,25 @@ class TestFeatureDiagSuffix:
         assert "vr=2.00" in result
 
     def test_returns_empty_for_none(self):
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         assert _feature_diag_suffix(None) == ""
 
     def test_returns_empty_for_too_short_vector(self):
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         assert _feature_diag_suffix(np.zeros(4)) == ""
         assert _feature_diag_suffix([]) == ""
         assert _feature_diag_suffix([1.0, 2.0]) == ""
 
     def test_does_not_raise_for_numpy_array(self):
         """Confirm no ambiguous truth-value error for multi-element NumPy array."""
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         ft = np.zeros(FEATURE_COUNT)
         # Must not raise "The truth value of an array is ambiguous"
         result = _feature_diag_suffix(ft)
         assert isinstance(result, str)
 
     def test_does_not_raise_for_malformed_values(self):
-        from diagnostics import _feature_diag_suffix
+        from journals import _feature_diag_suffix
         assert _feature_diag_suffix("bad") == ""
         assert _feature_diag_suffix(42) == ""
 
@@ -541,7 +541,7 @@ class TestModelRoles:
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from model_health import ModelHealthTracker  # noqa: E402
+from infra import ModelHealthTracker  # noqa: E402
 
 
 class TestModelHealthTracker:
@@ -638,7 +638,7 @@ class TestModelHealthTracker:
 # Model registry role helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-from model_registry import (  # noqa: E402
+from infra import (  # noqa: E402
     split_votes_by_role, compute_active_stats, build_roles_dict_from_config,
     ROLE_ACTIVE, ROLE_SHADOW, ROLE_DIAGNOSTIC,
 )
@@ -696,7 +696,7 @@ class TestModelRegistryRoleHelpers:
 # format_vote_log with role-separated output
 # ─────────────────────────────────────────────────────────────────────────────
 
-from diagnostics import format_vote_log as _fmt_vote_log  # noqa: E402
+from journals import format_vote_log as _fmt_vote_log  # noqa: E402
 
 
 class TestFormatVoteLogWithRoles:
