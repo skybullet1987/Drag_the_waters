@@ -1,19 +1,11 @@
-# ── Ruthless V2 — backwards-compatibility shim ───────────────────────────────
+# ── Ruthless V2 package ───────────────────────────────────────────────────────
 #
-# This file is intentionally thin.  All logic lives in the Vox/ruthless/
-# sub-package.  This shim re-exports the entire public surface so that:
-#
-#   from ruthless_v2 import MultiPositionManager, compute_apex_score, ...
-#
-# continues to work without modification in existing code and tests.
-#
-# File-size constraint: each .py in Vox/ must stay ≤ 63,000 bytes.
-# Original ruthless_v2.py was 71,072 bytes — split into Vox/ruthless/*.py.
+# Re-exports the complete public surface of the ruthless V2 engine so that
+# ``from Vox.ruthless import ...`` and the backwards-compat shim
+# ``Vox/ruthless_v2.py`` both work without modification.
 # ─────────────────────────────────────────────────────────────────────────────
 
-import math  # kept for any callers that do ``from ruthless_v2 import math``
-
-from ruthless.cfg import (
+from .cfg import (
     RUTHLESS_V2_MODE,
     RUTHLESS_V2_MAX_CONCURRENT_POSITIONS,
     RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY,
@@ -56,13 +48,13 @@ from ruthless.cfg import (
     RUTHLESS_V2_DECAY_FACTOR,
 )
 
-from ruthless.positions import (
+from .positions import (
     MultiPositionManager,
     DynamicVoterWeighting,
     _date_key,
 )
 
-from ruthless.scoring import (
+from .scoring import (
     compute_multihorizon_scores,
     compute_v2_opportunity_score,
     compute_breakout_score,
@@ -71,18 +63,18 @@ from ruthless.scoring import (
     compute_relative_strength_scores,
 )
 
-from ruthless.pump import (
+from .pump import (
     compute_pump_scores,
     exhaustion_override_allowed,
 )
 
-from ruthless.meta import (
+from .meta import (
     compute_meta_entry_score,
     SplitExitHelper,
     rank_candidates_v2,
 )
 
-from ruthless.machine_gun import (
+from .machine_gun import (
     apply_regime_soft_penalty,
     apply_meta_soft_penalty,
     select_top_n_machine_gun,
@@ -90,7 +82,7 @@ from ruthless.machine_gun import (
     format_v2_startup_log,
 )
 
-from ruthless.apex import (
+from .apex import (
     _APEX_WEIGHTS,
     compute_apex_score,
     apex_entry_decision,
@@ -103,6 +95,7 @@ from ruthless.apex import (
 )
 
 __all__ = [
+    # cfg
     "RUTHLESS_V2_MODE",
     "RUTHLESS_V2_MAX_CONCURRENT_POSITIONS",
     "RUTHLESS_V2_MAX_NEW_ENTRIES_PER_DAY",
@@ -143,25 +136,31 @@ __all__ = [
     "RUTHLESS_V2_MIN_WEIGHT_MULTIPLIER",
     "RUTHLESS_V2_MIN_OBS_BEFORE_ADJUST",
     "RUTHLESS_V2_DECAY_FACTOR",
+    # positions
     "MultiPositionManager",
     "DynamicVoterWeighting",
     "_date_key",
+    # scoring
     "compute_multihorizon_scores",
     "compute_v2_opportunity_score",
     "compute_breakout_score",
     "compute_volume_expansion_score",
     "compute_regime_score",
     "compute_relative_strength_scores",
+    # pump
     "compute_pump_scores",
     "exhaustion_override_allowed",
+    # meta
     "compute_meta_entry_score",
     "SplitExitHelper",
     "rank_candidates_v2",
+    # machine_gun
     "apply_regime_soft_penalty",
     "apply_meta_soft_penalty",
     "select_top_n_machine_gun",
     "compute_machine_gun_allocation",
     "format_v2_startup_log",
+    # apex
     "_APEX_WEIGHTS",
     "compute_apex_score",
     "apex_entry_decision",
