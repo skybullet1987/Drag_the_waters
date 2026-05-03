@@ -54,6 +54,12 @@ ENTRY_RECORD_REQUIRED_FIELDS = [
     "shadow_votes",
     "diagnostic_votes",
     "effective_model_weights",
+    # Apex Predator fields (appended; default to 0/None for legacy records)
+    "apex_score",
+    "apex_path",
+    "n_agree",
+    "mean_proba",
+    "cost_bps",
 ]
 
 EXIT_RECORD_REQUIRED_FIELDS = [
@@ -168,6 +174,12 @@ class TradeVoteAudit:
             # V2 ranking
             "v2_opportunity_score":   entry_snapshot.get("v2_opportunity_score", 0.0),
             "relative_strength_rank": entry_snapshot.get("relative_strength_rank"),
+            # Apex Predator fields
+            "apex_score":             entry_snapshot.get("apex_score", 0.0),
+            "apex_path":              entry_snapshot.get("apex_path"),
+            "n_agree":                entry_snapshot.get("n_agree", 0),
+            "mean_proba":             entry_snapshot.get("mean_proba", 0.0),
+            "cost_bps":               entry_snapshot.get("cost_bps", 0.0),
             # Votes (full dicts)
             "active_votes":           entry_snapshot.get("active_votes", {}),
             "shadow_votes":           entry_snapshot.get("shadow_votes", {}),

@@ -73,6 +73,37 @@ AGGRESSIVE_MAX_DD_PCT              = 0.20
 # V1 ruthless behavior is preserved when V2 is not explicitly enabled.
 RUTHLESS_V2_MODE                 = False  # default off; activated by profile/param
 
+# ── APEX PREDATOR constants ───────────────────────────────────────────────────
+# Tunable parameters for the Apex Predator ensemble-vote regime.
+# Source diagnostics (backtest Jan 2025 – May 2026):
+#   vote_lr_bal  >= 0.50 → win_rate 57.1%, avg_return +4.65%, PF 7.997
+#   vote_hgbc_l2 >= 0.55 → yes_frac 0.81, win_rate 46%,      PF 3.35
+#   active_lgbm_bal >= 0.55 → yes_frac 1.0,                  PF 1.70 (confirmer)
+#   active_rf    >= 0.60 → win_rate 62.5%,                    PF 2.76
+#   active_hgbc_l2 >= 0.50 → win_rate 44%,                   PF 3.38
+#
+# apex_score = 0.35*vote_lr_bal + 0.25*vote_hgbc_l2 + 0.15*active_rf
+#            + 0.10*active_hgbc_l2 + 0.10*active_lgbm_bal + 0.05*vote_et
+#
+# Entry fires when ANY of four trigger paths is true:
+#   1. apex_score >= APEX_SCORE_ENTRY
+#   2. vote_lr_bal >= 0.50  (PF ~8 proven edge)
+#   3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55
+#   4. mean_proba >= 0.60 AND n_agree >= 3  (legacy strong-ML backstop)
+APEX_SCORE_ENTRY        = 0.55   # minimum apex_score to trigger entry
+APEX_SCORE_PYRAMID      = 0.55   # minimum apex_score to add a pyramid tranche
+APEX_BASE_ALLOC         = 0.20   # baseline allocation (20% of equity)
+APEX_MAX_GROSS          = 2.0    # maximum total gross exposure (2× equity)
+APEX_MAX_CONCURRENT     = 8      # maximum simultaneous open positions
+APEX_MAX_PER_SYMBOL     = 2      # maximum concurrent positions per symbol
+APEX_COOLDOWN_MIN       = 15     # per-symbol reentry cooldown in minutes
+APEX_TIME_STOP_HRS      = 48     # close position if open > this without +1% MFE
+APEX_ATR_SL_MULT        = 1.25   # SL = entry − APEX_ATR_SL_MULT × ATR(14); floor 0.8%, ceil 4%
+APEX_ATR_TP_MULT        = 4.0    # TP = entry + APEX_ATR_TP_MULT × ATR(14); floor 2.5%, ceil 15%
+APEX_TRAIL_ARM_PCT      = 0.010  # trailing stop arms once unrealised PnL >= 1.0%
+APEX_TRAIL_ATR_MULT     = 0.8    # trail distance = max(APEX_TRAIL_ATR_MULT × ATR, 0.6%)
+APEX_BREAKEVEN_MFE      = 0.02   # move stop to breakeven once MFE >= 2%
+
 # ── Ruthless v1 profile defaults ──────────────────────────────────────────────
 # WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.
 # Ruthless v1 targets large asymmetric winners:
