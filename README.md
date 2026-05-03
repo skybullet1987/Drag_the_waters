@@ -368,3 +368,88 @@ The user's Jan 2025–Apr 2026 backtest had 22 orders.  At this sample size:
 
 Every Python file deployed to QuantConnect must remain **under 63,000 characters**.
 If a module grows too large, split helper logic into a new file.
+
+## Apex Predator
+
+The **Apex Predator** regime replaces the over-tight gates that suppressed 538
+entry signals down to 24 orders in the Jan 2025 – May 2026 backtest.  It is
+implemented as a set of pure-Python helpers in `Vox/ruthless_v2.py` (functions
+`compute_apex_score`, `apex_entry_decision`, `compute_apex_size`,
+`compute_apex_atr_stops`) and is configured via `APEX_*` constants in
+`Vox/config.py`.
+
+### Weighted apex score
+
+Every bar, a single composite score is computed from the six most informative
+model columns, weighted by their empirical profit-factor from the research
+diagnostics:
+
+| Column | Weight | Diagnostic PF |
+|--------|--------|---------------|
+| `vote_lr_bal` | 0.35 | ~8.0 at ≥ 0.50 |
+| `vote_hgbc_l2` | 0.25 | ~3.35 at ≥ 0.55 |
+| `active_rf` | 0.15 | ~2.76 at ≥ 0.60 |
+| `active_hgbc_l2` | 0.10 | ~3.38 at ≥ 0.50 |
+| `active_lgbm_bal` | 0.10 | ~1.70 (always-on confirmer) |
+| `vote_et` | 0.05 | diversifier |
+
+Missing columns have their weight redistributed pro-rata so the score remains
+correctly calibrated even when a model is unavailable.
+
+### Four entry trigger paths
+
+Entry fires when **any** of the following is true:
+
+1. `apex_score >= APEX_SCORE_ENTRY` (0.55)
+2. `vote_lr_bal >= 0.50` — proven PF ≈ 8 edge
+3. `vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55`
+4. `mean_proba >= 0.60 AND n_agree >= 3` — legacy strong-ML backstop
+
+`confirm` / `market_mode` is a **score booster**, not a hard gate.
+
+### Sizing (Kelly-lite + pyramiding)
+
+```python
+edge_mult = clip((apex_score - 0.50) / 0.30, 0.0, 1.5)
+conf_mult = 1.0 + 0.5 * (n_agree >= 4)
+size_frac = clip(APEX_BASE_ALLOC * (1 + edge_mult) * conf_mult, 0.05, 0.45)
+```
+
+Total gross exposure is capped at `APEX_MAX_GROSS` (2.0×).
+Pyramiding: add a second tranche at 50 % of original size when unrealised PnL
+≥ +1.5 % and `apex_score >= APEX_SCORE_PYRAMID` (max 2 adds per position).
+
+### Stops / TP / Trail / Breakeven / Time-stop
+
+| Parameter | Formula / Default |
+|-----------|-------------------|
+| Stop-loss | `entry − APEX_ATR_SL_MULT × ATR(14)`; floor 0.8%, ceil 4% |
+| Take-profit | `entry + APEX_ATR_TP_MULT × ATR(14)`; floor 2.5%, ceil 15% |
+| Trail arms | once unrealised PnL ≥ `APEX_TRAIL_ARM_PCT` (1.0%) |
+| Trail distance | `max(APEX_TRAIL_ATR_MULT × ATR, 0.6%)` |
+| Breakeven move | once MFE ≥ `APEX_BREAKEVEN_MFE` (2%), stop → entry + 0.1% |
+| Time-stop | close after `APEX_TIME_STOP_HRS` (48 h) if MFE < +1% |
+
+### Concurrency
+
+`APEX_MAX_CONCURRENT = 8` simultaneous positions,
+`APEX_MAX_PER_SYMBOL = 2` per symbol,
+`APEX_COOLDOWN_MIN = 15` minute reentry cooldown.
+
+### Tunable constants (Vox/config.py)
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `APEX_SCORE_ENTRY` | 0.55 | Minimum apex_score to trigger entry |
+| `APEX_SCORE_PYRAMID` | 0.55 | Minimum apex_score to pyramid |
+| `APEX_BASE_ALLOC` | 0.20 | Baseline position size (20 % of equity) |
+| `APEX_MAX_GROSS` | 2.0 | Maximum total gross exposure |
+| `APEX_MAX_CONCURRENT` | 8 | Maximum simultaneous positions |
+| `APEX_MAX_PER_SYMBOL` | 2 | Maximum positions per symbol |
+| `APEX_COOLDOWN_MIN` | 15 | Reentry cooldown in minutes |
+| `APEX_TIME_STOP_HRS` | 48 | Time-stop horizon (hours) |
+| `APEX_ATR_SL_MULT` | 1.25 | ATR multiplier for stop-loss |
+| `APEX_ATR_TP_MULT` | 4.0 | ATR multiplier for take-profit |
+| `APEX_TRAIL_ARM_PCT` | 0.010 | PnL level to arm trailing stop |
+| `APEX_TRAIL_ATR_MULT` | 0.8 | ATR multiplier for trail distance |
+| `APEX_BREAKEVEN_MFE` | 0.02 | MFE level to trigger breakeven move |

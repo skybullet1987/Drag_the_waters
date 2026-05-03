@@ -17,6 +17,50 @@
 #   - compute_meta_entry_score() — lightweight meta-gate
 #   - SplitExitHelper — partial TP sizing + runner remainder
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  APEX PREDATOR regime  (see config.py for all tunable APEX_* constants)    ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║                                                                              ║
+# ║  Goal: massively more active trading, targeting 10x/20x compounding.        ║
+# ║  Evidence: 538 entry_attempts vs 24 orders — signals were suppressed.       ║
+# ║                                                                              ║
+# ║  Weighted apex_score (per-bar):                                              ║
+# ║    apex_score = 0.35 * vote_lr_bal        (PF ~8  at >=0.50 — strongest)    ║
+# ║               + 0.25 * vote_hgbc_l2       (PF ~3.35 at >=0.55)              ║
+# ║               + 0.15 * active_rf          (PF 2.76  at >=0.60)              ║
+# ║               + 0.10 * active_hgbc_l2     (PF 3.38  at >=0.50)              ║
+# ║               + 0.10 * active_lgbm_bal    (always-on confirmer)             ║
+# ║               + 0.05 * vote_et            (diversifier)                     ║
+# ║  Missing columns: weight redistributed pro-rata across present columns.     ║
+# ║                                                                              ║
+# ║  Entry fires on ANY of four trigger paths:                                   ║
+# ║    1. apex_score >= APEX_SCORE_ENTRY  (0.55)                                ║
+# ║    2. vote_lr_bal >= 0.50             (proven PF ~8)                        ║
+# ║    3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55                     ║
+# ║    4. mean_proba >= 0.60 AND n_agree >= 3   (legacy strong-ML backstop)     ║
+# ║                                                                              ║
+# ║  confirm/market_mode is a SCORE BOOSTER, not a hard gate.                   ║
+# ║                                                                              ║
+# ║  Sizing (Kelly-lite + pyramiding):                                           ║
+# ║    base_alloc = APEX_BASE_ALLOC (0.20)                                       ║
+# ║    edge_mult  = clip((apex_score - 0.50) / 0.30, 0.0, 1.5)                 ║
+# ║    conf_mult  = 1.0 + 0.5 * (n_agree >= 4)                                  ║
+# ║    size_frac  = clip(base_alloc * (1 + edge_mult) * conf_mult, 0.05, 0.45) ║
+# ║    Cap: total gross exposure <= APEX_MAX_GROSS (2.0x equity)                ║
+# ║    Pyramid: if open position +1.5% unrealised and apex_score >= 0.55,       ║
+# ║             add second tranche at 50% original size (max 2 adds)            ║
+# ║                                                                              ║
+# ║  Stops / TP / Trail / Time-stop / Breakeven:                                 ║
+# ║    SL    = entry - APEX_ATR_SL_MULT * ATR(14); floor 0.8%, ceil 4%          ║
+# ║    TP    = entry + APEX_ATR_TP_MULT * ATR(14); floor 2.5%, ceil 15%         ║
+# ║    Trail = arms at +APEX_TRAIL_ARM_PCT (1%), trails max(0.8*ATR, 0.6%)      ║
+# ║    Breakeven: once MFE >= APEX_BREAKEVEN_MFE (2%), stop → entry + 0.1%      ║
+# ║    Time-stop: close after APEX_TIME_STOP_HRS (48h) if MFE < +1%             ║
+# ║                                                                              ║
+# ║  Concurrency: APEX_MAX_CONCURRENT=8 total, APEX_MAX_PER_SYMBOL=2,           ║
+# ║               APEX_COOLDOWN_MIN=15 min reentry cooldown                     ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 import math
 
@@ -1253,3 +1297,285 @@ def format_v2_startup_log(
         f" reentry_cooldown_min={RUTHLESS_V2_REENTRY_COOLDOWN_MIN}"
     )
     return lines
+
+
+# ── APEX PREDATOR helpers ─────────────────────────────────────────────────────
+#
+# These functions implement the Apex Predator regime described at the top of
+# this module.  All knobs are imported from config.APEX_* constants.
+#
+# Public API:
+#   compute_apex_score()       — weighted ensemble vote with missing-col handling
+#   apex_entry_decision()      — evaluates the four trigger paths
+#   compute_apex_size()        — Kelly-lite allocation with pyramiding
+#   compute_apex_atr_stops()   — ATR-based SL / TP / trail / breakeven / time-stop
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Apex vote column weights (must sum to 1.0)
+_APEX_WEIGHTS = {
+    "vote_lr_bal":      0.35,
+    "vote_hgbc_l2":     0.25,
+    "active_rf":        0.15,
+    "active_hgbc_l2":   0.10,
+    "active_lgbm_bal":  0.10,
+    "vote_et":          0.05,
+}
+
+
+def compute_apex_score(votes):
+    """Compute the weighted Apex Predator ensemble vote score.
+
+    Parameters
+    ----------
+    votes : dict[str, float]
+        Per-column model probability/vote values.  Keys are drawn from
+        {vote_lr_bal, vote_hgbc_l2, active_rf, active_hgbc_l2,
+         active_lgbm_bal, vote_et}.
+        Missing keys have their weight redistributed pro-rata across the
+        present columns so the result always sums correctly.
+
+    Returns
+    -------
+    float in [0.0, 1.0] — weighted apex score.
+    float — total weight of present columns (1.0 when all columns present).
+
+    Notes
+    -----
+    Weights are defined in _APEX_WEIGHTS (module-level constant).
+    If *no* columns are present the function returns (0.0, 0.0).
+    """
+    present = {col: w for col, w in _APEX_WEIGHTS.items() if col in votes}
+    if not present:
+        return 0.0, 0.0
+
+    total_w = sum(present.values())
+    if total_w <= 0.0:
+        return 0.0, 0.0
+
+    # Redistribute missing weight pro-rata: scale present weights to sum to 1
+    score = sum(
+        (w / total_w) * float(votes[col])
+        for col, w in present.items()
+    )
+    return max(0.0, min(1.0, score)), total_w
+
+
+def apex_entry_decision(
+    votes,
+    mean_proba=0.0,
+    n_agree=0,
+    apex_score_entry=None,
+):
+    """Evaluate the four Apex Predator entry trigger paths.
+
+    Entry fires when **ANY** of the following is True:
+      1. apex_score >= apex_score_entry  (default 0.55)
+      2. vote_lr_bal >= 0.50             (proven PF ~8)
+      3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55
+      4. mean_proba >= 0.60 AND n_agree >= 3  (legacy strong-ML backstop)
+
+    ``confirm`` / ``market_mode`` is intentionally NOT a hard gate here;
+    callers may boost the apex_score externally but should not block based
+    on it alone.
+
+    Parameters
+    ----------
+    votes           : dict[str, float] — same dict passed to compute_apex_score()
+    mean_proba      : float — ensemble mean probability (active models)
+    n_agree         : int   — number of active models with proba >= threshold
+    apex_score_entry: float or None — overrides config.APEX_SCORE_ENTRY
+
+    Returns
+    -------
+    dict with keys:
+      "triggered"   : bool — True if any path fires
+      "apex_score"  : float
+      "weight_present": float — fraction of total weight present in votes
+      "path"        : str or None — name of the first matching path
+      "path_detail" : dict — per-path bool results
+    """
+    # Import here to avoid circular issues; config is always available
+    try:
+        from config import APEX_SCORE_ENTRY as _cfg_entry
+    except ImportError:
+        _cfg_entry = 0.55
+
+    if apex_score_entry is None:
+        apex_score_entry = _cfg_entry
+
+    apex_score, weight_present = compute_apex_score(votes)
+
+    # Individual vote values (default 0.0 if missing)
+    lr_bal      = float(votes.get("vote_lr_bal",     0.0))
+    hgbc_l2     = float(votes.get("vote_hgbc_l2",    0.0))
+    lgbm_bal    = float(votes.get("active_lgbm_bal", 0.0))
+
+    path1 = apex_score >= apex_score_entry
+    path2 = lr_bal >= 0.50
+    path3 = hgbc_l2 >= 0.55 and lgbm_bal >= 0.55
+    path4 = float(mean_proba) >= 0.60 and int(n_agree) >= 3
+
+    triggered = path1 or path2 or path3 or path4
+
+    path_name = None
+    if path1:
+        path_name = "apex_score"
+    elif path2:
+        path_name = "vote_lr_bal"
+    elif path3:
+        path_name = "hgbc_l2_x_lgbm_bal"
+    elif path4:
+        path_name = "strong_ml_backstop"
+
+    return {
+        "triggered":       triggered,
+        "apex_score":      apex_score,
+        "weight_present":  weight_present,
+        "path":            path_name,
+        "path_detail": {
+            "apex_score_gate":      path1,
+            "vote_lr_bal_gate":     path2,
+            "hgbc_lgbm_gate":       path3,
+            "strong_ml_backstop":   path4,
+        },
+    }
+
+
+def compute_apex_size(
+    apex_score,
+    n_agree=0,
+    current_total_exposure=0.0,
+    base_alloc=None,
+    max_gross=None,
+):
+    """Compute Apex Predator position size (Kelly-lite with pyramiding support).
+
+    Formula::
+
+        edge_mult = clip((apex_score - 0.50) / 0.30, 0.0, 1.5)
+        conf_mult = 1.0 + 0.5 * (n_agree >= 4)
+        size_frac = clip(base_alloc * (1 + edge_mult) * conf_mult, 0.05, 0.45)
+
+    The result is further clamped so that
+    ``current_total_exposure + size_frac <= max_gross``.
+
+    Parameters
+    ----------
+    apex_score             : float  — from compute_apex_score()
+    n_agree                : int    — number of agreeing active models
+    current_total_exposure : float  — sum of allocations already open
+    base_alloc             : float  — baseline allocation; defaults to APEX_BASE_ALLOC (0.20)
+    max_gross              : float  — maximum total gross; defaults to APEX_MAX_GROSS (2.0)
+
+    Returns
+    -------
+    float — allocation fraction in [0.05, 0.45], further capped by remaining headroom.
+    """
+    try:
+        from config import APEX_BASE_ALLOC as _ba, APEX_MAX_GROSS as _mg
+    except ImportError:
+        _ba, _mg = 0.20, 2.0
+
+    if base_alloc is None:
+        base_alloc = _ba
+    if max_gross is None:
+        max_gross = _mg
+
+    edge_mult = max(0.0, min(1.5, (float(apex_score) - 0.50) / 0.30))
+    conf_mult = 1.0 + 0.5 * (int(n_agree) >= 4)
+    size_frac = base_alloc * (1.0 + edge_mult) * conf_mult
+
+    # Hard clamp to [0.05, 0.45]
+    size_frac = max(0.05, min(0.45, size_frac))
+
+    # Respect total gross exposure cap
+    remaining = float(max_gross) - float(current_total_exposure)
+    size_frac = max(0.0, min(size_frac, remaining))
+
+    return round(size_frac, 4)
+
+
+def compute_apex_atr_stops(
+    entry_price,
+    atr,
+    atr_sl_mult=None,
+    atr_tp_mult=None,
+    sl_floor_pct=0.008,
+    sl_ceil_pct=0.040,
+    tp_floor_pct=0.025,
+    tp_ceil_pct=0.150,
+):
+    """Compute Apex Predator ATR-based stop-loss and take-profit levels.
+
+    SL = entry - atr_sl_mult * ATR; clamped to [sl_floor_pct, sl_ceil_pct]
+    TP = entry + atr_tp_mult * ATR; clamped to [tp_floor_pct, tp_ceil_pct]
+
+    Parameters
+    ----------
+    entry_price  : float
+    atr          : float — Average True Range (14-bar or similar)
+    atr_sl_mult  : float or None — defaults to APEX_ATR_SL_MULT (1.25)
+    atr_tp_mult  : float or None — defaults to APEX_ATR_TP_MULT (4.0)
+    sl_floor_pct : float — minimum SL distance as fraction of entry (default 0.8%)
+    sl_ceil_pct  : float — maximum SL distance as fraction of entry (default 4%)
+    tp_floor_pct : float — minimum TP distance as fraction of entry (default 2.5%)
+    tp_ceil_pct  : float — maximum TP distance as fraction of entry (default 15%)
+
+    Returns
+    -------
+    dict with keys: "sl_price", "tp_price", "sl_pct", "tp_pct",
+                    "trail_arm_pct", "trail_dist_pct", "breakeven_mfe_pct",
+                    "time_stop_hrs"
+    """
+    try:
+        from config import (
+            APEX_ATR_SL_MULT   as _sl_m,
+            APEX_ATR_TP_MULT   as _tp_m,
+            APEX_TRAIL_ARM_PCT as _arm,
+            APEX_TRAIL_ATR_MULT as _trail_m,
+            APEX_BREAKEVEN_MFE as _be,
+            APEX_TIME_STOP_HRS as _tsh,
+        )
+    except ImportError:
+        _sl_m, _tp_m, _arm, _trail_m, _be, _tsh = 1.25, 4.0, 0.010, 0.8, 0.02, 48
+
+    if atr_sl_mult is None:
+        atr_sl_mult = _sl_m
+    if atr_tp_mult is None:
+        atr_tp_mult = _tp_m
+
+    ep = float(entry_price)
+    if ep <= 0.0:
+        return {
+            "sl_price": ep, "tp_price": ep,
+            "sl_pct": sl_floor_pct, "tp_pct": tp_floor_pct,
+            "trail_arm_pct": _arm, "trail_dist_pct": 0.006,
+            "breakeven_mfe_pct": _be, "time_stop_hrs": _tsh,
+        }
+
+    atr_v = float(atr) if atr and float(atr) > 0 else ep * 0.01  # fallback 1%
+
+    # SL distance
+    raw_sl_pct = atr_sl_mult * atr_v / ep
+    sl_pct     = max(sl_floor_pct, min(sl_ceil_pct, raw_sl_pct))
+    sl_price   = ep * (1.0 - sl_pct)
+
+    # TP distance
+    raw_tp_pct = atr_tp_mult * atr_v / ep
+    tp_pct     = max(tp_floor_pct, min(tp_ceil_pct, raw_tp_pct))
+    tp_price   = ep * (1.0 + tp_pct)
+
+    # Trail distance = max(APEX_TRAIL_ATR_MULT * ATR, 0.6%)
+    raw_trail_pct = _trail_m * atr_v / ep
+    trail_pct     = max(0.006, raw_trail_pct)
+
+    return {
+        "sl_price":          round(sl_price, 8),
+        "tp_price":          round(tp_price, 8),
+        "sl_pct":            round(sl_pct,   6),
+        "tp_pct":            round(tp_pct,   6),
+        "trail_arm_pct":     _arm,
+        "trail_dist_pct":    round(trail_pct, 6),
+        "breakeven_mfe_pct": _be,
+        "time_stop_hrs":     _tsh,
+    }
