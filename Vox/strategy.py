@@ -1,4 +1,33 @@
 # ── strategy.py: aggressive_config + apex_voting + risk + profit_voting + execution + shadow_lab ──
+#
+# === APEX PREDATOR PARAMETERS ===
+#
+# This module contains all tunable strategy constants for the "apex predator /
+# gatling gun" high-frequency aggressive trading profile. Key settings:
+#
+#   Entry gates (drastically loosened to fire on ~95% of signals):
+#     APEX_GATE_MIN_CLASS_PROBA  = 0.45   (was ~0.55+)
+#     APEX_GATE_MIN_N_AGREE      = 1      (was 2-3)
+#     APEX_GATE_MIN_FINAL_SCORE  = 0.0    (no veto)
+#     APEX_GATE_COOLDOWN_MIN     = 15     (15 min, was 60+)
+#     APEX_GATE_MAX_CONCURRENT   = 12     (was 1-3)
+#     APEX_WEIGHTED_YES_THRESHOLD = 0.45  (was 0.60)
+#
+#   Exits (tighter for faster turnover):
+#     APEX_SL_ATR_MULT           = 1.5    (1.5x ATR stop, was 3x)
+#     APEX_SL_PCT_FLOOR          = 0.025  (2.5% max SL)
+#     APEX_TIME_STOP_DAYS        = 30     (exit stale positions)
+#
+#   Conviction-weighted sizing (boost on high-conviction signals):
+#     APEX_SIZE_BASE_ALLOC       = 0.10   (10% base per trade)
+#     APEX_SIZE_MAX_FRAC         = 0.25   (25% max)
+#     APEX_SIZE_CONV_K           = 4.0    (conviction scaler)
+#     APEX_MAX_LEVERAGE          = 3.0    (up to 3x notional)
+#
+# These parameters target ≥200 orders per backtest period, ≥10 symbols, and
+# are tuned based on model_accuracy_summary showing lgbm_bal PF 1.7-3.4,
+# hgbc_l2 PF 3.35, lr_bal PF 7.99 at the 0.50 threshold.
+#
 import numpy as np
 from collections import deque
 from datetime import timedelta
