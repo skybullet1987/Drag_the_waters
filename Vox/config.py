@@ -85,12 +85,17 @@ RUTHLESS_V2_MODE                 = False  # default off; activated by profile/pa
 # apex_score = 0.35*vote_lr_bal + 0.25*vote_hgbc_l2 + 0.15*active_rf
 #            + 0.10*active_hgbc_l2 + 0.10*active_lgbm_bal + 0.05*vote_et
 #
-# Entry fires when ANY of four trigger paths is true:
+# Entry fires when ANY of the following trigger paths is true:
 #   1. apex_score >= APEX_SCORE_ENTRY
 #   2. vote_lr_bal >= 0.50  (PF ~8 proven edge)
 #   3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55
-#   4. mean_proba >= 0.60 AND n_agree >= 3  (legacy strong-ML backstop)
-APEX_SCORE_ENTRY        = 0.55   # minimum apex_score to trigger entry
+#   4. mean_proba >= APEX_ENTRY_PATH4_PROBA_MIN AND n_agree >= APEX_ENTRY_PATH4_N_AGREE_MIN
+#   5. active_lgbm_bal >= APEX_ENTRY_LGBM_BAL_MIN  (always-on confirmer direct gate)
+# Technical overlay triggers (evaluated in caller, not apex_entry_decision):
+#   6. price crosses APEX_BREAKOUT_NBARS-bar rolling high + volume spike
+#   7. RSI <= APEX_PULLBACK_RSI_MAX in confirmed uptrend
+#   8. APEX_MOMENTUM_CONT_BARS consecutive higher closes + volume spike
+APEX_SCORE_ENTRY        = 0.50   # minimum apex_score to trigger entry (was 0.55)
 APEX_SCORE_PYRAMID      = 0.55   # minimum apex_score to add a pyramid tranche
 APEX_BASE_ALLOC         = 0.20   # baseline allocation (20% of equity)
 APEX_MAX_GROSS          = 2.0    # maximum total gross exposure (2× equity)
@@ -103,6 +108,24 @@ APEX_ATR_TP_MULT        = 4.0    # TP = entry + APEX_ATR_TP_MULT × ATR(14); flo
 APEX_TRAIL_ARM_PCT      = 0.010  # trailing stop arms once unrealised PnL >= 1.0%
 APEX_TRAIL_ATR_MULT     = 0.8    # trail distance = max(APEX_TRAIL_ATR_MULT × ATR, 0.6%)
 APEX_BREAKEVEN_MFE      = 0.02   # move stop to breakeven once MFE >= 2%
+
+# ── Apex Predator: relaxed path-4 thresholds (v2 aggressive) ─────────────────
+APEX_ENTRY_PATH4_PROBA_MIN   = 0.50   # mean_proba floor for path-4 (was 0.60)
+APEX_ENTRY_PATH4_N_AGREE_MIN = 1      # min agreeing models for path-4 (was 3)
+
+# ── Apex Predator: path-5 direct lgbm_bal gate ────────────────────────────────
+APEX_ENTRY_LGBM_BAL_MIN      = 0.50   # active_lgbm_bal threshold for path-5
+
+# ── Apex Predator: technical overlay trigger constants ────────────────────────
+# Breakout: price crosses the rolling N-bar high with volume confirmation.
+APEX_BREAKOUT_NBARS          = 20     # look-back window for rolling high
+APEX_BREAKOUT_VOL_MULT       = 1.5    # current volume must exceed N-bar avg by this multiple
+# Pullback: low RSI inside a confirmed uptrend (mean-reversion long entry).
+APEX_PULLBACK_RSI_MAX        = 35     # RSI must be at or below this value
+APEX_PULLBACK_TREND_BARS     = 10     # bars to confirm prior uptrend (close > close[-n])
+# Momentum continuation: consecutive higher closes + volume expansion.
+APEX_MOMENTUM_CONT_BARS      = 3      # number of consecutive higher closes required
+APEX_MOMENTUM_CONT_VOL_MULT  = 1.5    # current volume must exceed N-bar avg by this multiple
 
 # ── Ruthless v1 profile defaults ──────────────────────────────────────────────
 # WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.

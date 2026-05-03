@@ -34,11 +34,17 @@
 # ║               + 0.05 * vote_et            (diversifier)                     ║
 # ║  Missing columns: weight redistributed pro-rata across present columns.     ║
 # ║                                                                              ║
-# ║  Entry fires on ANY of four trigger paths:                                   ║
-# ║    1. apex_score >= APEX_SCORE_ENTRY  (0.55)                                ║
+# ║  Entry fires on ANY of five trigger paths (Apex v2 — aggressive gates):     ║
+# ║    1. apex_score >= APEX_SCORE_ENTRY  (0.50 — lowered from 0.55)           ║
 # ║    2. vote_lr_bal >= 0.50             (proven PF ~8)                        ║
 # ║    3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55                     ║
-# ║    4. mean_proba >= 0.60 AND n_agree >= 3   (legacy strong-ML backstop)     ║
+# ║    4. mean_proba >= 0.50 AND n_agree >= 1   (relaxed strong-ML backstop)    ║
+# ║    5. active_lgbm_bal >= 0.50         (always-on confirmer direct gate)     ║
+# ║  Technical overlay helpers (callable independently):                         ║
+# ║    apex_breakout_signal()            — price × N-bar high + volume spike    ║
+# ║    apex_pullback_signal()            — RSI < 35 in uptrend                  ║
+# ║    apex_momentum_continuation_signal() — 3 consec. higher closes + vol     ║
+# ║  Each rejected attempt is now logged via apex_rejected_entry_log().         ║
 # ║                                                                              ║
 # ║  confirm/market_mode is a SCORE BOOSTER, not a hard gate.                   ║
 # ║                                                                              ║
@@ -1369,13 +1375,15 @@ def apex_entry_decision(
     n_agree=0,
     apex_score_entry=None,
 ):
-    """Evaluate the four Apex Predator entry trigger paths.
+    """Evaluate the five Apex Predator entry trigger paths (v2 — aggressive gates).
 
     Entry fires when **ANY** of the following is True:
-      1. apex_score >= apex_score_entry  (default 0.55)
-      2. vote_lr_bal >= 0.50             (proven PF ~8)
+      1. apex_score >= apex_score_entry        (default 0.50 — lowered from 0.55)
+      2. vote_lr_bal >= 0.50                   (proven PF ~8)
       3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55
-      4. mean_proba >= 0.60 AND n_agree >= 3  (legacy strong-ML backstop)
+      4. mean_proba >= APEX_ENTRY_PATH4_PROBA_MIN (0.50) AND
+         n_agree >= APEX_ENTRY_PATH4_N_AGREE_MIN (1)  (relaxed strong-ML backstop)
+      5. active_lgbm_bal >= APEX_ENTRY_LGBM_BAL_MIN (0.50)  (always-on confirmer)
 
     ``confirm`` / ``market_mode`` is intentionally NOT a hard gate here;
     callers may boost the apex_score externally but should not block based
@@ -1396,12 +1404,21 @@ def apex_entry_decision(
       "weight_present": float — fraction of total weight present in votes
       "path"        : str or None — name of the first matching path
       "path_detail" : dict — per-path bool results
+      "reject_reason": str or None — first failed gate label when not triggered
     """
     # Import here to avoid circular issues; config is always available
     try:
-        from config import APEX_SCORE_ENTRY as _cfg_entry
+        from config import (
+            APEX_SCORE_ENTRY           as _cfg_entry,
+            APEX_ENTRY_PATH4_PROBA_MIN as _p4_proba,
+            APEX_ENTRY_PATH4_N_AGREE_MIN as _p4_agree,
+            APEX_ENTRY_LGBM_BAL_MIN    as _p5_lgbm,
+        )
     except ImportError:
-        _cfg_entry = 0.55
+        _cfg_entry = 0.50
+        _p4_proba  = 0.50
+        _p4_agree  = 1
+        _p5_lgbm   = 0.50
 
     if apex_score_entry is None:
         apex_score_entry = _cfg_entry
@@ -1416,9 +1433,10 @@ def apex_entry_decision(
     path1 = apex_score >= apex_score_entry
     path2 = lr_bal >= 0.50
     path3 = hgbc_l2 >= 0.55 and lgbm_bal >= 0.55
-    path4 = float(mean_proba) >= 0.60 and int(n_agree) >= 3
+    path4 = float(mean_proba) >= _p4_proba and int(n_agree) >= _p4_agree
+    path5 = lgbm_bal >= _p5_lgbm
 
-    triggered = path1 or path2 or path3 or path4
+    triggered = path1 or path2 or path3 or path4 or path5
 
     path_name = None
     if path1:
@@ -1429,17 +1447,32 @@ def apex_entry_decision(
         path_name = "hgbc_l2_x_lgbm_bal"
     elif path4:
         path_name = "strong_ml_backstop"
+    elif path5:
+        path_name = "lgbm_bal_direct"
+
+    # Build a human-readable rejection reason when no path fires
+    reject_reason = None
+    if not triggered:
+        reject_reason = (
+            f"apex_score={apex_score:.3f}<{apex_score_entry} | "
+            f"vote_lr_bal={lr_bal:.3f}<0.50 | "
+            f"hgbc_l2={hgbc_l2:.3f}<0.55 or lgbm_bal={lgbm_bal:.3f}<0.55 | "
+            f"mean_proba={mean_proba:.3f}<{_p4_proba} or n_agree={n_agree}<{_p4_agree} | "
+            f"lgbm_bal={lgbm_bal:.3f}<{_p5_lgbm}"
+        )
 
     return {
         "triggered":       triggered,
         "apex_score":      apex_score,
         "weight_present":  weight_present,
         "path":            path_name,
+        "reject_reason":   reject_reason,
         "path_detail": {
             "apex_score_gate":      path1,
             "vote_lr_bal_gate":     path2,
             "hgbc_lgbm_gate":       path3,
             "strong_ml_backstop":   path4,
+            "lgbm_bal_gate":        path5,
         },
     }
 
@@ -1581,4 +1614,210 @@ def compute_apex_atr_stops(
         "trail_dist_pct":    round(trail_pct, 6),
         "breakeven_mfe_pct": _be,
         "time_stop_hrs":     _tsh,
+    }
+
+
+# ── Apex Predator: technical overlay entry helpers ────────────────────────────
+
+
+def apex_breakout_signal(closes, volumes, n_bars=None, vol_mult=None):
+    """Return True when price breaks above the rolling N-bar high with a volume spike.
+
+    A breakout is confirmed when:
+      1. ``closes[-1]`` > ``max(closes[-n_bars-1 : -1])``   (crosses prior high)
+      2. ``volumes[-1]`` >= ``vol_mult × mean(volumes[-n_bars-1 : -1])``
+
+    Parameters
+    ----------
+    closes   : sequence of float — recent close prices (needs at least n_bars+1 values)
+    volumes  : sequence of float — matching volume series (same length as closes)
+    n_bars   : int or None — rolling look-back window; defaults to APEX_BREAKOUT_NBARS (20)
+    vol_mult : float or None — volume confirmation multiplier; defaults to
+               APEX_BREAKOUT_VOL_MULT (1.5)
+
+    Returns
+    -------
+    bool — True when both breakout conditions are met, False otherwise.
+    """
+    try:
+        from config import (
+            APEX_BREAKOUT_NBARS    as _nb,
+            APEX_BREAKOUT_VOL_MULT as _vm,
+        )
+    except ImportError:
+        _nb, _vm = 20, 1.5
+
+    if n_bars is None:
+        n_bars = _nb
+    if vol_mult is None:
+        vol_mult = _vm
+
+    n_bars = max(1, int(n_bars))
+    needed = n_bars + 1
+    if len(closes) < needed or len(volumes) < needed:
+        return False
+
+    try:
+        prior_highs = [float(c) for c in closes[-(n_bars + 1):-1]]
+        current_close = float(closes[-1])
+        prior_vols = [float(v) for v in volumes[-(n_bars + 1):-1]]
+        current_vol = float(volumes[-1])
+    except (TypeError, ValueError, IndexError):
+        return False
+
+    if not prior_highs or not prior_vols:
+        return False
+
+    rolling_high = max(prior_highs)
+    avg_vol = sum(prior_vols) / len(prior_vols)
+
+    price_breakout = current_close > rolling_high
+    vol_confirmed  = avg_vol > 0 and current_vol >= vol_mult * avg_vol
+
+    return price_breakout and vol_confirmed
+
+
+def apex_pullback_signal(closes, rsi, n_bars=None, rsi_max=None):
+    """Return True when RSI is oversold inside a confirmed uptrend (pullback long).
+
+    Conditions:
+      1. ``rsi`` <= ``rsi_max``                           (oversold / pullback)
+      2. ``closes[-1]`` > ``closes[-n_bars-1]``           (price higher than n_bars ago)
+
+    Parameters
+    ----------
+    closes  : sequence of float — recent close prices (needs at least n_bars+1 values)
+    rsi     : float — current RSI value (0–100)
+    n_bars  : int or None — trend confirmation look-back; defaults to
+              APEX_PULLBACK_TREND_BARS (10)
+    rsi_max : float or None — maximum RSI to qualify as a pullback; defaults to
+              APEX_PULLBACK_RSI_MAX (35)
+
+    Returns
+    -------
+    bool — True when pullback conditions are met, False otherwise.
+    """
+    try:
+        from config import (
+            APEX_PULLBACK_TREND_BARS as _nb,
+            APEX_PULLBACK_RSI_MAX    as _rmax,
+        )
+    except ImportError:
+        _nb, _rmax = 10, 35
+
+    if n_bars is None:
+        n_bars = _nb
+    if rsi_max is None:
+        rsi_max = _rmax
+
+    n_bars = max(1, int(n_bars))
+    needed = n_bars + 1
+    if len(closes) < needed:
+        return False
+
+    try:
+        current_close = float(closes[-1])
+        past_close    = float(closes[-(n_bars + 1)])
+        rsi_val       = float(rsi)
+    except (TypeError, ValueError, IndexError):
+        return False
+
+    oversold      = rsi_val <= rsi_max
+    in_uptrend    = current_close > past_close
+
+    return oversold and in_uptrend
+
+
+def apex_momentum_continuation_signal(closes, volumes, n_bars=None, vol_mult=None):
+    """Return True on momentum continuation: N consecutive higher closes + volume spike.
+
+    Conditions:
+      1. Each of the last ``n_bars`` closes is strictly higher than the one before it.
+      2. ``volumes[-1]`` >= ``vol_mult × mean(volumes[-n_bars-1 : -1])``
+
+    Parameters
+    ----------
+    closes   : sequence of float — recent close prices (needs at least n_bars+1 values)
+    volumes  : sequence of float — matching volume series (same length as closes)
+    n_bars   : int or None — number of consecutive higher closes required; defaults to
+               APEX_MOMENTUM_CONT_BARS (3)
+    vol_mult : float or None — volume confirmation multiplier; defaults to
+               APEX_MOMENTUM_CONT_VOL_MULT (1.5)
+
+    Returns
+    -------
+    bool — True when momentum continuation conditions are met, False otherwise.
+    """
+    try:
+        from config import (
+            APEX_MOMENTUM_CONT_BARS     as _nb,
+            APEX_MOMENTUM_CONT_VOL_MULT as _vm,
+        )
+    except ImportError:
+        _nb, _vm = 3, 1.5
+
+    if n_bars is None:
+        n_bars = _nb
+    if vol_mult is None:
+        vol_mult = _vm
+
+    n_bars = max(1, int(n_bars))
+    needed = n_bars + 1
+    if len(closes) < needed or len(volumes) < needed:
+        return False
+
+    try:
+        recent_closes = [float(c) for c in closes[-(n_bars + 1):]]
+        prior_vols    = [float(v) for v in volumes[-(n_bars + 1):-1]]
+        current_vol   = float(volumes[-1])
+    except (TypeError, ValueError, IndexError):
+        return False
+
+    if len(recent_closes) < n_bars + 1 or not prior_vols:
+        return False
+
+    # All consecutive pairs must be strictly increasing
+    consecutive_higher = all(
+        recent_closes[i] > recent_closes[i - 1]
+        for i in range(1, len(recent_closes))
+    )
+
+    avg_vol       = sum(prior_vols) / len(prior_vols)
+    vol_confirmed = avg_vol > 0 and current_vol >= vol_mult * avg_vol
+
+    return consecutive_higher and vol_confirmed
+
+
+def apex_rejected_entry_log(votes, mean_proba, n_agree, decision):
+    """Build a structured log entry for a rejected Apex Predator entry attempt.
+
+    Returns a dict with the specific gate(s) that caused the rejection so that
+    callers can emit it to the algorithm log for diagnostics.
+
+    Parameters
+    ----------
+    votes      : dict[str, float] — vote dict passed to apex_entry_decision()
+    mean_proba : float — ensemble mean probability
+    n_agree    : int   — number of agreeing models
+    decision   : dict  — return value of apex_entry_decision()
+
+    Returns
+    -------
+    dict with keys:
+      "triggered"     : bool
+      "reject_reason" : str or None
+      "path_detail"   : dict — per-path bool results
+      "apex_score"    : float
+      "mean_proba"    : float
+      "n_agree"       : int
+      "votes_snapshot": dict — copy of the votes dict
+    """
+    return {
+        "triggered":      decision.get("triggered", False),
+        "reject_reason":  decision.get("reject_reason"),
+        "path_detail":    decision.get("path_detail", {}),
+        "apex_score":     decision.get("apex_score", 0.0),
+        "mean_proba":     float(mean_proba),
+        "n_agree":        int(n_agree),
+        "votes_snapshot": {k: float(v) for k, v in votes.items()},
     }

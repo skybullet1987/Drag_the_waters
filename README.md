@@ -396,14 +396,23 @@ diagnostics:
 Missing columns have their weight redistributed pro-rata so the score remains
 correctly calibrated even when a model is unavailable.
 
-### Four entry trigger paths
+### Five entry trigger paths (v2 — aggressive gates)
 
 Entry fires when **any** of the following is true:
 
-1. `apex_score >= APEX_SCORE_ENTRY` (0.55)
+1. `apex_score >= APEX_SCORE_ENTRY` (0.50 — lowered from 0.55)
 2. `vote_lr_bal >= 0.50` — proven PF ≈ 8 edge
 3. `vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55`
-4. `mean_proba >= 0.60 AND n_agree >= 3` — legacy strong-ML backstop
+4. `mean_proba >= APEX_ENTRY_PATH4_PROBA_MIN (0.50) AND n_agree >= APEX_ENTRY_PATH4_N_AGREE_MIN (1)` — relaxed strong-ML backstop (was 0.60 / 3)
+5. `active_lgbm_bal >= APEX_ENTRY_LGBM_BAL_MIN (0.50)` — always-on confirmer direct gate
+
+Three additional **technical overlay helpers** can be used independently by the caller:
+
+- `apex_breakout_signal(closes, volumes)` — price crosses `APEX_BREAKOUT_NBARS`-bar rolling high + volume spike
+- `apex_pullback_signal(closes, rsi)` — RSI ≤ `APEX_PULLBACK_RSI_MAX` (35) in confirmed uptrend
+- `apex_momentum_continuation_signal(closes, volumes)` — `APEX_MOMENTUM_CONT_BARS` consecutive higher closes + volume spike
+
+Rejected entries are logged via `apex_rejected_entry_log()` with the specific gate that blocked the signal.
 
 `confirm` / `market_mode` is a **score booster**, not a hard gate.
 
@@ -440,7 +449,7 @@ Pyramiding: add a second tranche at 50% of original size when unrealised PnL
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `APEX_SCORE_ENTRY` | 0.55 | Minimum apex_score to trigger entry |
+| `APEX_SCORE_ENTRY` | 0.50 | Minimum apex_score to trigger entry (was 0.55) |
 | `APEX_SCORE_PYRAMID` | 0.55 | Minimum apex_score to pyramid |
 | `APEX_BASE_ALLOC` | 0.20 | Baseline position size (20% of equity) |
 | `APEX_MAX_GROSS` | 2.0 | Maximum total gross exposure |
@@ -453,3 +462,12 @@ Pyramiding: add a second tranche at 50% of original size when unrealised PnL
 | `APEX_TRAIL_ARM_PCT` | 0.010 | PnL level to arm trailing stop |
 | `APEX_TRAIL_ATR_MULT` | 0.8 | ATR multiplier for trail distance |
 | `APEX_BREAKEVEN_MFE` | 0.02 | MFE level to trigger breakeven move |
+| `APEX_ENTRY_PATH4_PROBA_MIN` | 0.50 | mean_proba floor for path-4 (was 0.60) |
+| `APEX_ENTRY_PATH4_N_AGREE_MIN` | 1 | min agreeing models for path-4 (was 3) |
+| `APEX_ENTRY_LGBM_BAL_MIN` | 0.50 | active_lgbm_bal threshold for path-5 |
+| `APEX_BREAKOUT_NBARS` | 20 | Rolling high look-back for breakout signal |
+| `APEX_BREAKOUT_VOL_MULT` | 1.5 | Volume spike multiple for breakout |
+| `APEX_PULLBACK_RSI_MAX` | 35 | RSI ceiling for pullback signal |
+| `APEX_PULLBACK_TREND_BARS` | 10 | Bars to confirm uptrend for pullback |
+| `APEX_MOMENTUM_CONT_BARS` | 3 | Consecutive higher closes for momentum continuation |
+| `APEX_MOMENTUM_CONT_VOL_MULT` | 1.5 | Volume spike multiple for momentum continuation |
