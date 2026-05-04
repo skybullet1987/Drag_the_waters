@@ -72,9 +72,9 @@ FEATURE_COUNT = 20
 # decoupled from the live-execution TAKE_PROFIT / STOP_LOSS / TIMEOUT_HOURS.
 # Looser barriers here increase the positive rate, improving model calibration.
 # Overridable at runtime via QC parameters: label_tp, label_sl, label_horizon_bars.
-LABEL_TP           = 0.012   # take-profit fraction for training labels  (+1.2 %)
-LABEL_SL           = 0.010   # stop-loss fraction for training labels    (−1.0 %)
-LABEL_HORIZON_BARS = 72      # max bars to hold at train time (≈6h at 5-min bars)
+LABEL_TP           = 0.030   # take-profit fraction for training labels  (+3.0 %)
+LABEL_SL           = 0.015   # stop-loss fraction for training labels    (−1.5 %)
+LABEL_HORIZON_BARS = 48      # max bars to hold at train time (≈4h at 5-min bars)
 
 # Estimated round-trip cost used when generating cost-aware training labels.
 # Set lower than live COST_BPS to generate conservative-but-not-too-strict targets.
@@ -504,22 +504,7 @@ def _make_regressors():
 
 
 def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
-    """Build shadow model (name, estimator, role) tuples for the shadow lab.
-
-    Shadow models are predicted and logged but never affect trading decisions.
-    Models are compact variants of the active stack + optional external models.
-
-    Parameters
-    ----------
-    use_calibration : bool — wrap tree models with CalibratedClassifierCV
-    max_count       : int  — cap on total shadow models returned
-    logger          : callable or None
-
-    Returns
-    -------
-    list[tuple[str, estimator, str]]  — (id, estimator, role)
-        role is "shadow" or "diagnostic" for each entry.
-    """
+    """Build (id, estimator, role) tuples for shadow-only models (never affect trading)."""
     from infra import ROLE_SHADOW, ROLE_DIAGNOSTIC
     shadows = []
 
@@ -528,7 +513,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             return CalibratedClassifierCV(est, method="isotonic", cv=2)
         return est
 
-    # ── Shallow ET variant (less overfit, faster) ─────────────────────────────
+    # ── et_shallow (faster, less overfit) ───────────────────────────────────
     try:
         shadows.append(("et_shallow", _cal(
             ExtraTreesClassifier(
@@ -537,10 +522,9 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             )
         ), ROLE_SHADOW))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] et_shallow init failed: {exc}")
+        if logger: logger(f"[shadow_lab] et_shallow init failed: {exc}")
 
-    # ── Shallow RF variant ────────────────────────────────────────────────────
+    # ── rf_shallow ───────────────────────────────────────────────────────────
     try:
         shadows.append(("rf_shallow", _cal(
             RandomForestClassifier(
@@ -549,8 +533,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             )
         ), ROLE_SHADOW))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] rf_shallow init failed: {exc}")
+        if logger: logger(f"[shadow_lab] rf_shallow init failed: {exc}")
 
     # ── HGBC with stronger L2 regularization ─────────────────────────────────
     try:
@@ -569,10 +552,9 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             )
         shadows.append(("hgbc_l2", _hgbc_l2, ROLE_SHADOW))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] hgbc_l2 init failed: {exc}")
+        if logger: logger(f"[shadow_lab] hgbc_l2 init failed: {exc}")
 
-    # ── Calibrated ET (may differ from default CalibratedClassifierCV usage) ──
+    # ── cal_et ───────────────────────────────────────────────────────────────
     try:
         shadows.append(("cal_et", CalibratedClassifierCV(
             ExtraTreesClassifier(
@@ -581,10 +563,9 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             ), method="isotonic", cv=3
         ), ROLE_SHADOW))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] cal_et init failed: {exc}")
+        if logger: logger(f"[shadow_lab] cal_et init failed: {exc}")
 
-    # ── Calibrated RF ─────────────────────────────────────────────────────────
+    # ── cal_rf ───────────────────────────────────────────────────────────────
     try:
         shadows.append(("cal_rf", CalibratedClassifierCV(
             RandomForestClassifier(
@@ -593,8 +574,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             ), method="isotonic", cv=3
         ), ROLE_SHADOW))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] cal_rf init failed: {exc}")
+        if logger: logger(f"[shadow_lab] cal_rf init failed: {exc}")
 
     # ── Balanced LR variant (diagnostic: linear, good calibration reference) ──
     try:
@@ -602,8 +582,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             max_iter=1000, C=0.5, class_weight="balanced",
         ), ROLE_DIAGNOSTIC))
     except Exception as exc:
-        if logger:
-            logger(f"[shadow_lab] lr_bal init failed: {exc}")
+        if logger: logger(f"[shadow_lab] lr_bal init failed: {exc}")
 
     # ── Optional external models (graceful fallback if not installed) ─────────
     if len(shadows) < max_count and HAS_LGBM:
@@ -614,8 +593,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
                 n_jobs=1,
             ), ROLE_SHADOW))
         except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] lgbm_bal init failed: {exc}")
+            if logger: logger(f"[shadow_lab] lgbm_bal init failed: {exc}")
 
     if len(shadows) < max_count and HAS_XGB:
         try:
@@ -625,15 +603,29 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
                 random_state=42, n_jobs=1,
             ), ROLE_SHADOW))
         except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] xgb_bal init failed: {exc}")
+            if logger: logger(f"[shadow_lab] xgb_bal init failed: {exc}")
 
-    # ── Extended shadow lab (gbc/ada/markov/hmm/kmeans/isoforest) ────────────
-    try:
-        from shadow_lab import extend_shadow_estimators as _ext_sh
-        shadows = _ext_sh(shadows, max_count, logger)
-    except Exception:
-        pass
+
+    # ── CatBoost (native class weighting, strong on noisy tabular data) ──────
+    if len(shadows) < max_count and HAS_CATBOOST:
+        try:
+            shadows.append(("catboost_bal", CatBoostClassifier(
+                iterations=100, depth=4, learning_rate=0.05,
+                auto_class_weights="Balanced", verbose=0, random_seed=42,
+            ), ROLE_SHADOW))
+        except Exception as exc:
+            if logger: logger(f"[shadow_lab] catboost_bal init failed: {exc}")
+
+    # ── LightGBM DART booster (better calibration on imbalanced data) ────────
+    if len(shadows) < max_count and HAS_LGBM:
+        try:
+            shadows.append(("lgbm_dart", LGBMClassifier(
+                n_estimators=100, max_depth=4, learning_rate=0.05,
+                boosting_type="dart", class_weight="balanced",
+                random_state=43, verbose=-1, n_jobs=1,
+            ), ROLE_SHADOW))
+        except Exception as exc:
+            if logger: logger(f"[shadow_lab] lgbm_dart init failed: {exc}")
 
     return shadows[:max_count]
 

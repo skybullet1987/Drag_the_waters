@@ -138,15 +138,34 @@ APEX_PULLBACK_TREND_BARS     = 10     # bars to confirm prior uptrend (close > c
 APEX_MOMENTUM_CONT_BARS      = 3      # number of consecutive higher closes required
 APEX_MOMENTUM_CONT_VOL_MULT  = 1.5    # current volume must exceed N-bar avg by this multiple
 
-# ── Ruthless v1 profile defaults ──────────────────────────────────────────────
-# WARNING: can produce fast large drawdowns.  Use for high-risk experimentation.
-# Ruthless v1 targets large asymmetric winners:
-#   • Wider TP/SL (9% / 3%) → P/L ratio ≈ 3.0 — meaningfully above break-even
-#   • 24h timeout — winners have room to run
-#   • Runner mode — trailing stop replaces instant TP exit
-#   • Kelly disabled / allocation floor — positions sized ruthlessly (~90%)
-#   • Looser predicted-return gate — regressor rarely vetoes now
-RUTHLESS_SCORE_MIN               = 0.45
+# ── Apex Predator profile defaults (activate via risk_profile=apex_predator) ──
+# Inherits ruthless V1 execution; ultra-loose entry gates so models that learned
+# weak signals can fire.  Breaks the "predict NO → gate fails" equilibrium.
+APEX_PROFILE_SCORE_MIN               = 0.15
+APEX_PROFILE_PRED_RETURN_MIN         = -0.015
+APEX_PROFILE_VOTE_THRESHOLD          = 0.40
+APEX_PROFILE_VOTE_YES_FRACTION_MIN   = 0.20
+APEX_PROFILE_TOP3_MEAN_MIN           = 0.35
+APEX_PROFILE_CHOP_YES_FRAC_MIN       = 0.25
+APEX_PROFILE_CHOP_TOP3_MEAN_MIN      = 0.35
+APEX_PROFILE_SL_COOLDOWN_MINS        = 10
+APEX_PROFILE_LOSS_LIMIT              = 8
+APEX_PROFILE_LOSS_WINDOW_HOURS       = 4
+APEX_PROFILE_LOSS_BLOCK_HOURS        = 1
+APEX_PROFILE_PORTFOLIO_LOSS_STREAK   = 10
+APEX_PROFILE_PORTFOLIO_PAUSE_HOURS   = 0.5
+APEX_PROFILE_CONFIRM_EV_MIN          = 0.0001
+APEX_PROFILE_CONFIRM_PROBA_MIN       = 0.38
+APEX_PROFILE_CONFIRM_RET4_MIN        = 0.001
+APEX_PROFILE_META_MIN_PROBA          = 0.42
+APEX_PROFILE_GOOD_MODE_META_MIN_PROBA = 0.38
+APEX_PROFILE_GOOD_MODE_VOLUME_MIN    = 0.8
+APEX_PROFILE_LABEL_TP                = 0.020   # achievable TP → positive_rate rises
+APEX_PROFILE_LABEL_SL                = 0.010
+APEX_PROFILE_LABEL_HORIZON_BARS      = 36      # 3h label horizon at 5-min bars
+
+
+RUTHLESS_SCORE_MIN               = 0.20
 RUTHLESS_MIN_EV                  = 0.0000
 RUTHLESS_PRED_RETURN_MIN         = -0.0040   # was -0.0020; very loose veto
 RUTHLESS_MAX_DISPERSION          = 0.35
@@ -165,7 +184,7 @@ RUTHLESS_MIN_HOLD_MINUTES        = 10      # was 3; less instant chop
 RUTHLESS_EMERGENCY_SL            = 0.05    # was 0.040; 5 % catastrophic stop
 RUTHLESS_MAX_DAILY_SL            = 5
 RUTHLESS_COOLDOWN_MINS           = 0
-RUTHLESS_SL_COOLDOWN_MINS        = 120    # 120-min per-coin block after any SL exit
+RUTHLESS_SL_COOLDOWN_MINS        = 30     # 30-min per-coin block after any SL exit
 RUTHLESS_PENALTY_COOLDOWN_LOSSES = 5
 RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
@@ -225,10 +244,10 @@ MODEL_WEIGHT_LGBM         = 1.0
 MODEL_WEIGHT_XGB          = 1.0
 MODEL_WEIGHT_CATBOOST     = 1.0
 # Shadow model weights used in ruthless active pool if promoted
-MODEL_WEIGHT_HGBC_L2      = 1.0
+MODEL_WEIGHT_HGBC_L2      = 2.0   # promoted: strong regularised booster
 MODEL_WEIGHT_CAL_ET       = 0.75
 MODEL_WEIGHT_CAL_RF       = 0.75
-MODEL_WEIGHT_LGBM_BAL     = 1.0
+MODEL_WEIGHT_LGBM_BAL     = 2.0   # promoted: best calibration on imbalanced data
 
 # ── Model roles ────────────────────────────────────────────────────────────────
 # Roles: "active" | "shadow" | "diagnostic" | "disabled"
@@ -260,7 +279,7 @@ RUTHLESS_PROFIT_VOTING_MODE     = True
 # Models listed here that are available in shadow_votes are moved into
 # active_votes before the profit-voting gate is evaluated.
 # GNB, LR, LR_BAL remain diagnostic-only (never promoted).
-RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "lgbm_bal", "gbc", "ada"]
+RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "lgbm_bal", "catboost_bal", "lgbm_dart", "gbc", "ada"]
 RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal", "cal_et", "cal_rf"]
 RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
 
@@ -269,15 +288,15 @@ RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
 # candidate journal / reject diagnostic data.  Tighten after analysing results.
 # vote_yes_fraction = fraction of active models with P >= RUTHLESS_VOTE_THRESHOLD.
 # top3_mean         = mean of the top-3 active model probabilities.
-RUTHLESS_VOTE_THRESHOLD         = 0.50   # per-model yes/no split threshold
-RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.34   # min yes-fraction for trend/pump entries
-RUTHLESS_TOP3_MEAN_MIN          = 0.55   # min top-3 mean for trend/pump entries
+RUTHLESS_VOTE_THRESHOLD         = 0.45   # per-model yes/no split threshold
+RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.30   # min yes-fraction for trend/pump entries
+RUTHLESS_TOP3_MEAN_MIN          = 0.45   # min top-3 mean for trend/pump entries
 RUTHLESS_VOTE_EV_FLOOR          = 0.001  # minimum EV required for profit-voting pass
 
 # ── Chop supermajority requirements (ruthless profit-voting mode) ─────────────
 # Chop entries require a stricter vote than trend (still bootstrap-relaxed).
-RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.50   # yes-fraction in chop
-RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.60   # top-3-mean required in chop
+RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.40   # yes-fraction in chop
+RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.50   # top-3-mean required in chop
 RUTHLESS_CHOP_PRED_RETURN_MIN   = 0.000  # positive pred_return (disabled)
 RUTHLESS_CHOP_EV_MIN            = 0.002  # EV floor required in chop
 
@@ -342,35 +361,35 @@ LOG_MODEL_VOTES           = False
 # increase sample size without returning to chop overtrading.
 # Set RUTHLESS_GOOD_MODE_RELAXATION = False to disable all relaxation.
 RUTHLESS_GOOD_MODE_RELAXATION         = True
-RUTHLESS_GOOD_MODE_META_MIN_PROBA     = 0.52   # relaxed from 0.55
-RUTHLESS_GOOD_MODE_MIN_EV             = 0.004   # relaxed confirm ev from 0.006
-RUTHLESS_GOOD_MODE_VOLUME_MIN         = 1.3    # relaxed from 1.5
+RUTHLESS_GOOD_MODE_META_MIN_PROBA     = 0.48   # relaxed from 0.52
+RUTHLESS_GOOD_MODE_MIN_EV             = 0.002   # relaxed confirm ev
+RUTHLESS_GOOD_MODE_VOLUME_MIN         = 1.0    # relaxed from 1.3
 
 # ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
-RUTHLESS_LOSS_WINDOW_HOURS       = 24     # rolling window for counting SL exits
-RUTHLESS_LOSS_LIMIT              = 2      # SL exits in window that trigger long block
-RUTHLESS_LOSS_BLOCK_HOURS        = 24     # block duration when limit exceeded
+RUTHLESS_LOSS_WINDOW_HOURS       = 12     # rolling window for counting SL exits
+RUTHLESS_LOSS_LIMIT              = 4      # SL exits in window that trigger long block
+RUTHLESS_LOSS_BLOCK_HOURS        = 6      # block duration when limit exceeded
 
 # ── Ruthless portfolio loss-streak brake ──────────────────────────────────────
-RUTHLESS_PORTFOLIO_LOSS_STREAK   = 4     # consecutive losses before pause
-RUTHLESS_PORTFOLIO_PAUSE_HOURS   = 6     # hours to pause all new entries
+RUTHLESS_PORTFOLIO_LOSS_STREAK   = 6     # consecutive losses before pause
+RUTHLESS_PORTFOLIO_PAUSE_HOURS   = 2     # hours to pause all new entries
 
 # ── Ruthless confirmation gate thresholds ─────────────────────────────────────
 # Ruthless entries must pass one of three confirmation paths:
 #   momentum_override | strong_ml | trend_momentum
-RUTHLESS_CONFIRM_EV_MIN          = 0.006  # strong_ml: minimum ev_score
-RUTHLESS_CONFIRM_PROBA_MIN       = 0.60   # strong_ml: minimum class_proba
+RUTHLESS_CONFIRM_EV_MIN          = 0.002  # strong_ml: minimum ev_score
+RUTHLESS_CONFIRM_PROBA_MIN       = 0.52   # strong_ml: minimum class_proba
 RUTHLESS_CONFIRM_AGREE_MIN       = 2      # strong_ml: minimum n_agree
-RUTHLESS_CONFIRM_RET4_MIN        = 0.010  # trend_momentum: minimum ret_4
+RUTHLESS_CONFIRM_RET4_MIN        = 0.004  # trend_momentum: minimum ret_4
 RUTHLESS_CONFIRM_RET16_MIN       = 0.020  # trend_momentum: minimum ret_16
 RUTHLESS_CONFIRM_VOLR_MIN        = 1.5    # trend_momentum: minimum vol_r
 
 # ── Ruthless label parameters (for profile-aligned model training) ─────────────
-RUTHLESS_LABEL_TP                = 0.09   # wider TP barrier for ruthless training labels
-RUTHLESS_LABEL_SL                = 0.03   # wider SL barrier for ruthless training labels
-RUTHLESS_LABEL_HORIZON_HOURS     = 24     # 24h horizon aligns with ruthless timeout
-# Derived bars: horizon_hours × (60 / DECISION_INTERVAL_MIN) = 24×4 = 96 bars
-RUTHLESS_LABEL_HORIZON_BARS      = 96
+RUTHLESS_LABEL_TP                = 0.035  # achievable TP for ruthless training labels
+RUTHLESS_LABEL_SL                = 0.015  # matched SL for ruthless training labels
+RUTHLESS_LABEL_HORIZON_HOURS     = 12     # 12h horizon — more labels fire within window
+# Derived bars: horizon_hours × (60 / DECISION_INTERVAL_MIN) = 12×4 = 48 bars
+RUTHLESS_LABEL_HORIZON_BARS      = 48
 
 # ── Momentum breakout override ─────────────────────────────────────────────────
 # Enabled by default for aggressive/ruthless profiles; disabled otherwise.
@@ -413,7 +432,8 @@ def setup_risk_profile(algo):
         algo._risk_profile = "conservative"
     elif _rp_raw:
         _rp_val = _rp_raw.lower().strip()
-        if _rp_val in ("conservative", "balanced", "aggressive", "ruthless", "ruthless_v2"):
+        if _rp_val in ("conservative", "balanced", "aggressive", "ruthless",
+                       "ruthless_v2", "apex_predator"):
             algo._risk_profile = _rp_val
             if _rp_val == "conservative":
                 algo._conservative_mode = True
@@ -429,6 +449,11 @@ def setup_risk_profile(algo):
     # The profile is normalized to "ruthless" first so all ruthless V1 settings
     # are applied; the V2 flag then determines the behavior variant.
     if algo._risk_profile == "ruthless_v2":
+        algo._risk_profile = "ruthless"
+
+    # apex_predator: run as ruthless first, then override gates afterward.
+    _apex_mode = algo._risk_profile == "apex_predator"
+    if _apex_mode:
         algo._risk_profile = "ruthless"
 
     # Store V2 mode flag on algo — used by execution path.
@@ -674,12 +699,47 @@ def setup_risk_profile(algo):
                 algo.log("[profile] WARNING: ruthless_v2 module not found; V2 disabled.")
                 algo._ruthless_v2_mode = False
 
+    # ── Apex Predator gate overrides (applied after ruthless base setup) ─────
+    if _apex_mode:
+        algo._risk_profile   = "apex_predator"
+        algo._apex_predator_mode = True
+        # Entry gates — ultra-loose to break the "predict NO" equilibrium
+        algo._s_min                          = APEX_PROFILE_SCORE_MIN
+        algo._pred_return_min                = APEX_PROFILE_PRED_RETURN_MIN
+        algo._sl_cd                          = APEX_PROFILE_SL_COOLDOWN_MINS
+        algo._meta_min_proba                 = APEX_PROFILE_META_MIN_PROBA
+        algo._good_mode_meta_min_proba       = APEX_PROFILE_GOOD_MODE_META_MIN_PROBA
+        algo._good_mode_min_ev               = 0.0
+        algo._good_mode_volume_min           = APEX_PROFILE_GOOD_MODE_VOLUME_MIN
+        algo._ruthless_loss_window_hours     = APEX_PROFILE_LOSS_WINDOW_HOURS
+        algo._ruthless_loss_limit            = APEX_PROFILE_LOSS_LIMIT
+        algo._ruthless_loss_block_hours      = APEX_PROFILE_LOSS_BLOCK_HOURS
+        algo._ruthless_portfolio_loss_streak = APEX_PROFILE_PORTFOLIO_LOSS_STREAK
+        algo._ruthless_portfolio_pause_hours = APEX_PROFILE_PORTFOLIO_PAUSE_HOURS
+        algo._ruthless_confirm_ev_min        = APEX_PROFILE_CONFIRM_EV_MIN
+        algo._ruthless_confirm_proba_min     = APEX_PROFILE_CONFIRM_PROBA_MIN
+        algo._ruthless_confirm_agree_min     = 1
+        algo._ruthless_confirm_ret4_min      = APEX_PROFILE_CONFIRM_RET4_MIN
+        algo._ruthless_confirm_ret16_min     = RUTHLESS_CONFIRM_RET16_MIN * 0.3
+        algo._ruthless_confirm_volr_min      = 1.0
+        algo._label_tp                       = APEX_PROFILE_LABEL_TP
+        algo._label_sl                       = APEX_PROFILE_LABEL_SL
+        algo._label_horizon                  = APEX_PROFILE_LABEL_HORIZON_BARS
+        algo._pv_vote_threshold              = APEX_PROFILE_VOTE_THRESHOLD
+        algo._pv_vote_yes_frac_min           = APEX_PROFILE_VOTE_YES_FRACTION_MIN
+        algo._pv_top3_mean_min               = APEX_PROFILE_TOP3_MEAN_MIN
+        algo._pv_vote_ev_floor               = 0.0
+        algo._pv_chop_yes_frac_min           = APEX_PROFILE_CHOP_YES_FRAC_MIN
+        algo._pv_chop_top3_mean_min          = APEX_PROFILE_CHOP_TOP3_MEAN_MIN
+        algo._pv_chop_pred_return_min        = -1.0
+        algo._pv_chop_ev_min                 = 0.0
+
     # ── Momentum override setup ───────────────────────────────────────────────
     _mo_raw = algo.get_parameter("momentum_override")
     if _mo_raw:
         algo._momentum_override = str(_mo_raw).lower() in ("true", "1", "yes")
     else:
-        algo._momentum_override = algo._risk_profile in ("aggressive", "ruthless")
+        algo._momentum_override = algo._risk_profile in ("aggressive", "ruthless", "apex_predator")
 
     algo._momentum_ret4_min = float(
         algo.get_parameter("momentum_ret4_min") or MOMENTUM_RET4_MIN
@@ -696,7 +756,7 @@ def setup_risk_profile(algo):
     algo._momentum_override_min_ev = float(
         algo.get_parameter("momentum_override_min_ev") or MOMENTUM_OVERRIDE_MIN_EV
     )
-    algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless")
+    algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless", "apex_predator")
 
     # ── Startup profile audit log (unthrottled — important config visibility) ───
     _runner_mode_val   = getattr(algo, "_runner_mode",   False)
@@ -724,7 +784,7 @@ def setup_risk_profile(algo):
         f" runner_mode={_runner_mode_val}"
     )
     # Model role audit (active vs shadow vs diagnostic) — built from config lists
-    if algo._risk_profile == "ruthless" and getattr(algo, "_ruthless_profit_voting_mode", False):
+    if algo._risk_profile in ("ruthless", "apex_predator") and getattr(algo, "_ruthless_profit_voting_mode", False):
         _active_str = ",".join(getattr(algo, "_ruthless_active_models", RUTHLESS_ACTIVE_MODELS))
         _diag_str   = ",".join(getattr(algo, "_ruthless_diagnostic_models", RUTHLESS_DIAGNOSTIC_MODELS))
         _shadow_str = ",".join(getattr(algo, "_ruthless_shadow_models", RUTHLESS_SHADOW_MODELS))
@@ -739,17 +799,17 @@ def setup_risk_profile(algo):
         )
     else:
         _active_str = ",".join(getattr(algo, "_ruthless_active_models",
-                                       ["rf", "et", "hgbc"]) if algo._risk_profile == "ruthless"
+                                       ["rf", "et", "hgbc"]) if algo._risk_profile in ("ruthless", "apex_predator")
                                else ["rf", "et", "hgbc"])
         _diag_str   = ",".join(getattr(algo, "_ruthless_diagnostic_models",
-                                       ["gnb", "lr"]) if algo._risk_profile == "ruthless"
+                                       ["gnb", "lr"]) if algo._risk_profile in ("ruthless", "apex_predator")
                                else ["gnb", "lr"])
         algo.log(
             f"[profile] active_models={_active_str}"
             f" diagnostic_models={_diag_str}"
-            f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lgbm_bal,gbc,ada"
+            f" shadow_models=et_shallow,rf_shallow,hgbc_l2,cal_et,cal_rf,lgbm_bal,catboost_bal,lgbm_dart"
         )
-    if algo._risk_profile == "ruthless":
+    if algo._risk_profile in ("ruthless", "apex_predator"):
         _chop_rule = "supermajority_only" if _pv_mode else "standard"
         algo.log(
             f"[profile] chop_rule={_chop_rule}"
@@ -762,9 +822,11 @@ def setup_risk_profile(algo):
             f" chop_top3_min={getattr(algo, '_pv_chop_top3_mean_min', RUTHLESS_CHOP_TOP3_MEAN_MIN)}"
             f" chop_ev_min={getattr(algo, '_pv_chop_ev_min', RUTHLESS_CHOP_EV_MIN)}"
         )
+        _is_apex = algo._risk_profile == "apex_predator"
         algo.log(
             f"[vox] PROFILE ACTIVE: risk_profile={algo._risk_profile}"
-            f"  score_min={algo._s_min}"
+            + (" [APEX PREDATOR — ultra-loose gates]" if _is_apex else "")
+            + f"  score_min={algo._s_min}"
             f"  min_ev={algo._min_ev:.5f}"
             f"  pred_return_min={algo._pred_return_min:.5f}"
             f"  allocation={algo._alloc}"
@@ -773,19 +835,19 @@ def setup_risk_profile(algo):
             f"  timeout_hours={algo._toh}"
         )
         algo.log(
-            f"[vox] RUTHLESS v4 ACTIVE:"
+            f"[vox] {'APEX PREDATOR' if _is_apex else 'RUTHLESS'} v4 ACTIVE:"
             f"  sl_cooldown_mins={algo._sl_cd}"
             f"  loss_window_h={getattr(algo, '_ruthless_loss_window_hours', 24)}"
             f"  loss_limit={getattr(algo, '_ruthless_loss_limit', 2)}"
             f"  loss_block_h={getattr(algo, '_ruthless_loss_block_hours', 24)}"
             f"  portfolio_loss_streak={getattr(algo, '_ruthless_portfolio_loss_streak', 4)}"
             f"  portfolio_pause_h={getattr(algo, '_ruthless_portfolio_pause_hours', 6)}"
-            f"  confirm_ev>={getattr(algo, '_ruthless_confirm_ev_min', 0.006)}"
-            f"  confirm_proba>={getattr(algo, '_ruthless_confirm_proba_min', 0.60)}"
-            f"  confirm_ret4>={getattr(algo, '_ruthless_confirm_ret4_min', 0.010)}"
-            f"  label_tp={getattr(algo, '_label_tp', 0.09)}"
-            f"  label_sl={getattr(algo, '_label_sl', 0.03)}"
-            f"  label_horizon_bars={getattr(algo, '_label_horizon', 96)}"
+            f"  confirm_ev>={getattr(algo, '_ruthless_confirm_ev_min', 0.002)}"
+            f"  confirm_proba>={getattr(algo, '_ruthless_confirm_proba_min', 0.52)}"
+            f"  confirm_ret4>={getattr(algo, '_ruthless_confirm_ret4_min', 0.004)}"
+            f"  label_tp={getattr(algo, '_label_tp', 0.035)}"
+            f"  label_sl={getattr(algo, '_label_sl', 0.015)}"
+            f"  label_horizon_bars={getattr(algo, '_label_horizon', 48)}"
         )
         algo.log(
             f"[vox] RUTHLESS good-mode-relaxation:"
