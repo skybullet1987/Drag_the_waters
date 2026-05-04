@@ -606,7 +606,6 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
             if logger: logger(f"[shadow_lab] xgb_bal init failed: {exc}")
 
 
-    # ── CatBoost (native class weighting, strong on noisy tabular data) ──────
     if len(shadows) < max_count and HAS_CATBOOST:
         try:
             shadows.append(("catboost_bal", CatBoostClassifier(
@@ -616,7 +615,6 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
         except Exception as exc:
             if logger: logger(f"[shadow_lab] catboost_bal init failed: {exc}")
 
-    # ── LightGBM DART booster (better calibration on imbalanced data) ────────
     if len(shadows) < max_count and HAS_LGBM:
         try:
             shadows.append(("lgbm_dart", LGBMClassifier(
@@ -627,6 +625,11 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
         except Exception as exc:
             if logger: logger(f"[shadow_lab] lgbm_dart init failed: {exc}")
 
+    try:
+        from strategy import extend_shadow_estimators as _ext
+        shadows = _ext(shadows, max_count=max_count, logger=logger)
+    except Exception:
+        pass
     return shadows[:max_count]
 
 
@@ -660,7 +663,7 @@ class VoxEnsemble:
     """
 
     def __init__(self, logger=None, use_calibration=True,
-                 shadow_lab_enabled=True, shadow_max_count=12):
+                 shadow_lab_enabled=True, shadow_max_count=20):
         self._logger          = logger
         self._use_calibration = use_calibration
         self._estimators      = _make_estimators(logger, use_calibration=use_calibration)
