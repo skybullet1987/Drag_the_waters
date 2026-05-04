@@ -1173,6 +1173,31 @@ try:
 except Exception:
     HMM_AVAILABLE = False
 
+# ── Optional Tier 1 / Tier 2 shadow-lab imports ───────────────────────────────
+try:
+    from imblearn.ensemble import BalancedRandomForestClassifier, RUSBoostClassifier
+    HAS_IMBLEARN = True
+except Exception:
+    HAS_IMBLEARN = False
+
+try:
+    from ngboost import NGBClassifier
+    HAS_NGBOOST = True
+except Exception:
+    HAS_NGBOOST = False
+
+try:
+    import hdbscan as _hdbscan_lib
+    HAS_HDBSCAN = True
+except Exception:
+    HAS_HDBSCAN = False
+
+try:
+    from flaml import AutoML as _FLAMLAutoML
+    HAS_FLAML = True
+except Exception:
+    HAS_FLAML = False
+
 ROLE_SHADOW     = "shadow"
 ROLE_DIAGNOSTIC = "diagnostic"
 
@@ -1208,6 +1233,95 @@ def _make_ada(logger=None):
         return None
 
 
+def _make_mlp(logger=None):
+    try:
+        from sklearn.neural_network import MLPClassifier
+        return MLPClassifier((64, 32), max_iter=300, early_stopping=True, random_state=42)
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] mlp: {exc}")
+        return None
+def _make_balanced_rf(logger=None):
+    if not HAS_IMBLEARN: return None
+    try: return BalancedRandomForestClassifier(n_estimators=100, max_depth=5, n_jobs=1, random_state=42)
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] bal_rf: {exc}")
+        return None
+def _make_rusboost(logger=None):
+    if not HAS_IMBLEARN: return None
+    try: return RUSBoostClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] rusboost: {exc}")
+        return None
+def _make_ngboost(logger=None):
+    if not HAS_NGBOOST: return None
+    try: return NGBClassifier(n_estimators=100, verbose=False, random_state=42)
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] ngboost: {exc}")
+        return None
+def _make_xgb_dart(logger=None):
+    try:
+        from xgboost import XGBClassifier
+        return XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
+                             booster="dart", rate_drop=0.1, eval_metric="logloss",
+                             random_state=42, n_jobs=1)
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] xgb_dart: {exc}")
+        return None
+
+
+class HDBSCANRegimeDiagnostic:
+    _fi = [1, 3, 5, 6, 7]
+
+    def __init__(self, min_cluster_size=15):
+        self._mcs = min_cluster_size
+        self._fitted = False
+        self._centroid = None
+
+    def _x(self, X):
+        X = np.atleast_2d(X); return X[:, self._fi] if X.shape[1] > max(self._fi) else X
+
+    def fit(self, X, y_class):
+        if not HAS_HDBSCAN: return
+        try:
+            Xr = self._x(X).astype(float)
+            lbl = _hdbscan_lib.HDBSCAN(min_cluster_size=self._mcs).fit_predict(Xr)
+            uk = set(lbl) - {-1}
+            best = max(uk, key=lambda k: np.mean(Xr[lbl == k, 0])) if uk else None
+            self._centroid = Xr[lbl == best].mean(0) if best is not None else None
+            self._fitted = True
+        except Exception: self._fitted = False
+
+    def predict_proba(self, X):
+        n = len(np.atleast_2d(X)); fb = np.column_stack([np.full(n, .5), np.full(n, .5)])
+        if not self._fitted or self._centroid is None: return fb
+        try:
+            Xr = self._x(X).astype(float); d = np.linalg.norm(Xr - self._centroid, axis=1)
+            p = 1.0 / (1.0 + np.exp(d - d.mean())); return np.column_stack([1.0 - p, p])
+        except Exception: return fb
+
+
+class FLAMLShadow:
+    def __init__(self, time_budget=20):
+        self._tb = time_budget
+        self._m = None
+        self._fitted = False
+
+    def fit(self, X, y):
+        if not HAS_FLAML: return
+        try:
+            m = _FLAMLAutoML()
+            m.fit(np.array(X, dtype=float), np.array(y),
+                  task="classification", time_budget=self._tb, verbose=0)
+            self._m = m; self._fitted = True
+        except Exception: self._fitted = False
+
+    def predict_proba(self, X):
+        n = len(np.atleast_2d(X)); fb = np.column_stack([np.full(n, .5), np.full(n, .5)])
+        if not self._fitted or self._m is None: return fb
+        try: return self._m.predict_proba(np.array(X, dtype=float))
+        except Exception: return fb
+
+
 # ── Regime diagnostic models ───────────────────────────────────────────────────
 #
 # These are sklearn wrappers that output a probability-like score or cluster
@@ -1223,9 +1337,6 @@ class MarkovRegimeDiagnostic:
             max_iter=500, C=1.0, solver="lbfgs", random_state=42,
         )
         self._fitted = False
-        # Feature indices used from the full feature vector:
-        # [0]=ret_1, [1]=ret_4, [2]=ret_8, [3]=ret_16, [4]=rsi_14,
-        # [5]=atr_pct, [6]=vol_ratio, [7]=btc_rel,  …
         self._feat_idx = [1, 3, 5, 6, 7]  # ret_4, ret_16, atr_pct, vol_ratio, btc_rel
 
     def _extract(self, X):
@@ -1235,7 +1346,6 @@ class MarkovRegimeDiagnostic:
         return X[:, self._feat_idx]
 
     def _make_labels(self, X, y_class):
-        """Build regime labels from features heuristically."""
         X2 = self._extract(X)
         ret4   = X2[:, 0]
         ret16  = X2[:, 1]
@@ -1255,7 +1365,6 @@ class MarkovRegimeDiagnostic:
             self._fitted = False
 
     def predict_proba(self, X):
-        """Return P(uptrend) as a scalar in a 2-column array (col 1 = P(uptrend))."""
         if not self._fitted:
             n = len(np.atleast_2d(X))
             return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
@@ -1431,61 +1540,37 @@ class IsoForestRiskDiagnostic:
             return np.column_stack([np.full(n, 0.9), np.full(n, 0.1)])
 
 
-# ── Public API: extend existing shadow list ────────────────────────────────────
-
-def extend_shadow_estimators(existing, max_count=12, logger=None):
-    """Extend an existing shadow estimator list with gbc, ada, and regime diagnostics.
-
-    Parameters
-    ----------
-    existing  : list[(id, estimator, role)]
-    max_count : int — hard cap on total models returned
-    logger    : callable or None
-
-    Returns
-    -------
-    list[(id, estimator, role)] — extended list, capped at max_count
-    """
+def extend_shadow_estimators(existing, max_count=20, logger=None):
+    """Extend shadow list: Tier-1 (gbc/ada/mlp/bal_rf/rusboost/ngboost) +
+    Tier-2 (xgb_dart/flaml) + diagnostics (markov/hmm/kmeans/isoforest/hdbscan)."""
     shadows = list(existing)
 
     def _try_add(model_id, factory_fn, role):
-        if len(shadows) >= max_count:
-            return
+        if len(shadows) >= max_count: return
         est = factory_fn(logger)
         if est is not None:
             shadows.append((model_id, est, role))
 
-    # ── Buy-probability shadow models ─────────────────────────────────────────
-    _try_add("gbc", _make_gbc, ROLE_SHADOW)
-    _try_add("ada", _make_ada, ROLE_SHADOW)
-
-    # ── Regime/risk diagnostic models ─────────────────────────────────────────
-    if len(shadows) < max_count:
-        try:
-            shadows.append(("markov_regime", MarkovRegimeDiagnostic(), ROLE_DIAGNOSTIC))
+    def _try_init(mid, cls, role):
+        if len(shadows) >= max_count: return
+        try: shadows.append((mid, cls(), role))
         except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] markov_regime init failed: {exc}")
+            if logger: logger(f"[shadow_lab] {mid}: {exc}")
 
-    if len(shadows) < max_count:
-        try:
-            shadows.append(("hmm_regime", HMMRegimeDiagnostic(), ROLE_DIAGNOSTIC))
+    _try_add("gbc",      _make_gbc,         ROLE_SHADOW)
+    _try_add("ada",      _make_ada,         ROLE_SHADOW)
+    _try_add("mlp",      _make_mlp,         ROLE_SHADOW)
+    _try_add("bal_rf",   _make_balanced_rf, ROLE_SHADOW)
+    _try_add("rusboost", _make_rusboost,    ROLE_SHADOW)
+    _try_add("ngboost",  _make_ngboost,     ROLE_SHADOW)
+    _try_add("xgb_dart", _make_xgb_dart,   ROLE_SHADOW)
+    if len(shadows) < max_count and HAS_FLAML:
+        try: shadows.append(("flaml", FLAMLShadow(time_budget=20), ROLE_SHADOW))
         except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] hmm_regime init failed: {exc}")
-
-    if len(shadows) < max_count:
-        try:
-            shadows.append(("kmeans_regime", KMeansRegimeDiagnostic(), ROLE_DIAGNOSTIC))
-        except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] kmeans_regime init failed: {exc}")
-
-    if len(shadows) < max_count:
-        try:
-            shadows.append(("isoforest_risk", IsoForestRiskDiagnostic(), ROLE_DIAGNOSTIC))
-        except Exception as exc:
-            if logger:
-                logger(f"[shadow_lab] isoforest_risk init failed: {exc}")
-
+            if logger: logger(f"[shadow_lab] flaml: {exc}")
+    _try_init("markov_regime",  MarkovRegimeDiagnostic,  ROLE_DIAGNOSTIC)
+    _try_init("hmm_regime",     HMMRegimeDiagnostic,     ROLE_DIAGNOSTIC)
+    _try_init("kmeans_regime",  KMeansRegimeDiagnostic,  ROLE_DIAGNOSTIC)
+    _try_init("isoforest_risk", IsoForestRiskDiagnostic, ROLE_DIAGNOSTIC)
+    _try_init("hdbscan_regime", HDBSCANRegimeDiagnostic, ROLE_DIAGNOSTIC)
     return shadows[:max_count]

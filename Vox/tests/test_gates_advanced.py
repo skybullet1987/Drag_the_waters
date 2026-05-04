@@ -62,11 +62,83 @@ class TestRuthlessLabelParameters:
         assert RUTHLESS_LABEL_TP > DEFAULT_LABEL_TP
 
     def test_balanced_mode_label_params_unchanged(self):
-        """Default (balanced) label params must remain at their original values."""
+        """Default (balanced) label params — updated to optimized achievable values."""
         from models import LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS
-        assert LABEL_TP == pytest.approx(0.012)
-        assert LABEL_SL == pytest.approx(0.010)
-        assert LABEL_HORIZON_BARS == 72
+        assert LABEL_TP == pytest.approx(0.030)
+        assert LABEL_SL == pytest.approx(0.015)
+        assert LABEL_HORIZON_BARS == 48
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apex Predator profile constants and lowered RUTHLESS thresholds
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestApexPredatorProfile:
+    """Verify apex_predator profile constants and lowered ruthless thresholds."""
+
+    def test_apex_profile_constants_importable(self):
+        from core import (
+            APEX_PROFILE_SCORE_MIN, APEX_PROFILE_VOTE_THRESHOLD,
+            APEX_PROFILE_VOTE_YES_FRACTION_MIN, APEX_PROFILE_TOP3_MEAN_MIN,
+            APEX_PROFILE_LABEL_TP, APEX_PROFILE_LABEL_SL,
+            APEX_PROFILE_LABEL_HORIZON_BARS,
+        )
+        assert APEX_PROFILE_SCORE_MIN < 0.20
+        assert APEX_PROFILE_VOTE_THRESHOLD < 0.50
+        assert APEX_PROFILE_VOTE_YES_FRACTION_MIN < 0.34
+        assert APEX_PROFILE_TOP3_MEAN_MIN < 0.55
+        assert APEX_PROFILE_LABEL_TP < 0.035
+        assert APEX_PROFILE_LABEL_SL < 0.030
+        assert APEX_PROFILE_LABEL_HORIZON_BARS <= 36
+
+    def test_ruthless_gates_lowered(self):
+        from core import (
+            RUTHLESS_SCORE_MIN, RUTHLESS_VOTE_THRESHOLD,
+            RUTHLESS_VOTE_YES_FRACTION_MIN, RUTHLESS_TOP3_MEAN_MIN,
+            RUTHLESS_CHOP_VOTE_YES_FRAC_MIN, RUTHLESS_CHOP_TOP3_MEAN_MIN,
+            RUTHLESS_CONFIRM_EV_MIN, RUTHLESS_CONFIRM_PROBA_MIN,
+            RUTHLESS_CONFIRM_RET4_MIN,
+        )
+        assert RUTHLESS_SCORE_MIN <= 0.20
+        assert RUTHLESS_VOTE_THRESHOLD <= 0.45
+        assert RUTHLESS_VOTE_YES_FRACTION_MIN <= 0.30
+        assert RUTHLESS_TOP3_MEAN_MIN <= 0.45
+        assert RUTHLESS_CHOP_VOTE_YES_FRAC_MIN <= 0.40
+        assert RUTHLESS_CHOP_TOP3_MEAN_MIN <= 0.50
+        assert RUTHLESS_CONFIRM_EV_MIN <= 0.002
+        assert RUTHLESS_CONFIRM_PROBA_MIN <= 0.52
+        assert RUTHLESS_CONFIRM_RET4_MIN <= 0.004
+
+    def test_ruthless_anti_chop_relaxed(self):
+        from core import (
+            RUTHLESS_SL_COOLDOWN_MINS, RUTHLESS_LOSS_LIMIT,
+            RUTHLESS_LOSS_WINDOW_HOURS, RUTHLESS_LOSS_BLOCK_HOURS,
+            RUTHLESS_PORTFOLIO_LOSS_STREAK, RUTHLESS_PORTFOLIO_PAUSE_HOURS,
+        )
+        assert RUTHLESS_SL_COOLDOWN_MINS <= 30
+        assert RUTHLESS_LOSS_LIMIT >= 4
+        assert RUTHLESS_LOSS_WINDOW_HOURS <= 12
+        assert RUTHLESS_LOSS_BLOCK_HOURS <= 6
+        assert RUTHLESS_PORTFOLIO_LOSS_STREAK >= 6
+        assert RUTHLESS_PORTFOLIO_PAUSE_HOURS <= 2
+
+    def test_ruthless_label_params_achievable(self):
+        from core import (
+            RUTHLESS_LABEL_TP, RUTHLESS_LABEL_SL, RUTHLESS_LABEL_HORIZON_BARS,
+        )
+        assert RUTHLESS_LABEL_TP <= 0.035
+        assert RUTHLESS_LABEL_SL <= 0.015
+        assert RUTHLESS_LABEL_HORIZON_BARS <= 48
+
+    def test_model_weights_lgbm_bal_hgbc_l2_promoted(self):
+        from core import MODEL_WEIGHT_LGBM_BAL, MODEL_WEIGHT_HGBC_L2
+        assert MODEL_WEIGHT_LGBM_BAL >= 2.0
+        assert MODEL_WEIGHT_HGBC_L2 >= 2.0
+
+    def test_catboost_lgbm_dart_in_active_models(self):
+        from core import RUTHLESS_ACTIVE_MODELS
+        assert "catboost_bal" in RUTHLESS_ACTIVE_MODELS
+        assert "lgbm_dart" in RUTHLESS_ACTIVE_MODELS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
