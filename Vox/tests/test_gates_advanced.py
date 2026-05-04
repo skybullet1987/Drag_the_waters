@@ -138,7 +138,7 @@ class TestApexPredatorProfile:
     def test_catboost_lgbm_dart_in_active_models(self):
         from core import RUTHLESS_ACTIVE_MODELS
         assert "catboost_bal" in RUTHLESS_ACTIVE_MODELS
-        assert "lgbm_dart" in RUTHLESS_ACTIVE_MODELS or "lgbm_bal" in RUTHLESS_ACTIVE_MODELS
+        assert "lgbm_dart" in RUTHLESS_ACTIVE_MODELS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
