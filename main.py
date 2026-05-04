@@ -5,6 +5,18 @@ from collections import deque
 # endregion
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROOT main.py — SIMPLE MOMENTUM-RSI-VOLUME BASELINE / BENCHMARK
+#
+# This is a standalone baseline algorithm using a simple composite
+# momentum/RSI/volume score.  It does NOT use ML models, ensemble voting,
+# regime filters, or the Vox feature/label/training pipeline.
+#
+# It serves as a benchmark to compare against the full ML-powered Vox algo.
+#
+# ► The production ML algorithm entry point is at: Vox/main.py
+#   (VoxAlgorithm class with ensemble voting, HGBC/ET/RF, shadow-lab, etc.)
+#
+# ─────────────────────────────────────────────────────────────────────────────
 # Drag the Waters — Execution-First Kraken Top-Coin Rotation
 #
 # This version prioritises correct order handling and fill-driven state

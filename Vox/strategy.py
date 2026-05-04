@@ -359,6 +359,29 @@ def compute_qty(
     return qty, alloc
 
 
+def position_count_size_multiplier(open_positions):
+    """Return a size multiplier that discounts for portfolio concentration.
+
+    Implements the simple formula ``1 / sqrt(open_positions + 1)`` which:
+      - Returns 1.0 when there are 0 open positions (full allocation).
+      - Returns ~0.71 for 1 open position, ~0.58 for 2, ~0.50 for 3, etc.
+
+    This is a lightweight foundation for multi-position readiness.  The current
+    strategy is single-position, so open_positions=0 and the multiplier=1.0 by
+    default (no change to existing behavior).
+
+    Parameters
+    ----------
+    open_positions : int — number of currently open positions (>= 0).
+
+    Returns
+    -------
+    float — multiplier in (0, 1], 1.0 when open_positions==0.
+    """
+    import math
+    return 1.0 / math.sqrt(max(0, open_positions) + 1)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RISK MANAGER
 
@@ -386,6 +409,12 @@ class RiskManager:
         self._sl_exit_times    = {}         # sym -> time of last SL exit
         self._rolling_high     = None       # rolling portfolio high-water mark
 
+        # ── Rolling risk window: recent SL/risk exit timestamps ───────────────
+        # Kept as a deque of datetimes for sliding-window SL count queries.
+        # Defaults to max 100 entries — sufficient for intraday analysis.
+        from collections import deque as _deque
+        self._risk_exit_log    = _deque(maxlen=100)   # timestamps of is_sl exits
+
     # ── State updates ─────────────────────────────────────────────────────────
 
     def record_exit(self, sym, is_sl, exit_time):
@@ -395,13 +424,16 @@ class RiskManager:
         Parameters
         ----------
         sym       : Symbol — the exited symbol.
-        is_sl     : bool   — True if the exit was triggered by stop-loss.
+        is_sl     : bool   — True if the exit was a stop-loss / risk exit.
+                             EXIT_BE (breakeven) should be passed as is_sl=False.
+                             EXIT_MOM_FAIL with negative return should be True.
         exit_time : datetime — the exit timestamp.
         """
         self._last_exit_time = exit_time
         if is_sl:
             self._daily_sl += 1
             self._sl_exit_times[sym] = exit_time
+            self._risk_exit_log.append(exit_time)
 
     def record_sl(self):
         """Increment the daily stop-loss counter (alternative to record_exit)."""
@@ -410,6 +442,21 @@ class RiskManager:
     def reset_daily(self):
         """Reset daily counters.  Call at midnight via scheduled event."""
         self._daily_sl       = 0
+
+    def rolling_sl_count(self, current_time, window_hours):
+        """Return the number of SL/risk exits in the trailing *window_hours*.
+
+        Parameters
+        ----------
+        current_time : datetime — reference time (usually ``algo.time``).
+        window_hours : float    — look-back window in hours.
+
+        Returns
+        -------
+        int — number of risk exits within the window.
+        """
+        cutoff = current_time - timedelta(hours=window_hours)
+        return sum(1 for t in self._risk_exit_log if t >= cutoff)
 
     def update_rolling_high(self, portfolio_value):
         """
@@ -1186,11 +1233,11 @@ try:
 except Exception:
     HAS_NGBOOST = False
 
-try:
-    import hdbscan as _hdbscan_lib
-    HAS_HDBSCAN = True
-except Exception:
-    HAS_HDBSCAN = False
+# HDBSCAN is not available in the QuantConnect runtime (compiled C extension).
+# Keep permanently disabled so the optional diagnostic model does not prevent
+# algorithm import.  HDBSCANRegimeDiagnostic falls back to neutral 0.5 probas.
+_hdbscan_lib = None
+HAS_HDBSCAN = False
 
 try:
     from flaml import AutoML as _FLAMLAutoML

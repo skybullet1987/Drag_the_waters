@@ -66,6 +66,20 @@ CV_SPLITS = 3
 # ensemble unfitted so the next cycle retrains on the new feature set.
 FEATURE_COUNT = 20
 
+# ── Version constants ──────────────────────────────────────────────────────────
+#
+# Bump MODEL_VERSION when the ensemble architecture changes (new estimators,
+# calibration changes, etc.) — persisted pickles with older versions are discarded.
+# Bump FEATURE_VERSION when build_features() output changes (FEATURE_COUNT or
+# feature semantics) — old pickles with a different FEATURE_COUNT are already
+# discarded by load_state(); this version adds an explicit semantic check.
+# Bump LABEL_VERSION when triple_barrier_outcome() semantics change materially.
+# Bump CONFIG_VERSION when risk-profile constants change in a breaking way.
+MODEL_VERSION   = "v4.0"
+FEATURE_VERSION = "v4.0"   # corresponds to FEATURE_COUNT=20 (Vox v4 feature set)
+LABEL_VERSION   = "v2.0"   # triple-barrier with cost_fraction
+CONFIG_VERSION  = "v1.0"
+
 # ── Label-specific triple-barrier parameters ──────────────────────────────────
 #
 # These govern what gets labelled "1" during training and are intentionally
@@ -88,6 +102,36 @@ MIN_REGRESSOR_SAMPLES = 50
 # ═══════════════════════════════════════════════════════════════════════════════
 # FEATURE ENGINEERING
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def derive_training_hour(bar_index, n_bars, decision_interval_min=15):
+    """Approximate UTC hour from a training bar's position in the history deque.
+
+    During training, actual timestamps are unavailable (only close/volume deques
+    are stored).  This helper derives a plausible UTC hour using the assumption
+    that bars are evenly spaced by ``decision_interval_min`` minutes ending at
+    the current training call.  The most-recent bar is assigned hour 0 (UTC
+    midnight proxy), and earlier bars are mapped backwards.
+
+    This is intentionally approximate but produces a non-constant, varied
+    hour distribution across training rows — removing the "all rows have hour=0"
+    bias that degrades the `hour` feature.
+
+    Parameters
+    ----------
+    bar_index           : int — 0-based index of the bar (0 = oldest in window).
+    n_bars              : int — total number of bars in the history window.
+    decision_interval_min : int — bar cadence in minutes (default 15).
+
+    Returns
+    -------
+    int — estimated UTC hour, in range [0, 23].
+    """
+    bars_from_end = (n_bars - 1) - bar_index          # 0 = most-recent bar
+    minutes_back  = bars_from_end * decision_interval_min
+    hours_back    = minutes_back // 60
+    # Wrap cyclically: treat index 0 as UTC hour 0, go backwards modulo 24
+    return int(hours_back % 24)
 
 def compute_atr(highs, lows, closes, period=14):
     """
@@ -399,8 +443,11 @@ def triple_barrier_outcome(prices, tp, sl, timeout_bars, cost_fraction=0.0):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Vox v2 classifier weights (must match estimator order in _make_estimators).
-# HistGradientBoosting is the strongest model; LR is the lightest baseline.
-CLASSIFIER_WEIGHTS = [0.20, 0.35, 0.25, 0.20]  # lr, hgbc, et, rf
+# LR is diagnostic-only (always-bearish bias on crypto; zero active weight).
+# HGBC is the strongest model; ET and RF provide diversity.
+# NOTE: VotingClassifier still trains LR (for diagnostic_votes output), but
+# its zero weight means it does not influence class_proba or active voting.
+CLASSIFIER_WEIGHTS = [0.00, 0.45, 0.30, 0.25]  # lr, hgbc, et, rf
 
 # Vox v2 regressor weights (must match order in _make_regressors).
 REGRESSOR_WEIGHTS = [0.40, 0.35, 0.25]          # hgbr, etr, ridge
@@ -652,7 +699,8 @@ _DEFAULT_CORE_ROLES = {
 class VoxEnsemble:
     """Heterogeneous soft-voting ensemble for the Vox v2 strategy.
 
-    Classifiers (weighted soft voting): LR(0.20), HGBC(0.35), ET(0.25), RF(0.20).
+    Classifiers (weighted soft voting): LR(0.00), HGBC(0.45), ET(0.30), RF(0.25).
+    LR weight is 0.00: it is diagnostic-only (always-bearish bias on crypto data).
     Regressors (weighted avg predicted return): HGBC_R(0.40), ETR(0.35), Ridge(0.25).
     GaussianNB excluded: always-bullish on crypto data; degrades calibration.
     Tree classifiers wrapped in CalibratedClassifierCV(isotonic, cv=2).
@@ -777,8 +825,12 @@ class VoxEnsemble:
 
         self._model.fit(X, y_class)
         self._fitted = True
-        # Store feature count so load_state can detect stale models after FEATURE_COUNT bumps.
-        self._feature_count = X.shape[1] if hasattr(X, "shape") and len(X.shape) > 1 else FEATURE_COUNT
+        # Store feature count and version stamps so load_state can detect stale
+        # models after FEATURE_COUNT bumps or major architecture changes.
+        self._feature_count   = X.shape[1] if hasattr(X, "shape") and len(X.shape) > 1 else FEATURE_COUNT
+        self._model_version   = MODEL_VERSION
+        self._feature_version = FEATURE_VERSION
+        self._label_version   = LABEL_VERSION
 
         # Train regression ensemble when return targets are available.
         if y_return is not None and len(y_return) >= MIN_REGRESSOR_SAMPLES:
@@ -1179,6 +1231,12 @@ class VoxEnsemble:
         If the saved model was trained on a different feature count (i.e., before
         FEATURE_COUNT was bumped from 10 → 20), the fitted state is rejected and
         the caller will trigger a retrain on the next cycle.
+
+        Version checks:
+        - FEATURE_COUNT mismatch → discard (hard incompatibility).
+        - MODEL_VERSION mismatch → warn and discard (architecture changed).
+        - FEATURE_VERSION / LABEL_VERSION mismatch → warn but accept for now
+          (soft incompatibility; retrain recommended).
         """
         saved_fc = getattr(saved, "_feature_count", None)
         if saved_fc is not None and saved_fc != FEATURE_COUNT:
@@ -1188,6 +1246,33 @@ class VoxEnsemble:
                     f"current FEATURE_COUNT={FEATURE_COUNT}). Discarding saved state."
                 )
             return   # leave self._fitted = False so caller retrains
+
+        # Check model architecture version
+        saved_mv = getattr(saved, "_model_version", None)
+        if saved_mv is not None and saved_mv != MODEL_VERSION:
+            if self._logger:
+                self._logger(
+                    f"[VoxEnsemble] MODEL_VERSION mismatch: "
+                    f"saved={saved_mv}, current={MODEL_VERSION}. Discarding saved state."
+                )
+            return   # force retrain on architecture changes
+
+        # Warn on feature/label version mismatches (soft — do not discard)
+        saved_fv = getattr(saved, "_feature_version", None)
+        if saved_fv is not None and saved_fv != FEATURE_VERSION and self._logger:
+            self._logger(
+                f"[VoxEnsemble] FEATURE_VERSION mismatch: "
+                f"saved={saved_fv}, current={FEATURE_VERSION}. "
+                "Retrain recommended."
+            )
+        saved_lv = getattr(saved, "_label_version", None)
+        if saved_lv is not None and saved_lv != LABEL_VERSION and self._logger:
+            self._logger(
+                f"[VoxEnsemble] LABEL_VERSION mismatch: "
+                f"saved={saved_lv}, current={LABEL_VERSION}. "
+                "Retrain recommended."
+            )
+
         self._model         = saved._model
         self._fitted        = saved._fitted
         self._positive_rate = getattr(saved, "_positive_rate", 0.0)
@@ -1328,7 +1413,7 @@ def build_training_data(
                 closes     = closes[i - WINDOW + 1 : i + 1],
                 volumes    = volumes[i - WINDOW + 1 : i + 1],
                 btc_closes = (btc_closes[i - BTC_WINDOW + 1 : i + 1] if btc_closes else []),
-                hour       = 0,   # hour unknown from deque; neutral value
+                hour       = derive_training_hour(i, n, decision_interval_min),
             )
             if feat is None:
                 continue
@@ -1416,3 +1501,61 @@ def walk_forward_train(ensemble, X, y_class, y_return=None):
     if len(np.unique(y_class)) >= 2:
         ensemble.fit(X, y_class, y_return=y_return)
     return ensemble
+
+
+def check_label_execution_alignment(
+    label_tp,
+    label_sl,
+    label_horizon_bars,
+    exec_tp,
+    exec_sl,
+    exec_timeout_hours,
+    decision_interval_min=15,
+    logger=None,
+):
+    """Warn when training label params materially differ from execution params.
+
+    Misalignment causes the classifier to optimise for targets it never sees
+    in live/backtest execution, degrading precision.  Call at setup/retrain time.
+
+    Parameters
+    ----------
+    label_tp / label_sl / label_horizon_bars : training label configuration.
+    exec_tp / exec_sl / exec_timeout_hours   : live execution configuration.
+    decision_interval_min : bar cadence (default 15 min).
+    logger : callable(str) or None — QC algo.log or print.
+    """
+    warnings = []
+
+    label_horizon_hours = (label_horizon_bars * decision_interval_min) / 60.0
+    ratio_tp = label_tp / exec_tp   if exec_tp  > 0 else float("inf")
+    ratio_sl = label_sl / exec_sl   if exec_sl  > 0 else float("inf")
+
+    # TP mismatch: label TP more than 2× or less than 0.5× execution TP
+    if ratio_tp > 2.0 or ratio_tp < 0.5:
+        warnings.append(
+            f"label_tp={label_tp:.3f} vs exec_tp={exec_tp:.3f} "
+            f"(ratio={ratio_tp:.2f}; model optimises for a TP it rarely sees)"
+        )
+
+    # SL mismatch: label SL more than 2× or less than 0.5× execution SL
+    if ratio_sl > 2.0 or ratio_sl < 0.5:
+        warnings.append(
+            f"label_sl={label_sl:.3f} vs exec_sl={exec_sl:.3f} "
+            f"(ratio={ratio_sl:.2f}; model SL tolerance mismatches execution)"
+        )
+
+    # Horizon mismatch: label horizon more than 2× or less than 0.5× execution timeout
+    if exec_timeout_hours > 0 and label_horizon_hours > 0:
+        ratio_h = label_horizon_hours / exec_timeout_hours
+        if ratio_h > 2.0 or ratio_h < 0.5:
+            warnings.append(
+                f"label_horizon={label_horizon_hours:.1f}h vs "
+                f"exec_timeout={exec_timeout_hours:.1f}h "
+                f"(ratio={ratio_h:.2f}; model horizon mismatches execution timeout)"
+            )
+
+    if warnings and logger:
+        for w in warnings:
+            logger(f"[label_align] WARNING: {w}")
+    return warnings

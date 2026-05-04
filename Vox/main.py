@@ -5,10 +5,27 @@ import random
 from collections import deque
 from datetime import timedelta
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Vox/main.py — PRODUCTION ENTRY POINT (Full ML-Powered Vox Algorithm)
+#
+# This is the primary production algorithm for the Vox ML ensemble strategy.
+# It uses:
+#   - VoxEnsemble: heterogeneous soft-voting classifier (HGBC/ET/RF/LR)
+#   - Regime filters, risk manager, and profit-voting gates from strategy.py
+#   - Triple-barrier labeling and walk-forward training from models.py
+#   - Shadow model lab (optional diagnostic models)
+#   - Full position/risk/exit logic with breakeven/trailing stops
+#
+# ► The simple baseline/benchmark algorithm is at: /main.py (root)
+#   (KrakenTopCoinAlgorithm — momentum/RSI/volume only, no ML)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
 from infra   import add_universe, KRAKEN_PAIRS, OrderHelper, PartialFillTracker, PersistenceManager
 from models  import (
     build_features, compute_atr, VoxEnsemble, build_training_data, walk_forward_train,
     LABEL_TP, LABEL_SL, LABEL_HORIZON_BARS, LABEL_COST_BPS,
+    check_label_execution_alignment, derive_training_hour,
 )
 from strategy import RegimeFilter, RiskManager, compute_qty
 # endregion
@@ -280,6 +297,10 @@ class VoxAlgorithm(QCAlgorithm):
             return
         if self._pos_sym is not None or self._pending_sym is not None:
             return
+        # Block new entries while an exit order is still in flight.
+        # This prevents double-entry in the same bar when an exit fills slowly.
+        if self._exiting:
+            return
 
         # Kill switch
         if self._persistence.is_kill_switch_active():
@@ -366,7 +387,12 @@ class VoxAlgorithm(QCAlgorithm):
                     (order_event.fill_price - self._entry_px) / self._entry_px
                     if self._entry_px else 0.0
                 )
-                is_sl = tag == "EXIT_SL"
+                # EXIT_BE (breakeven) is profit-protection — never a stop-loss hit.
+                # EXIT_MOM_FAIL counts as a risk/SL exit when the return is negative.
+                is_sl = (
+                    tag == "EXIT_SL"
+                    or (tag == "EXIT_MOM_FAIL" and ret < 0.0)
+                )
                 is_loss = ret < 0.0
 
                 # ── Ruthless exit diagnostics ──────────────────────────────────
@@ -494,7 +520,7 @@ class VoxAlgorithm(QCAlgorithm):
                         f" retry={self._exit_retry_count}"
                         f" — clearing as dust"
                     )
-                    is_sl = (tag == "EXIT_SL")
+                    is_sl = (tag == "EXIT_SL")  # EXIT_BE and EXIT_MOM_FAIL are not SL here
                     self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
                     self._clear_position_state(include_retry=True)
                 else:
@@ -590,10 +616,12 @@ class VoxAlgorithm(QCAlgorithm):
                 OrderHelper.get_min_order_size(self.securities[sym]),
                 exit_qty_buffer_lots=self._exit_qty_buffer,
             )
-            self._risk.record_exit(sym, is_sl=True, exit_time=self.time)
+            # Breakeven exits are profit-protection, NOT stop-loss hits.
+            # Tag as EXIT_BE so they don't inflate daily SL count or cooldowns.
+            self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
             self._clear_position_state(include_retry=True)
             if _be_qty > 0:
-                self.market_order(sym, -_be_qty, tag="EXIT_SL")
+                self.market_order(sym, -_be_qty, tag="EXIT_BE")
             return
 
         # ── Ruthless v4: momentum-fail early exit ────────────────────────────
@@ -694,7 +722,7 @@ class VoxAlgorithm(QCAlgorithm):
                 f" portfolio_qty={portfolio_qty:.8f}  reason={reason}"
                 f" — clearing state"
             )
-            is_sl = (reason == "EXIT_SL")
+            is_sl = (reason == "EXIT_SL") or (reason == "EXIT_MOM_FAIL" and ret < 0.0)
             self._risk.record_exit(sym, is_sl=is_sl, exit_time=self.time)
             self._clear_position_state(include_retry=True)
 
@@ -1164,6 +1192,18 @@ class VoxAlgorithm(QCAlgorithm):
         if X is None or len(X) < 50:
             self.log("[vox] Retrain skipped: insufficient training data.")
             return
+
+        # ── Label-vs-execution alignment check ────────────────────────────────
+        check_label_execution_alignment(
+            label_tp             = self._label_tp,
+            label_sl             = self._label_sl,
+            label_horizon_bars   = self._label_horizon,
+            exec_tp              = self._tp,
+            exec_sl              = self._sl,
+            exec_timeout_hours   = self._toh,
+            decision_interval_min = DECISION_INTERVAL_MIN,
+            logger               = self.log,
+        )
 
         try:
             self._ensemble = walk_forward_train(self._ensemble, X, y_class, y_return)
