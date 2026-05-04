@@ -130,7 +130,9 @@ def derive_training_hour(bar_index, n_bars, decision_interval_min=15):
     bars_from_end = (n_bars - 1) - bar_index          # 0 = most-recent bar
     minutes_back  = bars_from_end * decision_interval_min
     hours_back    = minutes_back // 60
-    # Wrap cyclically: treat index 0 as UTC hour 0, go backwards modulo 24
+    # The most-recent bar (bars_from_end=0) gets hours_back=0, so hour=0.
+    # Earlier bars accumulate hours_back and wrap modulo 24 to simulate
+    # a cyclic UTC hour distribution across the training window.
     return int(hours_back % 24)
 
 def compute_atr(highs, lows, closes, period=14):
@@ -1528,8 +1530,8 @@ def check_label_execution_alignment(
     warnings = []
 
     label_horizon_hours = (label_horizon_bars * decision_interval_min) / 60.0
-    ratio_tp = label_tp / exec_tp   if exec_tp  > 0 else float("inf")
-    ratio_sl = label_sl / exec_sl   if exec_sl  > 0 else float("inf")
+    ratio_tp = label_tp / exec_tp if exec_tp > 0 else float("inf")
+    ratio_sl = label_sl / exec_sl if exec_sl > 0 else float("inf")
 
     # TP mismatch: label TP more than 2× or less than 0.5× execution TP
     if ratio_tp > 2.0 or ratio_tp < 0.5:

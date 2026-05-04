@@ -28,6 +28,7 @@
 # are tuned based on model_accuracy_summary showing lgbm_bal PF 1.7-3.4,
 # hgbc_l2 PF 3.35, lr_bal PF 7.99 at the 0.50 threshold.
 #
+import math
 import numpy as np
 from collections import deque
 from datetime import timedelta
@@ -378,7 +379,6 @@ def position_count_size_multiplier(open_positions):
     -------
     float — multiplier in (0, 1], 1.0 when open_positions==0.
     """
-    import math
     return 1.0 / math.sqrt(max(0, open_positions) + 1)
 
 
@@ -412,8 +412,7 @@ class RiskManager:
         # ── Rolling risk window: recent SL/risk exit timestamps ───────────────
         # Kept as a deque of datetimes for sliding-window SL count queries.
         # Defaults to max 100 entries — sufficient for intraday analysis.
-        from collections import deque as _deque
-        self._risk_exit_log    = _deque(maxlen=100)   # timestamps of is_sl exits
+        self._risk_exit_log    = deque(maxlen=100)   # timestamps of is_sl exits
 
     # ── State updates ─────────────────────────────────────────────────────────
 
