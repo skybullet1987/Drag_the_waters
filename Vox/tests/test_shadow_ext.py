@@ -107,7 +107,11 @@ class TestMakeNGBoost:
 class TestMakeXGBDart:
     def test_returns_none_or_estimator(self):
         est = _make_xgb_dart()
-        # xgboost is usually installed; just verify no crash
+        # xgboost is usually installed; either None (missing) or a valid estimator
+        if est is not None:
+            assert hasattr(est, "fit")
+            assert hasattr(est, "predict_proba")
+        # no crash is the minimum guarantee
 
     def test_fit_predict_proba_when_available(self):
         est = _make_xgb_dart()

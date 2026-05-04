@@ -1239,21 +1239,25 @@ def _make_mlp(logger=None):
         return MLPClassifier((64, 32), max_iter=300, early_stopping=True, random_state=42)
     except Exception as exc:
         if logger: logger(f"[shadow_lab] mlp: {exc}")
+        return None
 def _make_balanced_rf(logger=None):
-    if not HAS_IMBLEARN: return
+    if not HAS_IMBLEARN: return None
     try: return BalancedRandomForestClassifier(n_estimators=100, max_depth=5, n_jobs=1, random_state=42)
     except Exception as exc:
         if logger: logger(f"[shadow_lab] bal_rf: {exc}")
+        return None
 def _make_rusboost(logger=None):
-    if not HAS_IMBLEARN: return
+    if not HAS_IMBLEARN: return None
     try: return RUSBoostClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
     except Exception as exc:
         if logger: logger(f"[shadow_lab] rusboost: {exc}")
+        return None
 def _make_ngboost(logger=None):
-    if not HAS_NGBOOST: return
+    if not HAS_NGBOOST: return None
     try: return NGBClassifier(n_estimators=100, verbose=False, random_state=42)
     except Exception as exc:
         if logger: logger(f"[shadow_lab] ngboost: {exc}")
+        return None
 def _make_xgb_dart(logger=None):
     try:
         from xgboost import XGBClassifier
@@ -1262,14 +1266,16 @@ def _make_xgb_dart(logger=None):
                              random_state=42, n_jobs=1)
     except Exception as exc:
         if logger: logger(f"[shadow_lab] xgb_dart: {exc}")
+        return None
 
 
 class HDBSCANRegimeDiagnostic:
-    """HDBSCAN density-based regime diagnostic — ROLE_DIAGNOSTIC."""
     _fi = [1, 3, 5, 6, 7]
 
     def __init__(self, min_cluster_size=15):
-        self._mcs = min_cluster_size; self._fitted = False; self._centroid = None
+        self._mcs = min_cluster_size
+        self._fitted = False
+        self._centroid = None
 
     def _x(self, X):
         X = np.atleast_2d(X); return X[:, self._fi] if X.shape[1] > max(self._fi) else X
@@ -1295,9 +1301,10 @@ class HDBSCANRegimeDiagnostic:
 
 
 class FLAMLShadow:
-    """FLAML AutoML time-budgeted shadow wrapper — ROLE_SHADOW."""
     def __init__(self, time_budget=20):
-        self._tb = time_budget; self._m = None; self._fitted = False
+        self._tb = time_budget
+        self._m = None
+        self._fitted = False
 
     def fit(self, X, y):
         if not HAS_FLAML: return
