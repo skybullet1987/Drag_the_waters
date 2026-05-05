@@ -565,9 +565,10 @@ def setup_risk_profile(algo):
         algo._gatling_decision_interval = _g.GATLING_DECISION_INTERVAL_MIN
         algo._gatling_track_model_accuracy = _g.GATLING_TRACK_MODEL_ACCURACY
         algo._ruthless_min_tp = 0.0
+        algo._log_model_votes = True  # force vote logging for model assessment
         algo.log(
             "[gatling] GATLING GUN mode active — 5-min decisions, all gates near-zero."
-            " Use for backtesting + model assessment ONLY."
+            " Vote logging ON for model assessment."
         )
 
     elif algo._risk_profile == "ruthless":

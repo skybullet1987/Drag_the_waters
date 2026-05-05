@@ -130,3 +130,6 @@ GATLING_SKIP_DIAG_INTERVAL_SECS = 1800  # routine skip diags every 30 min
 # ── Model assessment tracking ────────────────────────────────────────────────
 GATLING_TRACK_MODEL_ACCURACY    = True  # enable per-model accuracy tracking
 GATLING_MIN_TRADES_FOR_ASSESS   = 10    # minimum trades before model assessment
+
+# ── Vote logging (MUST be True for model assessment to work) ─────────────────
+GATLING_LOG_MODEL_VOTES         = True  # force per-model vote logging in trade log
