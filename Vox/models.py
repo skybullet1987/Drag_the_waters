@@ -426,26 +426,7 @@ REGRESSOR_WEIGHTS = [0.40, 0.35, 0.25]          # hgbr, etr, ridge
 
 
 def _make_estimators(logger=None, use_calibration=True):
-    """
-    Build the list of (name, estimator) tuples for the VotingClassifier.
-
-    Vox v2 model stack (sklearn-native, no external dependencies):
-      - LogisticRegression (lr)              — linear baseline
-      - HistGradientBoostingClassifier (hgbc)— strong boosted trees, no calibration needed
-      - ExtraTreesClassifier (et)            — randomised trees, adds diversity
-      - RandomForestClassifier (rf)          — bagged trees
-
-    Tree models (ET, RF) are wrapped in CalibratedClassifierCV(isotonic, cv=2)
-    for reliable probability estimates.  HistGradientBoosting has good built-in
-    calibration and is used directly.  GaussianNB is removed (too naive for
-    crypto features and dominates ensembles at low positive rates).
-
-    Parameters
-    ----------
-    logger          : callable or None — for diagnostic warnings.
-    use_calibration : bool — when False, return raw tree estimators without
-                      CalibratedClassifierCV wrapping (halves inference cost).
-    """
+    """Build (name, estimator) tuples for the base VotingClassifier."""
     def _maybe_calibrate(est):
         if use_calibration:
             return CalibratedClassifierCV(est, method="isotonic", cv=2)
@@ -652,13 +633,7 @@ def _make_shadow_estimators(use_calibration=True, max_count=12, logger=None):
     return shadows[:max_count]
 
 
-# ── Default model roles for the core VotingClassifier models ─────────────────
-# Maps estimator names (as used in _make_estimators) to their default role.
-# lr is diagnostic by default: observed vote_lr ≈ 0.006–0.023 on every trade
-# (always bearish), so it should not count in active agreement.
-# gnb is diagnostic by default: vote_gnb = 1.0 on every trade (degenerate
-# always-bullish). GNB is not in the VotingClassifier but its role is tracked
-# here so load_state and set_model_roles work correctly for any saved state.
+# Default roles: lr=diagnostic (always-bearish), gnb=diagnostic (always-bullish)
 _DEFAULT_CORE_ROLES = {
     "lr":   "diagnostic",
     "hgbc": "active",
@@ -719,6 +694,7 @@ class VoxEnsemble:
         self._shadow_max_count    = int(shadow_max_count)
         self._shadow_models       = []   # list of (id, estimator, role)
         self._shadow_fitted       = False
+        self._v2_models           = None  # set by load_v2_ensemble()
         if shadow_lab_enabled:
             try:
                 self._shadow_models = _make_shadow_estimators(
@@ -730,6 +706,32 @@ class VoxEnsemble:
                 if logger:
                     logger(f"[shadow_lab] init failed: {exc}")
                 self._shadow_models = []
+
+    def load_v2_ensemble(self):
+        """Replace shadow models with V2 cutting-edge ensemble.
+
+        Called by VoxAlgorithm when gatling profile sets
+        GATLING_USE_ENSEMBLE_V2=True. V2 models are trained alongside
+        the base VotingClassifier and their predictions appear in
+        shadow_votes / active_votes (after promotion).
+        """
+        try:
+            from ensemble_v2 import make_v2_estimators
+            v2 = make_v2_estimators(logger=self._logger)
+            from infra import ROLE_SHADOW, ROLE_ACTIVE
+            self._shadow_models = []
+            self._v2_models = v2
+            for mid, est, role, weight in v2:
+                r = ROLE_SHADOW if role == "shadow" else (
+                    ROLE_SHADOW if role == "veto" else ROLE_SHADOW)
+                self._shadow_models.append((mid, est, r))
+                self._model_roles[mid] = role if role != "veto" else "diagnostic"
+            if self._logger:
+                ids = [m[0] for m in v2]
+                self._logger(f"[ensemble_v2] loaded {len(v2)} V2 models: {ids}")
+        except Exception as exc:
+            if self._logger:
+                self._logger(f"[ensemble_v2] load failed: {exc}")
 
     def set_model_weights(self, weights_dict):
         """Set optional per-model weights for the weighted mean computation.
@@ -821,15 +823,55 @@ class VoxEnsemble:
             n_ok = 0
             for name, est, _role in self._shadow_models:
                 try:
-                    est.fit(X, y_class)
+                    if name == "iforest_veto":
+                        est.fit(X)
+                    elif name == "tabnet":
+                        import numpy as _np
+                        est.fit(_np.asarray(X, dtype=_np.float32),
+                                _np.asarray(y_class, dtype=_np.int64),
+                                eval_set=[(_np.asarray(X, dtype=_np.float32),
+                                           _np.asarray(y_class, dtype=_np.int64))],
+                                max_epochs=50, patience=10, batch_size=256)
+                    elif name == "stack_meta" and self._v2_models:
+                        pass  # trained separately after other models
+                    else:
+                        est.fit(X, y_class)
                     n_ok += 1
                 except Exception as exc:
                     if self._logger:
                         self._logger(f"[shadow_lab] {name} fit failed: {exc}")
+            # Train stack_meta on base model predictions
+            if self._v2_models:
+                _base_preds = {}
+                for name, est, _role in self._shadow_models:
+                    if name == "stack_meta" or name == "iforest_veto":
+                        continue
+                    try:
+                        if name == "tabnet":
+                            import numpy as _np
+                            _base_preds[name] = est.predict_proba(
+                                _np.asarray(X, dtype=_np.float32))[:, 1]
+                        elif hasattr(est, "predict_proba"):
+                            _base_preds[name] = est.predict_proba(X)[:, 1]
+                    except Exception:
+                        pass
+                if len(_base_preds) >= 3:
+                    _meta_X = np.column_stack(list(_base_preds.values()))
+                    for name, est, _role in self._shadow_models:
+                        if name == "stack_meta":
+                            try:
+                                est.fit(_meta_X, y_class)
+                                n_ok += 1
+                                if self._logger:
+                                    self._logger(f"[ensemble_v2] stack_meta trained on {len(_base_preds)} models")
+                            except Exception as exc:
+                                if self._logger:
+                                    self._logger(f"[ensemble_v2] stack_meta failed: {exc}")
+                            break
             self._shadow_fitted = n_ok > 0
             if self._logger:
                 self._logger(
-                    f"[shadow_lab] trained {n_ok}/{len(self._shadow_models)} shadow models"
+                    f"[shadow_lab] trained {n_ok}/{len(self._shadow_models)} models"
                 )
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -896,10 +938,33 @@ class VoxEnsemble:
         if self._shadow_fitted:
             for name, est, role in self._shadow_models:
                 try:
-                    p = float(est.predict_proba(X_arr)[0, 1])
+                    if name == "iforest_veto":
+                        sc = est.score_samples(X_arr)[0]
+                        p = float(1.0 / (1.0 + np.exp(-sc)))
+                    elif name == "tabnet":
+                        p = float(est.predict_proba(
+                            np.asarray(X_arr, dtype=np.float32))[0, 1])
+                    elif name == "stack_meta" and self._v2_models:
+                        continue  # handled after other predictions
+                    else:
+                        p = float(est.predict_proba(X_arr)[0, 1])
                 except Exception:
                     p = 0.5
                 shadow_probas[name] = (p, role)
+            # stack_meta uses other model predictions as input
+            if self._v2_models:
+                _bp = {k: v for k, (v, r) in shadow_probas.items()
+                       if k not in ("iforest_veto", "stack_meta")}
+                if len(_bp) >= 3:
+                    for name, est, role in self._shadow_models:
+                        if name == "stack_meta":
+                            try:
+                                _mX = np.array(list(_bp.values())).reshape(1, -1)
+                                p = float(est.predict_proba(_mX)[0, 1])
+                                shadow_probas[name] = (p, role)
+                            except Exception:
+                                pass
+                            break
 
         # ── Role-split per-model probas ───────────────────────────────────────
         active_votes     = {}

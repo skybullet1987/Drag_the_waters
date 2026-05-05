@@ -173,6 +173,14 @@ class VoxAlgorithm(QCAlgorithm):
             self.log("[vox] Loaded pre-trained model from ObjectStore.")
         # Apply model roles from config (active/shadow/diagnostic)
         self._ensemble.set_model_roles(build_roles_dict_from_config(_cfg_module))
+        # Load V2 ensemble for gatling profile
+        if getattr(self, "_risk_profile", "") == "gatling":
+            try:
+                from gatling_config import GATLING_USE_ENSEMBLE_V2
+                if GATLING_USE_ENSEMBLE_V2:
+                    self._ensemble.load_v2_ensemble()
+            except Exception as exc:
+                self.log(f"[gatling] V2 ensemble load failed: {exc}")
         self.log(format_model_registry_log(self._ensemble._estimators, roles_dict=self._ensemble._model_roles))
 
         # ── Position state ────────────────────────────────────────────────────
