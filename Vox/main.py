@@ -301,8 +301,9 @@ class VoxAlgorithm(QCAlgorithm):
                     if fallback_px > 0:
                         self._check_exit(fallback_px)
 
-        # ── Entry logic — fire only at DECISION_INTERVAL_MIN boundaries ───────
-        if self.time.minute % DECISION_INTERVAL_MIN != 0:
+        # ── Entry logic — fire only at decision interval boundaries ──────────
+        _decision_interval = getattr(self, "_gatling_decision_interval", DECISION_INTERVAL_MIN)
+        if self.time.minute % _decision_interval != 0:
             return
         if self._pos_sym is not None or self._pending_sym is not None:
             return
@@ -431,8 +432,8 @@ class VoxAlgorithm(QCAlgorithm):
                 )
                 is_loss = ret < 0.0
 
-                # ── Ruthless exit diagnostics ──────────────────────────────────
-                if self._risk_profile == "ruthless":
+                # ── Ruthless/gatling exit diagnostics ─────────────────────────
+                if self._risk_profile in ("ruthless", "gatling"):
                     _ti = (f"  trail_high={self._trail_high_px:.4f}" if self._trail_active else "")
                     self.log(
                         f"[exit_diag] {sym.value}  tag={tag}"
@@ -517,8 +518,8 @@ class VoxAlgorithm(QCAlgorithm):
                 self._sym_outcomes[sym].append(ret)
                 self._update_penalty_cooldown(sym, is_sl)
 
-                # ── Ruthless anti-chop: per-symbol SL timestamp tracking ───────
-                if self._risk_profile == "ruthless" and is_sl:
+                # ── Anti-chop: per-symbol SL timestamp tracking ────────────────
+                if self._risk_profile in ("ruthless", "gatling") and is_sl:
                     if sym not in self._sym_sl_times:
                         self._sym_sl_times[sym] = deque(maxlen=20)
                     self._sym_sl_times[sym].append(self.time)
@@ -537,8 +538,8 @@ class VoxAlgorithm(QCAlgorithm):
                             f" — blocked until {_block_end}"
                         )
 
-                # ── Ruthless portfolio loss-streak brake ───────────────────────
-                if self._risk_profile == "ruthless":
+                # ── Portfolio loss-streak brake ────────────────────────────────
+                if self._risk_profile in ("ruthless", "gatling"):
                     _streak_limit = getattr(self, "_ruthless_portfolio_loss_streak", 4)
                     _pause_h      = getattr(self, "_ruthless_portfolio_pause_hours", 6)
                     if is_loss:
