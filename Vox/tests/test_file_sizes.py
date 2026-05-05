@@ -46,13 +46,9 @@ def test_file_under_soft_limit(name, path):
     This is a warning-level check.  Failures here are non-blocking but should
     be addressed to leave room for future edits.
     """
+    import warnings
     size = path.stat().st_size
     if size >= QC_SOFT_LIMIT_BYTES:
-        pytest.warns(
-            UserWarning,
-            match=".*",
-        )
-        import warnings
         warnings.warn(
             f"{name} is {size:,} bytes — within 3KB of the QuantConnect limit. "
             f"Consider splitting before it grows further.",

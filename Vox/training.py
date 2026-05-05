@@ -33,7 +33,15 @@ def derive_training_hour(bar_index, n_bars, decision_interval_min=15):
     the current training call.  The most-recent bar is assigned hour 0 (UTC
     midnight proxy), and earlier bars are mapped backwards.
 
-    Returns int — estimated UTC hour, in range [0, 23].
+    Parameters
+    ----------
+    bar_index             : int — 0-based index of the bar (0 = oldest in window).
+    n_bars                : int — total number of bars in the history window.
+    decision_interval_min : int — bar cadence in minutes (default 15).
+
+    Returns
+    -------
+    int — estimated UTC hour, in range [0, 23].
     """
     bars_from_end = (n_bars - 1) - bar_index
     minutes_back  = bars_from_end * decision_interval_min

@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import numpy as np
-from infra import ROLE_SHADOW, ROLE_DIAGNOSTIC  # noqa: F401 (re-exported below)
+from infra import ROLE_SHADOW, ROLE_DIAGNOSTIC  # noqa: F401 (re-exported by strategy.py)
 
 
 # ── Optional HMM import ───────────────────────────────────────────────────────

@@ -655,7 +655,6 @@ class VoxAlgorithm(QCAlgorithm):
 
     # ── Exit logic ────────────────────────────────────────────────────────────
 
-    # ── Exit logic ────────────────────────────────────────────────────────────
     def _check_exit(self, price):
         """Evaluate TP / SL / timeout and submit market sell if triggered."""
         _check_exit_fn(self, price)
