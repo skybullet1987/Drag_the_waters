@@ -78,14 +78,13 @@ class TestGatlingConstants:
         assert GATLING_CONFIRM_PROBA_MIN <= 0.0
         assert GATLING_CONFIRM_AGREE_MIN == 0
 
-    def test_active_models_include_v2_models(self):
+    def test_active_models_include_core_models(self):
         from gatling_config import GATLING_ACTIVE_MODELS
-        assert "catboost" in GATLING_ACTIVE_MODELS
-        assert "xgb_hist" in GATLING_ACTIVE_MODELS
-        assert "lgbm_goss" in GATLING_ACTIVE_MODELS
+        assert "rf" in GATLING_ACTIVE_MODELS
+        assert "et" in GATLING_ACTIVE_MODELS
         assert "hgbc" in GATLING_ACTIVE_MODELS
-        assert "tabnet" in GATLING_ACTIVE_MODELS
-        assert "ebm" in GATLING_ACTIVE_MODELS
+        assert "hgbc_l2" in GATLING_ACTIVE_MODELS
+        assert len(GATLING_ACTIVE_MODELS) >= 8
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -187,9 +186,8 @@ class TestGatlingProfile:
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert len(algo._ruthless_active_models) >= 10
-        assert "catboost" in algo._ruthless_active_models
-        assert "xgb_hist" in algo._ruthless_active_models
+        assert len(algo._ruthless_active_models) >= 8
+        assert "rf" in algo._ruthless_active_models
         assert "hgbc" in algo._ruthless_active_models
 
     def test_momentum_override_enabled(self):

@@ -114,17 +114,18 @@ GATLING_TIMEOUT_MIN_PROFIT      = 1.0    # never extends
 GATLING_TIMEOUT_EXTEND_HOURS    = 0
 GATLING_MAX_TIMEOUT_HOURS       = 2.0    # hard cap matches timeout
 
-# ── V2 model pool (15 cutting-edge models, max diversity) ────────────────────
-GATLING_USE_ENSEMBLE_V2 = True   # use ensemble_v2.py models instead of legacy
+# ── V2 model pool (disabled until wiring is validated on QC) ─────────────────
+GATLING_USE_ENSEMBLE_V2 = False  # TODO: enable after V2 models verified on QC
+
+# Active models: promote ALL shadow models to active for maximum vote diversity
 GATLING_ACTIVE_MODELS = [
-    "catboost", "xgb_hist", "lgbm_goss", "hgbc",
-    "tabnet", "ebm", "ngboost", "rf_bal",
-    "et_depth5", "ridge_cal", "svc_rbf", "mlp",
-    "lgbm_dart",
+    "rf", "et", "hgbc",                                        # base VotingClassifier
+    "et_shallow", "rf_shallow", "hgbc_l2", "cal_et", "cal_rf", # shadow lab
+    "lgbm_bal", "xgb_bal", "catboost_bal", "lgbm_dart",        # external boosters
 ]
-GATLING_VETO_MODELS = ["iforest_veto"]  # block trade when anomaly detected
-GATLING_DIAGNOSTIC_MODELS = []
-GATLING_SHADOW_MODELS = ["stack_meta"]  # meta-learner, shadow until validated
+GATLING_VETO_MODELS = []
+GATLING_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal"]  # always-bull/bear quarantined
+GATLING_SHADOW_MODELS = []  # promote everything to active
 
 # ── Diag logging (frequent for analysis) ─────────────────────────────────────
 GATLING_DIAG_INTERVAL_HOURS     = 0.5   # log diagnostics every 30 min

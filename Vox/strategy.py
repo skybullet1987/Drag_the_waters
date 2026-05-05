@@ -1029,7 +1029,7 @@ def evaluate_candidate(
     # Ruthless TP/SL floors
     tp_floor_applied = False
     sl_floor_applied = False
-    if risk_profile in ("ruthless", "gatling"):
+    if risk_profile == "ruthless":
         if tp_use < tp_base:
             tp_use = tp_base
             tp_floor_applied = True
@@ -1065,7 +1065,7 @@ def evaluate_candidate(
     _eff_confirm_volr_min = ruthless_confirm_volr_min
     _good_mode_active     = False
     if (
-        risk_profile in ("ruthless", "gatling")
+        risk_profile == "ruthless"
         and ruthless_good_mode_relaxation
         and market_mode is not None
         and market_mode in (ruthless_allowed_modes or ["risk_on_trend", "pump"])
@@ -1081,7 +1081,9 @@ def evaluate_candidate(
     #   4. market_mode       (BTC regime aligned — lowest priority, fallback only)
     # All four paths are checked; first match wins.  If none match, entry is skipped.
     confirm_reason = None
-    if risk_profile in ("ruthless", "gatling"):
+    if risk_profile == "gatling":
+        confirm_reason = "gatling_bypass"  # gatling skips confirmation gate entirely
+    elif risk_profile == "ruthless":
         if entry_path == "momentum_override":
             confirm_reason = "momentum_override"
         elif (
@@ -1114,7 +1116,12 @@ def evaluate_candidate(
     # First, promote shadow models listed in RUTHLESS_ACTIVE_MODELS into the
     # active voting pool (modifies conf in-place).
     pv_reject_reason = None
-    if risk_profile in ("ruthless", "gatling") and ruthless_profit_voting_mode:
+    if risk_profile == "gatling" and ruthless_profit_voting_mode:
+        # Gatling: promote shadow models but skip the PV gate thresholds
+        if ruthless_active_models:
+            apply_ruthless_active_promotion(conf, ruthless_active_models, ruthless_diagnostic_models)
+        # No PV gate check — let everything through
+    elif risk_profile == "ruthless" and ruthless_profit_voting_mode:
         # Active-model promotion — makes RUTHLESS_ACTIVE_MODELS real, not informational
         if ruthless_active_models:
             apply_ruthless_active_promotion(conf, ruthless_active_models, ruthless_diagnostic_models)
@@ -1167,7 +1174,7 @@ def evaluate_candidate(
     # Weights: 85% base EV/momentum score + 15% vote quality score.
     _PV_BASE_SCORE_WEIGHT = 0.85
     _PV_VOTE_SCORE_WEIGHT = 0.15
-    if risk_profile in ("ruthless", "gatling") and ruthless_profit_voting_mode:
+    if risk_profile in ("ruthless", "gatling") and ruthless_profit_voting_mode and conf.get("vote_score"):
         vote_sc = conf.get("vote_score", 0.0)
         final_score = _PV_BASE_SCORE_WEIGHT * final_score + _PV_VOTE_SCORE_WEIGHT * vote_sc
 
