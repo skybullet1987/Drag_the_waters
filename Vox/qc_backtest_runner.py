@@ -37,9 +37,12 @@ def _auth():
         print("ERROR: Set QC_USER_ID and QC_API_TOKEN environment variables.")
         print("  Get them from: QuantConnect > My Account > Security")
         sys.exit(1)
+    from base64 import b64encode
     timestamp = str(int(time.time()))
-    hash_bytes = hashlib.sha256(f"{token}{timestamp}".encode()).hexdigest()
-    return {"Timestamp": timestamp, "Authorization": f"Basic {uid}:{hash_bytes}"}
+    time_stamped_token = f"{token}:{timestamp}".encode("utf-8")
+    hashed_token = hashlib.sha256(time_stamped_token).hexdigest()
+    authentication = b64encode(f"{uid}:{hashed_token}".encode("utf-8")).decode("ascii")
+    return {"Timestamp": timestamp, "Authorization": f"Basic {authentication}"}
 
 
 def _api(method, endpoint, **kwargs):
