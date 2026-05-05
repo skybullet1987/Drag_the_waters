@@ -116,8 +116,8 @@ n_win    = int(df["winner"].sum()) if "winner" in df.columns else 0
 n_loss   = n_total - n_win
 win_rate = n_win / n_total if n_total else 0.0
 
-avg_win  = df.loc[df["winner"] == True,  "realized_return"].mean()  if "winner" in df.columns else float("nan")
-avg_loss = df.loc[df["winner"] == False, "realized_return"].mean()  if "winner" in df.columns else float("nan")
+avg_win  = df.loc[df["winner"],  "realized_return"].mean()  if "winner" in df.columns else float("nan")
+avg_loss = df.loc[~df["winner"], "realized_return"].mean()  if "winner" in df.columns else float("nan")
 avg_ret  = df["realized_return"].mean() if "realized_return" in df.columns else float("nan")
 
 pl_ratio = abs(avg_win / avg_loss) if avg_loss and avg_loss != 0 else float("nan")
@@ -175,8 +175,8 @@ if all_vote_dfs:
 
     model_summary_rows = []
     for model_id, grp in all_models_df.groupby("model_id"):
-        yes_grp  = grp[grp["voted_yes"] == True]
-        no_grp   = grp[grp["voted_yes"] == False]
+        yes_grp  = grp[grp["voted_yes"]]
+        no_grp   = grp[~grp["voted_yes"]]
         row = {
             "model_id":         model_id,
             "vote_source":      grp["vote_source"].iloc[0],
@@ -242,8 +242,8 @@ if ens_cols:
     # Split by winner
     for col in ["vote_score", "vote_yes_fraction"]:
         if col in df.columns:
-            w_mean = df.loc[df["winner"] == True,  col].mean()
-            l_mean = df.loc[df["winner"] == False, col].mean()
+            w_mean = df.loc[df["winner"],  col].mean()
+            l_mean = df.loc[~df["winner"], col].mean()
             print(f"  {col}: winners={w_mean:.4f}  losers={l_mean:.4f}")
 else:
     ens_df = pd.DataFrame()
@@ -318,11 +318,16 @@ for vcol in ("active_votes", "shadow_votes", "diagnostic_votes"):
     if vdf.empty:
         print(f"  {vcol}: no data")
         continue
-    grp = vdf.groupby("model_id").agg(
-        n=("trade_id", "count"),
-        yes_wr=("winner", lambda x: x[vdf.loc[x.index, "voted_yes"]].mean() if vdf.loc[x.index, "voted_yes"].any() else float("nan")),
-        avg_proba=("proba", "mean"),
-    ).reset_index()
+    grp_rows = []
+    for mid, gdf in vdf.groupby("model_id"):
+        yes_mask = gdf["voted_yes"]
+        grp_rows.append({
+            "model_id":  mid,
+            "n":         len(gdf),
+            "yes_wr":    gdf.loc[yes_mask, "winner"].mean() if yes_mask.any() else float("nan"),
+            "avg_proba": gdf["proba"].mean(),
+        })
+    grp = pd.DataFrame(grp_rows)
     print(f"\n  {vcol}:")
     print(grp.to_string(index=False))
 
