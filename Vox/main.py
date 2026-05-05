@@ -164,13 +164,24 @@ class VoxAlgorithm(QCAlgorithm):
 
         self._audit_clear_model_vote_outcomes_for_backtest()
 
-        saved = self._persistence.load_model()
-        if saved is not None:
-            self._ensemble.load_state(saved)
-            if hasattr(self._ensemble, "set_logger"):
-                self._ensemble.set_logger(self.log)
-            self._model_ready = self._ensemble.is_fitted
-            self.log("[vox] Loaded pre-trained model from ObjectStore.")
+        # Skip loading old model if gatling V2 — force fresh retrain
+        _skip_old_model = False
+        if getattr(self, "_risk_profile", "") == "gatling":
+            try:
+                from gatling_config import GATLING_USE_ENSEMBLE_V2
+                _skip_old_model = GATLING_USE_ENSEMBLE_V2
+            except Exception:
+                pass
+        if _skip_old_model:
+            self.log("[gatling] Skipping old model.pkl load — V2 needs fresh retrain")
+        else:
+            saved = self._persistence.load_model()
+            if saved is not None:
+                self._ensemble.load_state(saved)
+                if hasattr(self._ensemble, "set_logger"):
+                    self._ensemble.set_logger(self.log)
+                self._model_ready = self._ensemble.is_fitted
+                self.log("[vox] Loaded pre-trained model from ObjectStore.")
         # Apply model roles from config (active/shadow/diagnostic)
         self._ensemble.set_model_roles(build_roles_dict_from_config(_cfg_module))
         # Load V2 ensemble for gatling profile
@@ -179,8 +190,14 @@ class VoxAlgorithm(QCAlgorithm):
                 from gatling_config import GATLING_USE_ENSEMBLE_V2
                 if GATLING_USE_ENSEMBLE_V2:
                     self._ensemble.load_v2_ensemble()
+                    n_v2 = len(getattr(self._ensemble, "_shadow_models", []))
+                    self.log(f"[gatling] V2 ensemble loaded: {n_v2} models in shadow list")
+                    if n_v2 == 0:
+                        self.log("[gatling] WARNING: V2 produced 0 models, falling back to legacy")
             except Exception as exc:
-                self.log(f"[gatling] V2 ensemble load failed: {exc}")
+                import traceback
+                self.log(f"[gatling] V2 load failed: {exc}")
+                self.log(f"[gatling] traceback: {traceback.format_exc()[-300:]}")
         self.log(format_model_registry_log(self._ensemble._estimators, roles_dict=self._ensemble._model_roles))
 
         # ── Position state ────────────────────────────────────────────────────

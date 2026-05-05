@@ -708,30 +708,26 @@ class VoxEnsemble:
                 self._shadow_models = []
 
     def load_v2_ensemble(self):
-        """Replace shadow models with V2 cutting-edge ensemble.
-
-        Called by VoxAlgorithm when gatling profile sets
-        GATLING_USE_ENSEMBLE_V2=True. V2 models are trained alongside
-        the base VotingClassifier and their predictions appear in
-        shadow_votes / active_votes (after promotion).
-        """
+        """Replace shadow models with V2 cutting-edge ensemble."""
         try:
             from ensemble_v2 import make_v2_estimators
             v2 = make_v2_estimators(logger=self._logger)
-            from infra import ROLE_SHADOW, ROLE_ACTIVE
+            from infra import ROLE_SHADOW
             self._shadow_models = []
             self._v2_models = v2
             for mid, est, role, weight in v2:
-                r = ROLE_SHADOW if role == "shadow" else (
-                    ROLE_SHADOW if role == "veto" else ROLE_SHADOW)
-                self._shadow_models.append((mid, est, r))
-                self._model_roles[mid] = role if role != "veto" else "diagnostic"
+                self._shadow_models.append((mid, est, ROLE_SHADOW))
+                self._model_roles[mid] = "active" if role == "active" else (
+                    "diagnostic" if role == "veto" else "shadow")
             if self._logger:
                 ids = [m[0] for m in v2]
                 self._logger(f"[ensemble_v2] loaded {len(v2)} V2 models: {ids}")
+                self._logger(f"[ensemble_v2] roles: { {m[0]: self._model_roles.get(m[0],'?') for m in v2} }")
         except Exception as exc:
             if self._logger:
-                self._logger(f"[ensemble_v2] load failed: {exc}")
+                import traceback
+                self._logger(f"[ensemble_v2] load FAILED: {exc}")
+                self._logger(f"[ensemble_v2] traceback: {traceback.format_exc()[-300:]}")
 
     def set_model_weights(self, weights_dict):
         """Set optional per-model weights for the weighted mean computation.
