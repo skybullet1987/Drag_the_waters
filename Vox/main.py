@@ -1,5 +1,6 @@
 # region imports
 from AlgorithmImports import *
+import json
 import numpy as np
 import random
 from collections import deque
@@ -43,6 +44,7 @@ from infra          import hydrate_state_from_history
 from journals    import format_vote_log, _feature_diag_suffix
 from infra import format_model_registry_log, build_roles_dict_from_config
 from journals import CandidateJournal, build_candidate_records, build_rejected_candidate_records
+from journals import audit_safe_float, audit_trim_votes
 import core as _cfg_module
 
 np.random.seed(42)
@@ -54,6 +56,9 @@ class VoxAlgorithm(QCAlgorithm):
 
     See README.md for architecture details and risk-profile documentation.
     """
+
+    _MODEL_VOTE_OUTCOME_KEY       = "vox/model_vote_outcomes.jsonl"
+    _MODEL_VOTE_OUTCOME_MAX_BYTES = 90_000
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
@@ -155,6 +160,8 @@ class VoxAlgorithm(QCAlgorithm):
         self._persistence = PersistenceManager(self)
         self._fill_tracker= PartialFillTracker()
         self._model_ready = False
+
+        self._audit_clear_model_vote_outcomes_for_backtest()
 
         saved = self._persistence.load_model()
         if saved is not None:
@@ -357,6 +364,33 @@ class VoxAlgorithm(QCAlgorithm):
         if include_retry:
             self._exit_retry_count = 0
 
+    # ── Audit helpers ─────────────────────────────────────────────────────────
+
+    def _audit_clear_model_vote_outcomes_for_backtest(self):
+        """Clear the model vote outcome log at backtest start (not in live)."""
+        if not self.live_mode:
+            try:
+                self.object_store.save(self._MODEL_VOTE_OUTCOME_KEY, "")
+            except Exception as exc:
+                self.debug(f"[audit] clear_model_vote_outcomes failed: {exc}")
+
+    def _audit_append_model_vote_outcome(self, record):
+        """Append one JSON record to vox/model_vote_outcomes.jsonl, capping to max bytes."""
+        try:
+            line = json.dumps(record, default=str) + "\n"
+            existing = ""
+            if self.object_store.contains_key(self._MODEL_VOTE_OUTCOME_KEY):
+                existing = self.object_store.read(self._MODEL_VOTE_OUTCOME_KEY)
+            combined = existing + line
+            if len(combined.encode()) > self._MODEL_VOTE_OUTCOME_MAX_BYTES:
+                lines = [l for l in combined.splitlines() if l.strip()]
+                while lines and len("\n".join(lines).encode()) > self._MODEL_VOTE_OUTCOME_MAX_BYTES:
+                    lines.pop(0)
+                combined = "\n".join(lines) + "\n"
+            self.object_store.save(self._MODEL_VOTE_OUTCOME_KEY, combined)
+        except Exception as exc:
+            self.debug(f"[audit] append_model_vote_outcome failed: {exc}")
+
     # ── Order-event state machine ──────────────────────────────────────────────
 
     def on_order_event(self, order_event):
@@ -432,6 +466,48 @@ class VoxAlgorithm(QCAlgorithm):
                     "entry_path":         entry_pred.get("entry_path", "ml")     if entry_pred else None,
                     "model_votes":        entry_pred.get("model_votes", {})      if entry_pred else {},
                 })
+
+                # ── Compact closed-trade audit (model vote outcomes) ───────────
+                if entry_pred:
+                    _hold_min = None
+                    _et = entry_pred.get("time")
+                    if _et is not None:
+                        try:
+                            _hold_min = round((self.time - _et).total_seconds() / 60.0, 1)
+                        except Exception:
+                            pass
+                    self._audit_append_model_vote_outcome({
+                        "trade_id":          entry_pred.get("trade_id", ""),
+                        "symbol":            sym.value,
+                        "risk_profile":      entry_pred.get("risk_profile", ""),
+                        "market_mode":       entry_pred.get("market_mode"),
+                        "entry_path":        entry_pred.get("entry_path", "ml"),
+                        "confirm":           entry_pred.get("confirm", ""),
+                        "entry_time":        str(_et or ""),
+                        "exit_time":         str(self.time),
+                        "entry_price":       audit_safe_float(self._entry_px, 6),
+                        "exit_price":        audit_safe_float(order_event.fill_price, 6),
+                        "exit_reason":       tag,
+                        "realized_return":   audit_safe_float(ret, 6),
+                        "winner":            ret > 0,
+                        "hold_minutes":      _hold_min,
+                        "max_return_seen":   audit_safe_float(self._max_return_seen, 6),
+                        "class_proba":       audit_safe_float(entry_pred.get("class_proba"), 4),
+                        "pred_return":       audit_safe_float(entry_pred.get("pred_return"), 6),
+                        "ev":                audit_safe_float(entry_pred.get("ev"), 6),
+                        "final_score":       audit_safe_float(entry_pred.get("final_score"), 6),
+                        "tp":                audit_safe_float(entry_pred.get("tp"), 4),
+                        "sl":                audit_safe_float(entry_pred.get("sl"), 4),
+                        "vote_score":        audit_safe_float(entry_pred.get("vote_score"), 4),
+                        "vote_yes_fraction": audit_safe_float(entry_pred.get("vote_yes_fraction"), 4),
+                        "top3_mean":         audit_safe_float(entry_pred.get("top3_mean"), 4),
+                        "n_agree":           entry_pred.get("n_agree"),
+                        "std_proba":         audit_safe_float(entry_pred.get("std_proba"), 4),
+                        "model_votes":       audit_trim_votes(entry_pred.get("model_votes", {})),
+                        "active_votes":      audit_trim_votes(entry_pred.get("active_votes", {})),
+                        "shadow_votes":      audit_trim_votes(entry_pred.get("shadow_votes", {})),
+                        "diagnostic_votes":  audit_trim_votes(entry_pred.get("diagnostic_votes", {})),
+                    })
 
                 # ── Per-symbol outcome tracking (penalty cooldown) ─────────────
                 if sym not in self._sym_outcomes:
@@ -618,10 +694,16 @@ class VoxAlgorithm(QCAlgorithm):
             )
             # Breakeven exits are profit-protection, NOT stop-loss hits.
             # Tag as EXIT_BE so they don't inflate daily SL count or cooldowns.
-            self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
-            self._clear_position_state(include_retry=True)
+            # Submit order first — let on_order_event handle fill, risk recording,
+            # state clearing, and audit logging (avoids clearing _pos_sym before fill).
             if _be_qty > 0:
+                self._exiting = True
+                self._exit_retry_count = 0
                 self.market_order(sym, -_be_qty, tag="EXIT_BE")
+            else:
+                # Dust position — can't submit order; clear state now.
+                self._risk.record_exit(sym, is_sl=False, exit_time=self.time)
+                self._clear_position_state(include_retry=True)
             return
 
         # ── Ruthless v4: momentum-fail early exit ────────────────────────────
@@ -1073,16 +1155,31 @@ class VoxAlgorithm(QCAlgorithm):
         self._fill_tracker.start_order(order.order_id, qty)
 
         # Store entry predictions for realized-EV logging at exit.
+        _cd_entry = conf_data[top_sym]
+        _ep_str   = str(self.time).replace("-","").replace(" ","").replace(":","")[:12]
         self._entry_predictions[top_sym] = {
-            "class_proba": class_proba_top,
-            "pred_return": pred_return_top,
-            "ev":          ev_top,
-            "final_score": top_sc,
-            "tp":          tp_use,
-            "sl":          sl_use,
-            "time":        self.time,
-            "entry_path":  entry_path_data.get(top_sym, "ml"),
-            "model_votes": conf_data[top_sym].get("per_model", {}),
+            "trade_id":          f"{top_sym.value[:6]}_{_ep_str}",
+            "symbol":            top_sym.value,
+            "risk_profile":      self._risk_profile,
+            "market_mode":       _market_mode,
+            "confirm":           _top_confirm,
+            "entry_path":        entry_path_data.get(top_sym, "ml"),
+            "class_proba":       class_proba_top,
+            "pred_return":       pred_return_top,
+            "ev":                ev_top,
+            "final_score":       top_sc,
+            "tp":                tp_use,
+            "sl":                sl_use,
+            "vote_score":        _cd_entry.get("vote_score", 0.0),
+            "vote_yes_fraction": _cd_entry.get("vote_yes_fraction", 0.0),
+            "top3_mean":         _cd_entry.get("top3_mean", 0.0),
+            "n_agree":           _cd_entry.get("n_agree", 0),
+            "std_proba":         _cd_entry.get("std_proba", 0.0),
+            "time":              self.time,
+            "model_votes":       _cd_entry.get("per_model", {}),
+            "active_votes":      _cd_entry.get("active_votes", {}),
+            "shadow_votes":      _cd_entry.get("shadow_votes", {}),
+            "diagnostic_votes":  _cd_entry.get("diagnostic_votes", {}),
         }
 
         _top_entry_path = entry_path_data.get(top_sym, "ml")
