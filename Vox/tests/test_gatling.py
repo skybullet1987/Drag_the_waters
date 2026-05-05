@@ -78,14 +78,14 @@ class TestGatlingConstants:
         assert GATLING_CONFIRM_PROBA_MIN <= 0.0
         assert GATLING_CONFIRM_AGREE_MIN == 0
 
-    def test_active_models_include_all_main_models(self):
+    def test_active_models_include_v2_models(self):
         from gatling_config import GATLING_ACTIVE_MODELS
-        assert "rf" in GATLING_ACTIVE_MODELS
-        assert "et" in GATLING_ACTIVE_MODELS
+        assert "catboost" in GATLING_ACTIVE_MODELS
+        assert "xgb_hist" in GATLING_ACTIVE_MODELS
+        assert "lgbm_goss" in GATLING_ACTIVE_MODELS
         assert "hgbc" in GATLING_ACTIVE_MODELS
-        assert "lr" in GATLING_ACTIVE_MODELS
-        assert "gbc" in GATLING_ACTIVE_MODELS
-        assert "ada" in GATLING_ACTIVE_MODELS
+        assert "tabnet" in GATLING_ACTIVE_MODELS
+        assert "ebm" in GATLING_ACTIVE_MODELS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -188,9 +188,9 @@ class TestGatlingProfile:
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
         assert len(algo._ruthless_active_models) >= 10
-        assert "rf" in algo._ruthless_active_models
-        assert "lr" in algo._ruthless_active_models
-        assert "gbc" in algo._ruthless_active_models
+        assert "catboost" in algo._ruthless_active_models
+        assert "xgb_hist" in algo._ruthless_active_models
+        assert "hgbc" in algo._ruthless_active_models
 
     def test_momentum_override_enabled(self):
         from core import setup_risk_profile
@@ -372,6 +372,45 @@ class TestModelAssessment:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. End-to-end: VoxEnsemble train → predict under gatling config
 # ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEnsembleV2:
+    def test_make_v2_estimators(self):
+        from ensemble_v2 import make_v2_estimators, V2_MODEL_IDS, V2_ACTIVE_IDS
+        models = make_v2_estimators()
+        ids = [m[0] for m in models]
+        assert len(models) >= 8
+        for mid in ["hgbc", "et_depth5", "ridge_cal", "mlp", "iforest_veto"]:
+            assert mid in ids, f"{mid} missing"
+        assert len(V2_ACTIVE_IDS) >= 10
+        assert "iforest_veto" not in V2_ACTIVE_IDS
+
+    def test_fit_and_predict_v2(self):
+        from ensemble_v2 import make_v2_estimators, fit_v2_models, predict_v2_models
+        import numpy as np
+        np.random.seed(42)
+        X = np.random.randn(200, 20)
+        y = (np.random.rand(200) > 0.6).astype(int)
+        models = make_v2_estimators()
+        fitted, n_ok = fit_v2_models(models, X, y)
+        assert n_ok >= 4
+        preds = predict_v2_models(fitted, X[0])
+        assert len(preds) >= 4
+        for mid, prob in preds.items():
+            assert 0.0 <= prob <= 1.0, f"{mid} prob={prob}"
+
+    def test_v2_weights_dict(self):
+        from ensemble_v2 import V2_WEIGHTS
+        assert V2_WEIGHTS["catboost"] == 1.5
+        assert V2_WEIGHTS["mlp"] == 0.75
+        assert V2_WEIGHTS["stack_meta"] == 0.0
+
+    def test_iforest_is_veto(self):
+        from ensemble_v2 import make_v2_estimators
+        models = make_v2_estimators()
+        for mid, est, role, w in models:
+            if mid == "iforest_veto":
+                assert role == "veto"
+
 
 class TestGatlingEnsembleEndToEnd:
     def test_ensemble_trains_with_fast_labels(self):

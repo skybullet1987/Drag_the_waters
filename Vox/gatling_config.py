@@ -114,14 +114,17 @@ GATLING_TIMEOUT_MIN_PROFIT      = 1.0    # never extends
 GATLING_TIMEOUT_EXTEND_HOURS    = 0
 GATLING_MAX_TIMEOUT_HOURS       = 2.0    # hard cap matches timeout
 
-# ── Active model pool (use ALL available models for maximum diversity) ───────
+# ── V2 model pool (15 cutting-edge models, max diversity) ────────────────────
+GATLING_USE_ENSEMBLE_V2 = True   # use ensemble_v2.py models instead of legacy
 GATLING_ACTIVE_MODELS = [
-    "rf", "et", "hgbc", "lr", "hgbc_l2", "lgbm_bal", "lgbm_dart",
-    "gbc", "ada", "catboost_bal", "xgb_bal", "mlp", "bal_rf", "rusboost",
-    "xgb_dart",
+    "catboost", "xgb_hist", "lgbm_goss", "hgbc",
+    "tabnet", "ebm", "ngboost", "rf_bal",
+    "et_depth5", "ridge_cal", "svc_rbf", "mlp",
+    "lgbm_dart",
 ]
-GATLING_DIAGNOSTIC_MODELS = ["gnb"]  # only GNB excluded (always 1.0)
-GATLING_SHADOW_MODELS = []  # everything promoted to active
+GATLING_VETO_MODELS = ["iforest_veto"]  # block trade when anomaly detected
+GATLING_DIAGNOSTIC_MODELS = []
+GATLING_SHADOW_MODELS = ["stack_meta"]  # meta-learner, shadow until validated
 
 # ── Diag logging (frequent for analysis) ─────────────────────────────────────
 GATLING_DIAG_INTERVAL_HOURS     = 0.5   # log diagnostics every 30 min

@@ -77,11 +77,7 @@ AGGRESSIVE_PENALTY_COOLDOWN_LOSSES = 3
 AGGRESSIVE_PENALTY_COOLDOWN_HOURS  = 24
 AGGRESSIVE_MAX_DD_PCT              = 0.20
 
-# ── Ruthless V2 aggressive opportunity engine ─────────────────────────────────
-# Separate from the existing "ruthless" (now V1) profile.
-# Activate via:  risk_profile=ruthless_v2
-#            OR  risk_profile=ruthless  +  ruthless_v2_mode=true
-# V1 ruthless behavior is preserved when V2 is not explicitly enabled.
+# ── Ruthless V2 (activate via risk_profile=ruthless_v2) ───────────────────────
 RUTHLESS_V2_MODE                 = False  # default off; activated by profile/param
 
 # ── APEX PREDATOR constants (see README for formula and trigger paths) ────────
