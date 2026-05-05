@@ -1486,26 +1486,9 @@ def resolve_good_mode_params(algo, config_module):
         "relaxed_meta_min_proba":  relaxed_meta,
     }
 
-
 # ===============================================================================
 # model_vote_outcome audit helpers
 # ===============================================================================
-
-def audit_safe_float(v, digits=6):
-    """Return round(float(v), digits) or None on failure."""
-    try:
-        return round(float(v), digits)
-    except (TypeError, ValueError):
-        return None
-
-
-def audit_trim_votes(votes):
-    """Convert vote dict values to compact floats; skip non-numeric entries."""
-    if not isinstance(votes, dict):
-        return {}
-    out = {}
-    for k, v in votes.items():
-        f = audit_safe_float(v, 4)
-        if f is not None:
-            out[str(k)] = f
-    return out
+# Imported from audit_utils.py (tiny stable module) to avoid QuantConnect
+# import errors caused by file-size or stale-cache issues with journals.py.
+from audit_utils import audit_safe_float, audit_trim_votes  # noqa: F401

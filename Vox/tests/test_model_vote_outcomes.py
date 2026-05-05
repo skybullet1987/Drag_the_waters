@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from journals import audit_safe_float, audit_trim_votes  # noqa: E402
+from audit_utils import audit_safe_float, audit_trim_votes  # noqa: E402
 
 
 # ── 1. audit_safe_float ───────────────────────────────────────────────────────

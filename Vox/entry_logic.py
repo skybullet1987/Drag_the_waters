@@ -20,9 +20,8 @@ from journals import (
     _feature_diag_suffix,
     build_candidate_records,
     build_rejected_candidate_records,
-    audit_safe_float,
-    audit_trim_votes,
 )
+from audit_utils import audit_safe_float, audit_trim_votes
 from core import compute_momentum_score
 
 
@@ -380,10 +379,15 @@ def try_enter(algo):
             + (f" mo_overrides={n_momentum_override}" if n_momentum_override else "")
         )
     else:
+        _is_active_research = getattr(algo, "_risk_profile", "") == "active_research"
+        _diag_interval_h = (
+            getattr(_cfg_module, "ACTIVE_RESEARCH_DIAG_INTERVAL_HOURS", 1)
+            if _is_active_research else DIAG_INTERVAL_HOURS
+        )
         _emit_diag = (
             algo._last_nocandidate_diag_time is None
             or (algo.time - algo._last_nocandidate_diag_time).total_seconds()
-               >= DIAG_INTERVAL_HOURS * 3600
+               >= _diag_interval_h * 3600
         )
         if _emit_diag:
             algo._last_nocandidate_diag_time = algo.time
@@ -392,6 +396,7 @@ def try_enter(algo):
             best_std    = min(c["std_proba"]   for c in confs)
             best_pred   = max(c["pred_return"] for c in confs)
             best_ev_str = f"{_best_ev_diag:.5f}" if _best_ev_diag > float("-inf") else "n/a"
+            _last_rej   = getattr(algo, "_last_gate_rejection", None)
             algo.log(
                 f"[diag] eval={len(candidates)} "
                 f"pass_disp={n_pass_disp} pass_agree={n_pass_agree} "
@@ -404,6 +409,7 @@ def try_enter(algo):
                 f"agree>={algo._min_agr} disp<={algo._max_disp} "
                 f"ev>{algo._min_ev:.5f} pred_ret>={algo._pred_return_min:.5f} "
                 f"cost={cost_fraction:.4f})"
+                + (f" last_top_rejection={_last_rej}" if _last_rej else "")
             )
 
     if not scores:
@@ -422,6 +428,9 @@ def try_enter(algo):
     top_sym, top_sc = ranked[0]
     second_sc       = ranked[1][1] if len(ranked) > 1 else 0.0
 
+    # Track final rejection reason for diagnostics
+    _final_rejection = None
+
     # ── Meta-filter check ─────────────────────────────────────────────────
     _top_cd  = conf_data.get(top_sym, {})
     _top_feat = next((f for s, f in candidates if s == top_sym), None)
@@ -436,26 +445,41 @@ def try_enter(algo):
         ruthless_allowed_modes=getattr(algo, "_ruthless_allowed_modes", []),
     )
     if not _mf_approved:
+        _final_rejection = f"meta_filter:score={_mf_score:.3f}"
         algo._throttled_skip_debug(
             f"[vox] Meta-filter rejected {top_sym.value} score={_mf_score:.3f}"
         )
+        algo._last_gate_rejection = _final_rejection
         return
 
     # Gap check on final score
     ev_gap_actual = top_sc - second_sc
     if len(ranked) > 1 and ev_gap_actual < algo._ev_gap:
+        _final_rejection = f"score_gap:actual={ev_gap_actual:.5f}<required={algo._ev_gap:.5f}"
         algo._throttled_skip_debug(
             f"[vox] Score gap too small: top={top_sc:.5f}"
             f"  second={second_sc:.5f}"
             f"  gap={ev_gap_actual:.5f}"
             f"  required={algo._ev_gap:.5f}"
         )
+        algo._last_gate_rejection = _final_rejection
         return
 
     # ── Regime gate ───────────────────────────────────────────────────────
-    if not algo._regime.is_risk_on(algo._btc_sym, sym=top_sym):
-        algo._throttled_skip_debug(f"[vox] Regime block for {top_sym.value}")
-        return
+    _regime_risk_on = algo._regime.is_risk_on(algo._btc_sym, sym=top_sym)
+    _active_research = getattr(algo, "_risk_profile", "") == "active_research"
+    if not _regime_risk_on:
+        if _active_research:
+            # Soft pass: allow entry but apply a size multiplier to keep risk small.
+            algo.debug(
+                f"[active_research] soft regime pass for {top_sym.value}"
+                f" (non-risk-on regime; size will be reduced)"
+            )
+        else:
+            _final_rejection = f"regime:non_risk_on"
+            algo._throttled_skip_debug(f"[vox] Regime block for {top_sym.value}")
+            algo._last_gate_rejection = _final_rejection
+            return
 
     # ── Risk manager gate ──────────────────────────────────────────────────
     pv = algo.portfolio.total_portfolio_value
@@ -463,7 +487,9 @@ def try_enter(algo):
         sym=top_sym, current_time=algo.time, portfolio_value=pv
     )
     if not can:
+        _final_rejection = f"risk_mgr:{reason}"
         algo._throttled_skip_debug(f"[vox] Risk block for {top_sym.value}: {reason}")
+        algo._last_gate_rejection = _final_rejection
         return
 
     # ── Pre-trade validation ───────────────────────────────────────────────
@@ -488,6 +514,14 @@ def try_enter(algo):
         min_alloc       = algo._min_alloc,
     )
 
+    # ── Active-research regime size reduction ──────────────────────────────
+    # When regime is not risk-on and we are in active_research (soft pass),
+    # halve the position size to limit downside while still collecting data.
+    if _active_research and not _regime_risk_on:
+        from core import ACTIVE_RESEARCH_REGIME_SIZE_MULT
+        qty   = qty   * ACTIVE_RESEARCH_REGIME_SIZE_MULT
+        alloc = alloc * ACTIVE_RESEARCH_REGIME_SIZE_MULT
+
     # Cash check
     cash = algo.portfolio.cash
     if qty * price > cash * algo._cb:
@@ -495,6 +529,7 @@ def try_enter(algo):
             f"[vox] ENTRY skip {top_sym.value}: insufficient cash"
             f" (need {qty*price:.2f}, have {cash:.2f})"
         )
+        algo._last_gate_rejection = f"cash:need={qty*price:.2f}>have={cash:.2f}"
         return
 
     # Lot-size rounding and minimum order validation
@@ -508,11 +543,13 @@ def try_enter(algo):
             f"[vox] ENTRY skip {top_sym.value}: qty={qty:.8f}"
             f" < min_order={min_ord}"
         )
+        algo._last_gate_rejection = f"min_order:qty={qty:.8f}<min={min_ord}"
         return
     if qty <= 0:
         algo.debug(
             f"[vox] ENTRY skip {top_sym.value}: computed qty={qty:.8f}"
         )
+        algo._last_gate_rejection = f"qty_zero:qty={qty:.8f}"
         return
 
     # Place entry order — set _pending_sym BEFORE market_order() (fills synchronously).
@@ -525,6 +562,7 @@ def try_enter(algo):
     algo._breakeven_active   = False
     algo._timeout_ext_hours  = 0.0
     algo._timeout_ext_logged = False
+    algo._last_gate_rejection = None   # entry succeeded; clear last rejection
     algo._last_feat[top_sym] = next((f for s, f in candidates if s == top_sym), None)
     order = algo.market_order(top_sym, qty, tag="ENTRY")
     algo._pending_oid = order.order_id
