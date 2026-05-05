@@ -249,6 +249,9 @@ def try_enter(algo):
     ))
     agree_thr     = algo._ensemble._agree_threshold()
 
+    # Determine active_research mode once — used in regime gate and diagnostics
+    _is_active_research = getattr(algo, "_risk_profile", "") == "active_research"
+
     # Per-gate pass counters and best-candidate values for diagnostics
     n_pass_disp     = 0
     n_pass_agree    = 0
@@ -379,7 +382,6 @@ def try_enter(algo):
             + (f" mo_overrides={n_momentum_override}" if n_momentum_override else "")
         )
     else:
-        _is_active_research = getattr(algo, "_risk_profile", "") == "active_research"
         _diag_interval_h = (
             getattr(_cfg_module, "ACTIVE_RESEARCH_DIAG_INTERVAL_HOURS", 1)
             if _is_active_research else DIAG_INTERVAL_HOURS
@@ -467,9 +469,8 @@ def try_enter(algo):
 
     # ── Regime gate ───────────────────────────────────────────────────────
     _regime_risk_on = algo._regime.is_risk_on(algo._btc_sym, sym=top_sym)
-    _active_research = getattr(algo, "_risk_profile", "") == "active_research"
     if not _regime_risk_on:
-        if _active_research:
+        if _is_active_research:
             # Soft pass: allow entry but apply a size multiplier to keep risk small.
             algo.debug(
                 f"[active_research] soft regime pass for {top_sym.value}"
@@ -517,7 +518,7 @@ def try_enter(algo):
     # ── Active-research regime size reduction ──────────────────────────────
     # When regime is not risk-on and we are in active_research (soft pass),
     # halve the position size to limit downside while still collecting data.
-    if _active_research and not _regime_risk_on:
+    if _is_active_research and not _regime_risk_on:
         from core import ACTIVE_RESEARCH_REGIME_SIZE_MULT
         qty   = qty   * ACTIVE_RESEARCH_REGIME_SIZE_MULT
         alloc = alloc * ACTIVE_RESEARCH_REGIME_SIZE_MULT
