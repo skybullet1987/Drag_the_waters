@@ -598,7 +598,7 @@ def try_enter(algo):
     }
 
     _top_entry_path = entry_path_data.get(top_sym, "ml")
-    if algo._risk_profile == "ruthless":
+    if algo._risk_profile in ("ruthless", "gatling"):
         _ft = next((f for s, f in candidates if s == top_sym), None)
         _cd = conf_data[top_sym]
         algo.log(

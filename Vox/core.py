@@ -84,28 +84,7 @@ AGGRESSIVE_MAX_DD_PCT              = 0.20
 # V1 ruthless behavior is preserved when V2 is not explicitly enabled.
 RUTHLESS_V2_MODE                 = False  # default off; activated by profile/param
 
-# ── APEX PREDATOR constants ───────────────────────────────────────────────────
-# Tunable parameters for the Apex Predator ensemble-vote regime.
-# Source diagnostics (backtest Jan 2025 – May 2026):
-#   vote_lr_bal  >= 0.50 → win_rate 57.1%, avg_return +4.65%, PF 7.997
-#   vote_hgbc_l2 >= 0.55 → yes_frac 0.81, win_rate 46%,      PF 3.35
-#   active_lgbm_bal >= 0.55 → yes_frac 1.0,                  PF 1.70 (confirmer)
-#   active_rf    >= 0.60 → win_rate 62.5%,                    PF 2.76
-#   active_hgbc_l2 >= 0.50 → win_rate 44%,                   PF 3.38
-#
-# apex_score = 0.35*vote_lr_bal + 0.25*vote_hgbc_l2 + 0.15*active_rf
-#            + 0.10*active_hgbc_l2 + 0.10*active_lgbm_bal + 0.05*vote_et
-#
-# Entry fires when ANY of the following trigger paths is true:
-#   1. apex_score >= APEX_SCORE_ENTRY
-#   2. vote_lr_bal >= 0.50  (PF ~8 proven edge)
-#   3. vote_hgbc_l2 >= 0.55 AND active_lgbm_bal >= 0.55
-#   4. mean_proba >= APEX_ENTRY_PATH4_PROBA_MIN AND n_agree >= APEX_ENTRY_PATH4_N_AGREE_MIN
-#   5. active_lgbm_bal >= APEX_ENTRY_LGBM_BAL_MIN  (always-on confirmer direct gate)
-# Technical overlay triggers (evaluated in caller, not apex_entry_decision):
-#   6. price crosses APEX_BREAKOUT_NBARS-bar rolling high + volume spike
-#   7. RSI <= APEX_PULLBACK_RSI_MAX in confirmed uptrend
-#   8. APEX_MOMENTUM_CONT_BARS consecutive higher closes + volume spike
+# ── APEX PREDATOR constants (see README for formula and trigger paths) ────────
 APEX_SCORE_ENTRY        = 0.50   # minimum apex_score to trigger entry (was 0.55)
 APEX_SCORE_PYRAMID      = 0.55   # minimum apex_score to add a pyramid tranche
 APEX_BASE_ALLOC         = 0.20   # baseline allocation (20% of equity)
@@ -120,27 +99,16 @@ APEX_TRAIL_ARM_PCT      = 0.010  # trailing stop arms once unrealised PnL >= 1.0
 APEX_TRAIL_ATR_MULT     = 0.8    # trail distance = max(APEX_TRAIL_ATR_MULT × ATR, 0.6%)
 APEX_BREAKEVEN_MFE      = 0.02   # move stop to breakeven once MFE >= 2%
 
-# ── Apex Predator: relaxed path-4 thresholds (v2 aggressive) ─────────────────
-APEX_ENTRY_PATH4_PROBA_MIN   = 0.50   # mean_proba floor for path-4 (was 0.60)
-APEX_ENTRY_PATH4_N_AGREE_MIN = 1      # min agreeing models for path-4 (was 3)
-
-# ── Apex Predator: path-5 direct lgbm_bal gate ────────────────────────────────
-APEX_ENTRY_LGBM_BAL_MIN      = 0.50   # active_lgbm_bal threshold for path-5
-
-# ── Apex Predator: technical overlay trigger constants ────────────────────────
-# Breakout: price crosses the rolling N-bar high with volume confirmation.
-APEX_BREAKOUT_NBARS          = 20     # look-back window for rolling high
-APEX_BREAKOUT_VOL_MULT       = 1.5    # current volume must exceed N-bar avg by this multiple
-# Pullback: low RSI inside a confirmed uptrend (mean-reversion long entry).
-APEX_PULLBACK_RSI_MAX        = 35     # RSI must be at or below this value
-APEX_PULLBACK_TREND_BARS     = 10     # bars to confirm prior uptrend (close > close[-n])
-# Momentum continuation: consecutive higher closes + volume expansion.
-APEX_MOMENTUM_CONT_BARS      = 3      # number of consecutive higher closes required
-APEX_MOMENTUM_CONT_VOL_MULT  = 1.5    # current volume must exceed N-bar avg by this multiple
-
-# ── Apex Predator profile defaults (activate via risk_profile=apex_predator) ──
-# Inherits ruthless V1 execution; ultra-loose entry gates so models that learned
-# weak signals can fire.  Breaks the "predict NO → gate fails" equilibrium.
+APEX_ENTRY_PATH4_PROBA_MIN   = 0.50
+APEX_ENTRY_PATH4_N_AGREE_MIN = 1
+APEX_ENTRY_LGBM_BAL_MIN      = 0.50
+APEX_BREAKOUT_NBARS          = 20
+APEX_BREAKOUT_VOL_MULT       = 1.5
+APEX_PULLBACK_RSI_MAX        = 35
+APEX_PULLBACK_TREND_BARS     = 10
+APEX_MOMENTUM_CONT_BARS      = 3
+APEX_MOMENTUM_CONT_VOL_MULT  = 1.5
+# ── Apex Predator profile defaults ───────────────────────────────────────────
 APEX_PROFILE_SCORE_MIN               = 0.15
 APEX_PROFILE_PRED_RETURN_MIN         = -0.015
 APEX_PROFILE_VOTE_THRESHOLD          = 0.40
@@ -399,23 +367,13 @@ MOMENTUM_VOLUME_MIN        = 2.0     # minimum volume ratio (current / 15-bar av
 MOMENTUM_BTC_REL_MIN       = 0.005   # minimum BTC-relative 4-bar outperformance
 MOMENTUM_OVERRIDE_MIN_EV   = -0.002  # momentum override blocked if EV < this threshold
 
-# ── Active Research profile constants (imported from active_research_config.py) ──
-# DATA-COLLECTION profile — intentionally loose gates for model-vote diagnostics.
-# Activate via: risk_profile=active_research
-from active_research_config import (  # noqa: E402,F401
-    ACTIVE_RESEARCH_SCORE_MIN, ACTIVE_RESEARCH_SCORE_GAP,
-    ACTIVE_RESEARCH_MIN_AGREE, ACTIVE_RESEARCH_MAX_DISPERSION,
-    ACTIVE_RESEARCH_MIN_EV, ACTIVE_RESEARCH_PRED_RETURN_MIN,
-    ACTIVE_RESEARCH_COOLDOWN_MINS, ACTIVE_RESEARCH_SL_COOLDOWN_MINS,
-    ACTIVE_RESEARCH_MAX_DAILY_SL, ACTIVE_RESEARCH_ALLOCATION,
-    ACTIVE_RESEARCH_MAX_ALLOC, ACTIVE_RESEARCH_MIN_ALLOC,
-    ACTIVE_RESEARCH_USE_KELLY, ACTIVE_RESEARCH_TAKE_PROFIT,
-    ACTIVE_RESEARCH_STOP_LOSS, ACTIVE_RESEARCH_TIMEOUT_HOURS,
-    ACTIVE_RESEARCH_MIN_HOLD_MINUTES, ACTIVE_RESEARCH_EMERGENCY_SL,
-    ACTIVE_RESEARCH_PENALTY_LOSSES, ACTIVE_RESEARCH_PENALTY_HOURS,
-    ACTIVE_RESEARCH_MAX_DD_PCT, ACTIVE_RESEARCH_REGIME_SIZE_MULT,
-    ACTIVE_RESEARCH_DIAG_INTERVAL_HOURS,
-)
+# ── External profile modules (applied in setup_risk_profile) ─────────────────
+import active_research_config as _ar  # noqa: E402
+import gatling_config as _gatling  # noqa: E402
+# Re-export all active_research constants (used by entry_logic, tests)
+for _k, _v in vars(_ar).items():
+    if _k.startswith("ACTIVE_RESEARCH_"):
+        globals()[_k] = _v
 
 
 def setup_risk_profile(algo):
@@ -451,7 +409,8 @@ def setup_risk_profile(algo):
     elif _rp_raw:
         _rp_val = _rp_raw.lower().strip()
         if _rp_val in ("conservative", "balanced", "aggressive", "ruthless",
-                       "ruthless_v2", "apex_predator", "active_research"):
+                       "ruthless_v2", "apex_predator", "active_research",
+                       "gatling"):
             algo._risk_profile = _rp_val
             if _rp_val == "conservative":
                 algo._conservative_mode = True
@@ -518,35 +477,97 @@ def setup_risk_profile(algo):
         algo.log("[vox] Aggressive mode enabled: high-risk/high-upside settings active.")
 
     elif algo._risk_profile == "active_research":
-        # ── Active Research: intentionally loose gates for data collection ───
-        # WARNING: This is NOT a production profile.  Allocation is small and
-        # gates are relaxed so the ensemble fires many trades that can later be
-        # analysed with vox/model_vote_outcomes.jsonl + research diagnostics.
-        algo._s_min            = ACTIVE_RESEARCH_SCORE_MIN
-        algo._ev_gap           = ACTIVE_RESEARCH_SCORE_GAP
-        algo._min_agr          = ACTIVE_RESEARCH_MIN_AGREE
-        algo._max_disp         = ACTIVE_RESEARCH_MAX_DISPERSION
-        algo._min_ev           = ACTIVE_RESEARCH_MIN_EV
-        algo._pred_return_min  = ACTIVE_RESEARCH_PRED_RETURN_MIN
-        algo._cd_mins          = ACTIVE_RESEARCH_COOLDOWN_MINS
-        algo._sl_cd            = ACTIVE_RESEARCH_SL_COOLDOWN_MINS
-        algo._max_sl           = ACTIVE_RESEARCH_MAX_DAILY_SL
-        algo._alloc            = ACTIVE_RESEARCH_ALLOCATION
-        algo._max_alloc        = ACTIVE_RESEARCH_MAX_ALLOC
-        algo._min_alloc        = ACTIVE_RESEARCH_MIN_ALLOC
-        algo._use_kelly        = ACTIVE_RESEARCH_USE_KELLY
-        algo._tp               = ACTIVE_RESEARCH_TAKE_PROFIT
-        algo._sl               = ACTIVE_RESEARCH_STOP_LOSS
-        algo._toh              = ACTIVE_RESEARCH_TIMEOUT_HOURS
-        algo._min_hold_minutes = ACTIVE_RESEARCH_MIN_HOLD_MINUTES
-        algo._emergency_sl     = ACTIVE_RESEARCH_EMERGENCY_SL
-        algo._penalty_losses   = ACTIVE_RESEARCH_PENALTY_LOSSES
-        algo._penalty_hours    = ACTIVE_RESEARCH_PENALTY_HOURS
-        algo._max_dd           = ACTIVE_RESEARCH_MAX_DD_PCT
+        _a = _ar  # shorthand
+        algo._s_min = _a.ACTIVE_RESEARCH_SCORE_MIN
+        algo._ev_gap = _a.ACTIVE_RESEARCH_SCORE_GAP
+        algo._min_agr = _a.ACTIVE_RESEARCH_MIN_AGREE
+        algo._max_disp = _a.ACTIVE_RESEARCH_MAX_DISPERSION
+        algo._min_ev = _a.ACTIVE_RESEARCH_MIN_EV
+        algo._pred_return_min = _a.ACTIVE_RESEARCH_PRED_RETURN_MIN
+        algo._cd_mins = _a.ACTIVE_RESEARCH_COOLDOWN_MINS
+        algo._sl_cd = _a.ACTIVE_RESEARCH_SL_COOLDOWN_MINS
+        algo._max_sl = _a.ACTIVE_RESEARCH_MAX_DAILY_SL
+        algo._alloc = _a.ACTIVE_RESEARCH_ALLOCATION
+        algo._max_alloc = _a.ACTIVE_RESEARCH_MAX_ALLOC
+        algo._min_alloc = _a.ACTIVE_RESEARCH_MIN_ALLOC
+        algo._use_kelly = _a.ACTIVE_RESEARCH_USE_KELLY
+        algo._tp = _a.ACTIVE_RESEARCH_TAKE_PROFIT
+        algo._sl = _a.ACTIVE_RESEARCH_STOP_LOSS
+        algo._toh = _a.ACTIVE_RESEARCH_TIMEOUT_HOURS
+        algo._min_hold_minutes = _a.ACTIVE_RESEARCH_MIN_HOLD_MINUTES
+        algo._emergency_sl = _a.ACTIVE_RESEARCH_EMERGENCY_SL
+        algo._penalty_losses = _a.ACTIVE_RESEARCH_PENALTY_LOSSES
+        algo._penalty_hours = _a.ACTIVE_RESEARCH_PENALTY_HOURS
+        algo._max_dd = _a.ACTIVE_RESEARCH_MAX_DD_PCT
+        algo.log("[active_research] DATA-COLLECTION mode — loose gates.")
+
+    elif algo._risk_profile == "gatling":
+        # ── GATLING: extremely active gatling-gun for max trade frequency ──
+        _g = _gatling
+        algo._s_min = _g.GATLING_SCORE_MIN; algo._min_ev = _g.GATLING_MIN_EV
+        algo._pred_return_min = _g.GATLING_PRED_RETURN_MIN
+        algo._max_disp = _g.GATLING_MAX_DISPERSION; algo._min_agr = _g.GATLING_MIN_AGREE
+        algo._ev_gap = _g.GATLING_EV_GAP; algo._cost_bps = _g.GATLING_COST_BPS
+        algo._alloc = _g.GATLING_ALLOCATION; algo._max_alloc = _g.GATLING_MAX_ALLOC
+        algo._min_alloc = _g.GATLING_MIN_ALLOC; algo._use_kelly = _g.GATLING_USE_KELLY
+        algo._kf = _g.GATLING_KELLY_FRAC
+        algo._tp = _g.GATLING_TAKE_PROFIT; algo._sl = _g.GATLING_STOP_LOSS
+        algo._toh = _g.GATLING_TIMEOUT_HOURS
+        algo._min_hold_minutes = _g.GATLING_MIN_HOLD_MINUTES
+        algo._emergency_sl = _g.GATLING_EMERGENCY_SL
+        algo._cd_mins = _g.GATLING_COOLDOWN_MINS; algo._sl_cd = _g.GATLING_SL_COOLDOWN_MINS
+        algo._penalty_losses = _g.GATLING_PENALTY_COOLDOWN_LOSSES
+        algo._penalty_hours = _g.GATLING_PENALTY_COOLDOWN_HOURS
+        algo._max_sl = _g.GATLING_MAX_DAILY_SL; algo._max_dd = _g.GATLING_MAX_DD_PCT
+        algo._runner_mode = _g.GATLING_RUNNER_MODE
+        algo._trail_after_tp = _g.GATLING_TRAIL_AFTER_TP
+        algo._trail_pct = _g.GATLING_TRAIL_PCT
+        algo._ruthless_loss_window_hours = _g.GATLING_LOSS_WINDOW_HOURS
+        algo._ruthless_loss_limit = _g.GATLING_LOSS_LIMIT
+        algo._ruthless_loss_block_hours = _g.GATLING_LOSS_BLOCK_HOURS
+        algo._ruthless_portfolio_loss_streak = _g.GATLING_PORTFOLIO_LOSS_STREAK
+        algo._ruthless_portfolio_pause_hours = _g.GATLING_PORTFOLIO_PAUSE_HOURS
+        algo._ruthless_confirm_ev_min = _g.GATLING_CONFIRM_EV_MIN
+        algo._ruthless_confirm_proba_min = _g.GATLING_CONFIRM_PROBA_MIN
+        algo._ruthless_confirm_agree_min = _g.GATLING_CONFIRM_AGREE_MIN
+        algo._ruthless_confirm_ret4_min = _g.GATLING_CONFIRM_RET4_MIN
+        algo._ruthless_confirm_ret16_min = _g.GATLING_CONFIRM_RET16_MIN
+        algo._ruthless_confirm_volr_min = _g.GATLING_CONFIRM_VOLR_MIN
+        algo._label_tp = _g.GATLING_LABEL_TP; algo._label_sl = _g.GATLING_LABEL_SL
+        algo._label_horizon = _g.GATLING_LABEL_HORIZON_BARS
+        algo._ruthless_profit_voting_mode = _g.GATLING_PROFIT_VOTING_MODE
+        algo._ruthless_active_models = list(_g.GATLING_ACTIVE_MODELS)
+        algo._ruthless_diagnostic_models = list(_g.GATLING_DIAGNOSTIC_MODELS)
+        algo._ruthless_shadow_models = list(_g.GATLING_SHADOW_MODELS)
+        algo._pv_vote_threshold = _g.GATLING_VOTE_THRESHOLD
+        algo._pv_vote_yes_frac_min = _g.GATLING_VOTE_YES_FRACTION_MIN
+        algo._pv_top3_mean_min = _g.GATLING_TOP3_MEAN_MIN
+        algo._pv_vote_ev_floor = _g.GATLING_VOTE_EV_FLOOR
+        algo._pv_chop_yes_frac_min = _g.GATLING_CHOP_VOTE_YES_FRAC_MIN
+        algo._pv_chop_top3_mean_min = _g.GATLING_CHOP_TOP3_MEAN_MIN
+        algo._pv_chop_pred_return_min = _g.GATLING_CHOP_PRED_RETURN_MIN
+        algo._pv_chop_ev_min = _g.GATLING_CHOP_EV_MIN
+        algo._meta_filter_enabled = _g.GATLING_META_FILTER_ENABLED
+        algo._meta_min_proba = _g.GATLING_META_MIN_PROBA
+        algo._market_mode_enabled = _g.GATLING_MARKET_MODE_ENABLED
+        algo._ruthless_allowed_modes = list(_g.GATLING_ALLOWED_MODES)
+        algo._breakeven_after = _g.GATLING_BREAKEVEN_AFTER
+        algo._breakeven_buffer = _g.GATLING_BREAKEVEN_BUFFER
+        algo._mom_fail_enabled = _g.GATLING_MOM_FAIL_ENABLED
+        algo._mom_fail_min_hold = _g.GATLING_MOM_FAIL_MIN_HOLD
+        algo._mom_fail_loss = _g.GATLING_MOM_FAIL_LOSS
+        algo._timeout_min_profit = _g.GATLING_TIMEOUT_MIN_PROFIT
+        algo._timeout_extend_hours = _g.GATLING_TIMEOUT_EXTEND_HOURS
+        algo._max_timeout_hours = _g.GATLING_MAX_TIMEOUT_HOURS
+        algo._good_mode_relaxation = True
+        algo._good_mode_meta_min_proba = 0.0
+        algo._good_mode_min_ev = -1.0; algo._good_mode_volume_min = 0.0
+        algo._gatling_decision_interval = _g.GATLING_DECISION_INTERVAL_MIN
+        algo._gatling_track_model_accuracy = _g.GATLING_TRACK_MODEL_ACCURACY
+        algo._ruthless_min_tp = 0.0
         algo.log(
-            "[active_research] DATA-COLLECTION mode active — gates are intentionally"
-            " relaxed to generate many trades for model-vote diagnostics."
-            " Do NOT use for production trading."
+            "[gatling] GATLING GUN mode active — 5-min decisions, all gates near-zero."
+            " Use for backtesting + model assessment ONLY."
         )
 
     elif algo._risk_profile == "ruthless":
@@ -789,7 +810,7 @@ def setup_risk_profile(algo):
     if _mo_raw:
         algo._momentum_override = str(_mo_raw).lower() in ("true", "1", "yes")
     else:
-        algo._momentum_override = algo._risk_profile in ("aggressive", "ruthless", "apex_predator")
+        algo._momentum_override = algo._risk_profile in ("aggressive", "ruthless", "apex_predator", "gatling")
 
     algo._momentum_ret4_min = float(
         algo.get_parameter("momentum_ret4_min") or MOMENTUM_RET4_MIN
@@ -806,7 +827,7 @@ def setup_risk_profile(algo):
     algo._momentum_override_min_ev = float(
         algo.get_parameter("momentum_override_min_ev") or MOMENTUM_OVERRIDE_MIN_EV
     )
-    algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless", "apex_predator")
+    algo._use_momentum_score = algo._risk_profile in ("aggressive", "ruthless", "apex_predator", "gatling")
 
     # ── Startup profile audit log (unthrottled — important config visibility) ───
     _runner_mode_val   = getattr(algo, "_runner_mode",   False)
