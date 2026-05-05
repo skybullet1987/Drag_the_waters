@@ -399,6 +399,24 @@ MOMENTUM_VOLUME_MIN        = 2.0     # minimum volume ratio (current / 15-bar av
 MOMENTUM_BTC_REL_MIN       = 0.005   # minimum BTC-relative 4-bar outperformance
 MOMENTUM_OVERRIDE_MIN_EV   = -0.002  # momentum override blocked if EV < this threshold
 
+# ── Active Research profile constants (imported from active_research_config.py) ──
+# DATA-COLLECTION profile — intentionally loose gates for model-vote diagnostics.
+# Activate via: risk_profile=active_research
+from active_research_config import (  # noqa: E402,F401
+    ACTIVE_RESEARCH_SCORE_MIN, ACTIVE_RESEARCH_SCORE_GAP,
+    ACTIVE_RESEARCH_MIN_AGREE, ACTIVE_RESEARCH_MAX_DISPERSION,
+    ACTIVE_RESEARCH_MIN_EV, ACTIVE_RESEARCH_PRED_RETURN_MIN,
+    ACTIVE_RESEARCH_COOLDOWN_MINS, ACTIVE_RESEARCH_SL_COOLDOWN_MINS,
+    ACTIVE_RESEARCH_MAX_DAILY_SL, ACTIVE_RESEARCH_ALLOCATION,
+    ACTIVE_RESEARCH_MAX_ALLOC, ACTIVE_RESEARCH_MIN_ALLOC,
+    ACTIVE_RESEARCH_USE_KELLY, ACTIVE_RESEARCH_TAKE_PROFIT,
+    ACTIVE_RESEARCH_STOP_LOSS, ACTIVE_RESEARCH_TIMEOUT_HOURS,
+    ACTIVE_RESEARCH_MIN_HOLD_MINUTES, ACTIVE_RESEARCH_EMERGENCY_SL,
+    ACTIVE_RESEARCH_PENALTY_LOSSES, ACTIVE_RESEARCH_PENALTY_HOURS,
+    ACTIVE_RESEARCH_MAX_DD_PCT, ACTIVE_RESEARCH_REGIME_SIZE_MULT,
+    ACTIVE_RESEARCH_DIAG_INTERVAL_HOURS,
+)
+
 
 def setup_risk_profile(algo):
     """Resolve risk profile from QC parameters and apply gate/sizing overrides.
@@ -433,7 +451,7 @@ def setup_risk_profile(algo):
     elif _rp_raw:
         _rp_val = _rp_raw.lower().strip()
         if _rp_val in ("conservative", "balanced", "aggressive", "ruthless",
-                       "ruthless_v2", "apex_predator"):
+                       "ruthless_v2", "apex_predator", "active_research"):
             algo._risk_profile = _rp_val
             if _rp_val == "conservative":
                 algo._conservative_mode = True
@@ -498,6 +516,38 @@ def setup_risk_profile(algo):
         algo._penalty_hours    = AGGRESSIVE_PENALTY_COOLDOWN_HOURS
         algo._max_dd           = AGGRESSIVE_MAX_DD_PCT
         algo.log("[vox] Aggressive mode enabled: high-risk/high-upside settings active.")
+
+    elif algo._risk_profile == "active_research":
+        # ── Active Research: intentionally loose gates for data collection ───
+        # WARNING: This is NOT a production profile.  Allocation is small and
+        # gates are relaxed so the ensemble fires many trades that can later be
+        # analysed with vox/model_vote_outcomes.jsonl + research diagnostics.
+        algo._s_min            = ACTIVE_RESEARCH_SCORE_MIN
+        algo._ev_gap           = ACTIVE_RESEARCH_SCORE_GAP
+        algo._min_agr          = ACTIVE_RESEARCH_MIN_AGREE
+        algo._max_disp         = ACTIVE_RESEARCH_MAX_DISPERSION
+        algo._min_ev           = ACTIVE_RESEARCH_MIN_EV
+        algo._pred_return_min  = ACTIVE_RESEARCH_PRED_RETURN_MIN
+        algo._cd_mins          = ACTIVE_RESEARCH_COOLDOWN_MINS
+        algo._sl_cd            = ACTIVE_RESEARCH_SL_COOLDOWN_MINS
+        algo._max_sl           = ACTIVE_RESEARCH_MAX_DAILY_SL
+        algo._alloc            = ACTIVE_RESEARCH_ALLOCATION
+        algo._max_alloc        = ACTIVE_RESEARCH_MAX_ALLOC
+        algo._min_alloc        = ACTIVE_RESEARCH_MIN_ALLOC
+        algo._use_kelly        = ACTIVE_RESEARCH_USE_KELLY
+        algo._tp               = ACTIVE_RESEARCH_TAKE_PROFIT
+        algo._sl               = ACTIVE_RESEARCH_STOP_LOSS
+        algo._toh              = ACTIVE_RESEARCH_TIMEOUT_HOURS
+        algo._min_hold_minutes = ACTIVE_RESEARCH_MIN_HOLD_MINUTES
+        algo._emergency_sl     = ACTIVE_RESEARCH_EMERGENCY_SL
+        algo._penalty_losses   = ACTIVE_RESEARCH_PENALTY_LOSSES
+        algo._penalty_hours    = ACTIVE_RESEARCH_PENALTY_HOURS
+        algo._max_dd           = ACTIVE_RESEARCH_MAX_DD_PCT
+        algo.log(
+            "[active_research] DATA-COLLECTION mode active — gates are intentionally"
+            " relaxed to generate many trades for model-vote diagnostics."
+            " Do NOT use for production trading."
+        )
 
     elif algo._risk_profile == "ruthless":
         algo._s_min            = RUTHLESS_SCORE_MIN
@@ -879,6 +929,21 @@ def setup_risk_profile(algo):
             f"  trail_after_tp={_trail_after_tp}"
             f"  trail_pct={_trail_pct}"
         )
+        if algo._risk_profile == "active_research":
+            algo.log(
+                f"[active_research] relaxed thresholds:"
+                f"  score_min={algo._s_min}"
+                f"  score_gap={algo._ev_gap}"
+                f"  min_agree={algo._min_agr}"
+                f"  max_disp={algo._max_disp}"
+                f"  min_ev={algo._min_ev:.5f}"
+                f"  pred_return_min={algo._pred_return_min:.5f}"
+                f"  cooldown={algo._cd_mins}min"
+                f"  sl_cooldown={algo._sl_cd}min"
+                f"  max_daily_sl={algo._max_sl}"
+                f"  alloc={algo._alloc:.3f}"
+                f"  regime=soft_pass"
+            )
 
 
 # ===============================================================================

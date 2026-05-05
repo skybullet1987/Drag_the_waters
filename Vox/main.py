@@ -44,7 +44,7 @@ from infra          import hydrate_state_from_history
 from journals    import format_vote_log, _feature_diag_suffix
 from infra import format_model_registry_log, build_roles_dict_from_config
 from journals import CandidateJournal, build_candidate_records, build_rejected_candidate_records
-from journals import audit_safe_float, audit_trim_votes
+from audit_utils import audit_safe_float, audit_trim_votes
 import core as _cfg_module
 from entry_logic import check_exit as _check_exit_fn, try_enter as _try_enter_fn
 
@@ -216,6 +216,7 @@ class VoxAlgorithm(QCAlgorithm):
         self._last_skip_diag_time = None
         self._last_nocandidate_diag_time = None
         self._last_retrain_time = None
+        self._last_gate_rejection = None  # last post-ranking gate rejection reason
 
         # ── Warm-up ───────────────────────────────────────────────────────────
         self.set_warm_up(timedelta(days=WARMUP_DAYS))
