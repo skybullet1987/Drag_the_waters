@@ -65,6 +65,9 @@ def fetch_kraken_top20_usd(algorithm):
         look-ahead bias because the live Kraken snapshot reflects the current
         universe composition, not the composition at the backtest date.
 
+        This function automatically returns the static KRAKEN_PAIRS list when
+        ``algorithm.live_mode`` is False (i.e., during backtests).
+
     Parameters
     ----------
     algorithm : QCAlgorithm
@@ -73,8 +76,20 @@ def fetch_kraken_top20_usd(algorithm):
     -------
     list[str]
         Up to 20 ticker strings.  Falls back to the static KRAKEN_PAIRS list
-        on any error.
+        on any error or during backtests.
     """
+    # ── Backtest guard: never call the live API in a backtest ─────────────────
+    # algorithm.live_mode is False in backtests and paper-trading; True only
+    # when running against a live brokerage.  Fetching the current Kraken
+    # universe during a historical backtest would introduce look-ahead bias
+    # (2025 knowledge used when replaying 2024 data).
+    if not getattr(algorithm, "live_mode", False):
+        algorithm.log(
+            "[universe] fetch_kraken_top20_usd: not live_mode — "
+            "returning static KRAKEN_PAIRS to avoid look-ahead bias"
+        )
+        return list(KRAKEN_PAIRS)
+
     url = "https://api.kraken.com/0/public/Ticker"
     try:
         raw = algorithm.download(url)
