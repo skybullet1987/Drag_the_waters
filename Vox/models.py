@@ -804,9 +804,10 @@ class VoxEnsemble:
 
         # ── Shadow model lab training ─────────────────────────────────────────
         if self._shadow_models:
+          try:
             self._shadow_fitted = False
             n_ok = 0
-            for name, est, _role in self._shadow_models:
+            for name, est, _role in list(self._shadow_models):
                 try:
                     if name == "iforest_veto":
                         est.fit(X)
@@ -818,11 +819,11 @@ class VoxEnsemble:
                                            _np.asarray(y_class, dtype=_np.int64))],
                                 max_epochs=50, patience=10, batch_size=256)
                     elif name == "stack_meta" and self._v2_models:
-                        pass  # trained separately after other models
+                        pass
                     else:
                         est.fit(X, y_class)
                     n_ok += 1
-                except Exception as exc:
+                except BaseException as exc:
                     if self._logger:
                         self._logger(f"[shadow_lab] {name} fit failed: {exc}")
             # Train stack_meta on base model predictions
@@ -858,6 +859,10 @@ class VoxEnsemble:
                 self._logger(
                     f"[shadow_lab] trained {n_ok}/{len(self._shadow_models)} models"
                 )
+          except BaseException as exc:
+            if self._logger:
+                self._logger(f"[shadow_lab] ENTIRE shadow training failed: {exc}")
+            self._shadow_fitted = False
 
     # ── Inference ─────────────────────────────────────────────────────────────
 

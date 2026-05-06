@@ -97,11 +97,9 @@ def _make_balanced_rf(logger=None):
         return None
 
 def _make_rusboost(logger=None):
-    if not HAS_IMBLEARN: return None
-    try: return RUSBoostClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
-    except Exception as exc:
-        if logger: logger(f"[shadow_lab] rusboost: {exc}")
-        return None
+    # Disabled: RUSBoost throws RuntimeError("ensemble worse than random")
+    # on imbalanced crypto data, crashing the entire training pipeline.
+    return None
 
 def _make_ngboost(logger=None):
     if not HAS_NGBOOST: return None
