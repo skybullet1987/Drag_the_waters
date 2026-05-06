@@ -111,50 +111,54 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active models: winning trees + 6 NEW non-tree diversity models
+# Active: ONLY selective models (never-degenerate, <50% YES rate)
+# ALL gradient boosters removed — they ALL become 100% YES on crypto data
 GATLING_ACTIVE_MODELS = [
-    # Proven winners (from 313-trade analysis)
-    "rf", "et", "hgbc",                          # base classifiers
-    "rf_shallow", "et_shallow", "cal_et",         # best PF from analysis
-    "hgbc_l2",                                    # keep but low weight
-    "lgbm_dart", "catboost_bal",                  # external boosters
-    # NEW: non-tree models (different algorithm families)
-    "svc_cal",                                    # SVM RBF kernel — different geometry
-    "ridge_cal",                                  # linear — max diversity vs trees
-    "ebm",                                        # glass-box GAM — interpretable
-    "catboost_d3",                                # shallow CatBoost — ordered boosting
-    "lgbm_goss",                                  # GOSS sampling — focuses on hard cases
-    "knn_cal",                                    # KNN — instance-based, no trees at all
+    "gbc",                  # PF=1.16, 9% fire rate — ONLY PF>1 model
+    "rf_shallow",           # PF=1.47 (prior run), very selective
+    "et_shallow",           # PF=2.50 (prior run), very selective
+    "cal_et",               # PF=2.23 (prior run), selective
+    "rf",                   # selective (3% fire rate)
+    "et",                   # selective
+    "ridge_cal",            # linear — different from trees
+    "svc_cal",              # SVM — different geometry
+    "ebm",                  # GAM — different paradigm
+    "knn_cal",              # KNN — instance-based
+    "mlp",                  # neural net — different
+    "ada",                  # AdaBoost — weaker booster, less degenerate
+    "ngboost",              # probabilistic — uncertainty-aware
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
-    "gnb", "lr", "lr_bal",       # always-bull/bear — quarantined
-    "lgbm_bal",                  # degenerate: 86% YES rate, PF=0.59
-    "xgb_bal",                   # loser: WR=33%, PF=0.55
-    "cal_rf",                    # loser: WR=32%, PF=0.48
+    # ALL gradient boosters are degenerate (100% YES rate on crypto):
+    "hgbc", "hgbc_l2",            # HistGradientBoosting — always YES
+    "lgbm_bal", "lgbm_dart",      # LightGBM — always YES
+    "catboost_bal", "catboost_d3", # CatBoost — always YES
+    "xgb_bal", "lgbm_goss",       # XGBoost/GOSS — always YES
+    "bal_rf",                      # BalancedRF — always YES
+    "gnb", "lr", "lr_bal",        # always-bull/bear
+    "cal_rf",                      # anti-signal
 ]
 GATLING_SHADOW_MODELS = []
 
 # ── Model weights (winning models weighted 2x) ──────────────────────────────
 GATLING_MODEL_WEIGHTS = {
-    # Proven winners (high weight)
-    "et_shallow": 2.0,     # PF=2.50, best performer
-    "cal_et": 1.5,         # PF=2.23, strong signal
-    "rf_shallow": 1.5,     # PF=1.47, highest WR
-    # Base classifiers (moderate weight)
-    "rf": 0.75,            # PF=1.08, marginal
-    "et": 0.75,            # PF=0.86, diversity
-    "hgbc": 0.75,          # base booster
-    "hgbc_l2": 0.5,        # degenerate-prone, low weight
-    "lgbm_dart": 0.75,     # external booster
-    "catboost_bal": 0.75,   # external booster
-    # NEW non-tree models (start at 1.0, adjust after assessment)
-    "svc_cal": 1.0,        # SVM — different decision boundary
-    "ridge_cal": 1.0,      # linear — max anti-correlation with trees
-    "ebm": 1.0,            # GAM — glass-box calibration
-    "catboost_d3": 1.0,    # shallow CatBoost — ordered boosting
-    "lgbm_goss": 1.0,      # GOSS — hard-sample focus
-    "knn_cal": 1.0,        # KNN — instance-based, zero tree bias
+    # Proven selective models (high weight)
+    "gbc": 2.0,            # ONLY PF>1 model in latest run
+    "et_shallow": 2.0,     # PF=2.50 in prior run, very selective
+    "cal_et": 1.5,         # PF=2.23 in prior run
+    "rf_shallow": 1.5,     # PF=1.47 in prior run
+    # Selective tree models
+    "rf": 1.0,             # very selective (3% fire rate)
+    "et": 1.0,             # selective
+    "ada": 0.75,           # weaker booster, less degenerate
+    # Non-tree diversity
+    "ridge_cal": 1.0,      # linear
+    "svc_cal": 1.0,        # SVM
+    "ebm": 1.0,            # GAM
+    "knn_cal": 1.0,        # KNN
+    "mlp": 1.0,            # neural net
+    "ngboost": 1.0,        # probabilistic
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────

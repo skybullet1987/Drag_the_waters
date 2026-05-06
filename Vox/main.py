@@ -198,6 +198,11 @@ class VoxAlgorithm(QCAlgorithm):
                 import traceback
                 self.log(f"[gatling] V2 load failed: {exc}")
                 self.log(f"[gatling] traceback: {traceback.format_exc()[-300:]}")
+        # Apply gatling role overrides (demote degenerate boosters)
+        _role_overrides = getattr(self, "_gatling_role_overrides", None)
+        if _role_overrides:
+            self._ensemble._model_roles.update(_role_overrides)
+            self.log(f"[gatling] Role overrides applied: {len(_role_overrides)} models")
         self.log(format_model_registry_log(self._ensemble._estimators, roles_dict=self._ensemble._model_roles))
 
         # ── Position state ────────────────────────────────────────────────────

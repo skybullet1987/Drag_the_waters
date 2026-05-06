@@ -19,24 +19,12 @@ from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    # Tier 1 — mega cap ($5M+ daily volume on Kraken)
+    # Top 25 Kraken USD pairs by 24h volume — keeps training fast
     "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "XDGUSD",
-    "TAOUSD", "TONUSD", "SUIUSD", "ADAUSD", "LINKUSD",
-    "LTCUSD", "BCHUSD", "AVAXUSD",
-    # Tier 2 — large cap ($1M+ daily volume)
-    "NEARUSD", "FETUSD", "TRXUSD", "FILUSD", "HBARUSD",
-    "RENDERUSD", "ALGOUSD", "STXUSD", "DOTUSD", "ICPUSD",
-    "AAVEUSD", "ENAUSD", "KASUSD", "PENDLEUSD", "CRVUSD",
-    # Tier 3 — mid cap ($200K+ daily volume, liquid on Kraken)
-    "JUPUSD", "TIAUSD", "INJUSD", "EIGENUSD", "UNIUSD",
-    "LDOUSD", "ARBUSD", "GALAUSD", "BONKUSD", "PEPEUSD",
-    "SHIBUSD", "ONDOUSD", "WIFUSD", "APTUSD", "FLRUSD",
-    "ATOMUSD", "POLUSD", "GRTUSD", "OPUSD", "SEIUSD",
-    "STORJUSD", "SANDUSD", "ENJUSD", "WLDUSD", "STRKUSD",
-    "ARKMUSD",
-    # Tier 4 — diversifiers ($100K+ volume, broad coverage)
-    "MATICUSD", "ETCUSD", "XMRUSD", "BNBUSD", "AKTUSD",
-    "QNTUSD", "MORPHOUSD",
+    "ADAUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
+    "TRXUSD", "BCHUSD", "NEARUSD", "SUIUSD", "INJUSD",
+    "ATOMUSD", "UNIUSD", "AAVEUSD", "ARBUSD", "OPUSD",
+    "FETUSD", "RENDERUSD", "ONDOUSD", "TIAUSD", "PEPEUSD",
 ]
 
 

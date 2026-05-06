@@ -301,9 +301,7 @@ MODEL_HEALTH_EXTREME_PROBA  = 0.95  # threshold for "extreme" probability
 MODEL_HEALTH_DEGENERATE_FRAC = 0.90 # fraction of obs above/below that triggers flag
 MODEL_HEALTH_LOW_STD        = 0.01  # std below this → low_variance flag
 
-# ── Optional active std/disagreement gate ────────────────────────────────
-# Disabled by default — trade count is already low; enabling would reduce it.
-# When enabled, ruthless ML entries are blocked if active_std > threshold.
+# ── Optional active std gate (disabled by default) ──────────────────────
 RUTHLESS_USE_ACTIVE_STD_GATE   = False
 RUTHLESS_MAX_ACTIVE_STD_PROBA  = 0.30
 
@@ -560,6 +558,8 @@ def setup_risk_profile(algo):
         algo._gatling_track_model_accuracy = _g.GATLING_TRACK_MODEL_ACCURACY
         algo._ruthless_min_tp = 0.0
         algo._log_model_votes = True  # force vote logging for model assessment
+        algo._gatling_role_overrides = {mid: "diagnostic" for mid in _g.GATLING_DIAGNOSTIC_MODELS}
+        for mid in _g.GATLING_ACTIVE_MODELS: algo._gatling_role_overrides[mid] = "active"
         # Apply gatling model weights (winning models weighted higher)
         try:
             from gatling_config import GATLING_MODEL_WEIGHTS

@@ -60,12 +60,13 @@ class TestGatlingConstants:
         assert GATLING_CONFIRM_PROBA_MIN <= 0.0
         assert GATLING_CONFIRM_AGREE_MIN == 0
 
-    def test_active_models_include_core_models(self):
-        from gatling_config import GATLING_ACTIVE_MODELS
-        assert "rf" in GATLING_ACTIVE_MODELS
-        assert "et" in GATLING_ACTIVE_MODELS
-        assert "hgbc" in GATLING_ACTIVE_MODELS
-        assert len(GATLING_ACTIVE_MODELS) >= 6
+    def test_active_models_include_selective_models(self):
+        from gatling_config import GATLING_ACTIVE_MODELS, GATLING_DIAGNOSTIC_MODELS
+        assert "gbc" in GATLING_ACTIVE_MODELS
+        assert "et_shallow" in GATLING_ACTIVE_MODELS
+        assert "rf_shallow" in GATLING_ACTIVE_MODELS
+        assert "hgbc" in GATLING_DIAGNOSTIC_MODELS  # degenerate, quarantined
+        assert len(GATLING_ACTIVE_MODELS) >= 8
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,13 +161,13 @@ class TestGatlingProfile:
         setup_risk_profile(algo)
         assert algo._ruthless_profit_voting_mode is True
 
-    def test_all_models_active(self):
+    def test_selective_models_active(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
         assert len(algo._ruthless_active_models) >= 8
-        assert "rf" in algo._ruthless_active_models
-        assert "hgbc" in algo._ruthless_active_models
+        assert "gbc" in algo._ruthless_active_models
+        assert "et_shallow" in algo._ruthless_active_models
 
     def test_momentum_override_enabled(self):
         from core import setup_risk_profile
