@@ -111,12 +111,20 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active models: selective models only, degenerates quarantined
+# Active models: winning trees + 6 NEW non-tree diversity models
 GATLING_ACTIVE_MODELS = [
-    "rf", "et", "hgbc",                         # base classifiers
-    "rf_shallow", "et_shallow", "cal_et",        # best from analysis (PF>0.75)
-    "hgbc_l2",                                   # keep but low weight
-    "lgbm_dart", "catboost_bal",                 # external boosters
+    # Proven winners (from 313-trade analysis)
+    "rf", "et", "hgbc",                          # base classifiers
+    "rf_shallow", "et_shallow", "cal_et",         # best PF from analysis
+    "hgbc_l2",                                    # keep but low weight
+    "lgbm_dart", "catboost_bal",                  # external boosters
+    # NEW: non-tree models (different algorithm families)
+    "svc_cal",                                    # SVM RBF kernel — different geometry
+    "ridge_cal",                                  # linear — max diversity vs trees
+    "ebm",                                        # glass-box GAM — interpretable
+    "catboost_d3",                                # shallow CatBoost — ordered boosting
+    "lgbm_goss",                                  # GOSS sampling — focuses on hard cases
+    "knn_cal",                                    # KNN — instance-based, no trees at all
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -129,15 +137,24 @@ GATLING_SHADOW_MODELS = []
 
 # ── Model weights (winning models weighted 2x) ──────────────────────────────
 GATLING_MODEL_WEIGHTS = {
-    "et_shallow": 2.0,    # PF=2.50, best performer
-    "cal_et": 1.5,        # PF=2.23, strong signal
-    "rf_shallow": 1.5,    # PF=1.47, highest WR
-    "rf": 0.75,           # PF=1.08, marginal
-    "et": 0.75,           # PF=0.86, diversity
-    "hgbc": 0.75,         # base booster
-    "hgbc_l2": 0.5,       # degenerate-prone but some signal
-    "lgbm_dart": 0.75,    # external booster
-    "catboost_bal": 0.75,  # external booster
+    # Proven winners (high weight)
+    "et_shallow": 2.0,     # PF=2.50, best performer
+    "cal_et": 1.5,         # PF=2.23, strong signal
+    "rf_shallow": 1.5,     # PF=1.47, highest WR
+    # Base classifiers (moderate weight)
+    "rf": 0.75,            # PF=1.08, marginal
+    "et": 0.75,            # PF=0.86, diversity
+    "hgbc": 0.75,          # base booster
+    "hgbc_l2": 0.5,        # degenerate-prone, low weight
+    "lgbm_dart": 0.75,     # external booster
+    "catboost_bal": 0.75,   # external booster
+    # NEW non-tree models (start at 1.0, adjust after assessment)
+    "svc_cal": 1.0,        # SVM — different decision boundary
+    "ridge_cal": 1.0,      # linear — max anti-correlation with trees
+    "ebm": 1.0,            # GAM — glass-box calibration
+    "catboost_d3": 1.0,    # shallow CatBoost — ordered boosting
+    "lgbm_goss": 1.0,      # GOSS — hard-sample focus
+    "knn_cal": 1.0,        # KNN — instance-based, zero tree bias
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────

@@ -289,7 +289,7 @@ CANDIDATE_JOURNAL_MAX_SIZE = 2000  # rolling memory cap
 # are logged but never affect trading.  Disable to reduce training time.
 # shadow_lab_extended: also enables gbc/ada/markov/hmm/kmeans/isoforest models.
 ENABLE_SHADOW_MODEL_LAB    = True
-SHADOW_MODEL_MAX_COUNT     = 16   # increased cap for new shadow+diagnostic models
+SHADOW_MODEL_MAX_COUNT     = 25   # increased for 6 new non-tree models
 ENABLE_SHADOW_LAB_EXTENDED = True  # enable gbc/ada/regime diagnostic models
 
 # ── Model health diagnostics ─────────────────────────────────────────────

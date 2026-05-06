@@ -28,6 +28,18 @@ try:
 except Exception:
     HAS_NGBOOST = False
 
+try:
+    from interpret.glassbox import ExplainableBoostingClassifier
+    HAS_EBM = True
+except Exception:
+    HAS_EBM = False
+
+try:
+    from catboost import CatBoostClassifier as _CatBoostCls
+    HAS_CATBOOST_V2 = True
+except Exception:
+    HAS_CATBOOST_V2 = False
+
 # HDBSCAN is not available in the QuantConnect runtime (compiled C extension).
 # Keep permanently disabled so the optional diagnostic model does not prevent
 # algorithm import.  HDBSCANRegimeDiagnostic falls back to neutral 0.5 probas.
@@ -383,6 +395,94 @@ class IsoForestRiskDiagnostic:
             return np.column_stack([np.full(n, 0.9), np.full(n, 0.1)])
 
 
+# ── NEW MODEL FACTORIES (non-tree diversity layer) ───────────────────────────
+
+def _make_svc_cal(logger=None):
+    """Calibrated SVM with RBF kernel — different decision geometry from trees."""
+    try:
+        from sklearn.svm import SVC
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(
+            SVC(kernel="rbf", C=1.0, gamma="scale", class_weight="balanced"),
+            method="sigmoid", cv=3,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] svc_cal: {exc}")
+        return None
+
+
+def _make_ridge_cal(logger=None):
+    """Calibrated Ridge classifier — pure linear model, max diversity vs trees."""
+    try:
+        from sklearn.linear_model import RidgeClassifier
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(
+            RidgeClassifier(alpha=1.0, class_weight="balanced"),
+            method="sigmoid", cv=3,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] ridge_cal: {exc}")
+        return None
+
+
+def _make_ebm(logger=None):
+    """Explainable Boosting Machine — glass-box GAM, excellent calibration."""
+    if not HAS_EBM:
+        return None
+    try:
+        return ExplainableBoostingClassifier(
+            max_bins=64, interactions=0, learning_rate=0.01,
+            min_samples_leaf=5, max_rounds=200, random_state=42,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] ebm: {exc}")
+        return None
+
+
+def _make_catboost_shallow(logger=None):
+    """CatBoost depth=3 — ordered boosting prevents target leakage."""
+    if not HAS_CATBOOST_V2:
+        return None
+    try:
+        return _CatBoostCls(
+            iterations=120, depth=3, learning_rate=0.05,
+            auto_class_weights="Balanced", verbose=0, random_seed=44,
+            l2_leaf_reg=5.0, bootstrap_type="Bernoulli", subsample=0.8,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] catboost_d3: {exc}")
+        return None
+
+
+def _make_lgbm_goss(logger=None):
+    """LightGBM GOSS — gradient-based one-side sampling, focuses on hard samples."""
+    try:
+        from lightgbm import LGBMClassifier
+        return LGBMClassifier(
+            n_estimators=120, max_depth=3, learning_rate=0.05,
+            boosting_type="goss", class_weight="balanced",
+            top_rate=0.2, other_rate=0.1, min_child_samples=20,
+            random_state=44, verbose=-1, n_jobs=1,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] lgbm_goss: {exc}")
+        return None
+
+
+def _make_knn_cal(logger=None):
+    """Calibrated KNN — instance-based, totally different from all tree/linear models."""
+    try:
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(
+            KNeighborsClassifier(n_neighbors=15, weights="distance", n_jobs=1),
+            method="isotonic", cv=3,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] knn_cal: {exc}")
+        return None
+
+
 def extend_shadow_estimators(existing, max_count=20, logger=None):
     """Extend shadow list: Tier-1 (gbc/ada/mlp/bal_rf/rusboost/ngboost) +
     Tier-2 (xgb_dart/flaml) + diagnostics (markov/hmm/kmeans/isoforest/hdbscan)."""
@@ -400,13 +500,20 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
         except Exception as exc:
             if logger: logger(f"[shadow_lab] {mid}: {exc}")
 
-    _try_add("gbc",      _make_gbc,         ROLE_SHADOW)
-    _try_add("ada",      _make_ada,         ROLE_SHADOW)
-    _try_add("mlp",      _make_mlp,         ROLE_SHADOW)
-    _try_add("bal_rf",   _make_balanced_rf, ROLE_SHADOW)
-    _try_add("rusboost", _make_rusboost,    ROLE_SHADOW)
-    _try_add("ngboost",  _make_ngboost,     ROLE_SHADOW)
-    _try_add("xgb_dart", _make_xgb_dart,   ROLE_SHADOW)
+    _try_add("gbc",         _make_gbc,             ROLE_SHADOW)
+    _try_add("ada",         _make_ada,             ROLE_SHADOW)
+    _try_add("mlp",         _make_mlp,             ROLE_SHADOW)
+    _try_add("bal_rf",      _make_balanced_rf,     ROLE_SHADOW)
+    _try_add("rusboost",    _make_rusboost,        ROLE_SHADOW)
+    _try_add("ngboost",     _make_ngboost,         ROLE_SHADOW)
+    _try_add("xgb_dart",    _make_xgb_dart,       ROLE_SHADOW)
+    # ── NEW: non-tree diversity models ───────────────────────────────────
+    _try_add("svc_cal",     _make_svc_cal,         ROLE_SHADOW)
+    _try_add("ridge_cal",   _make_ridge_cal,       ROLE_SHADOW)
+    _try_add("ebm",         _make_ebm,             ROLE_SHADOW)
+    _try_add("catboost_d3", _make_catboost_shallow, ROLE_SHADOW)
+    _try_add("lgbm_goss",   _make_lgbm_goss,      ROLE_SHADOW)
+    _try_add("knn_cal",     _make_knn_cal,         ROLE_SHADOW)
     if len(shadows) < max_count and HAS_FLAML:
         try: shadows.append(("flaml", FLAMLShadow(time_budget=20), ROLE_SHADOW))
         except Exception as exc:
