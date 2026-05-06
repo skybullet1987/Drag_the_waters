@@ -349,10 +349,10 @@ class TestFeatureCount:
             f"FEATURE_COUNT={FC} but build_features returned {len(feat)} features"
         )
 
-    def test_feature_count_is_20(self):
-        assert FEATURE_COUNT == 20
+    def test_feature_count_is_30(self):
+        assert FEATURE_COUNT == 30
 
-    def test_build_features_returns_20_elements(self):
+    def test_build_features_returns_30_elements(self):
         from models import build_features
         closes  = list(np.linspace(100, 110, 25))
         volumes = [1e6] * 20

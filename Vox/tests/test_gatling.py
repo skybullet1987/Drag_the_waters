@@ -29,7 +29,7 @@ class TestGatlingConstants:
         # V2: trend-following parameters
         assert GATLING_SCORE_MIN <= 0.25
         assert GATLING_MIN_EV < 0
-        assert GATLING_ALLOCATION <= 0.30
+        assert GATLING_ALLOCATION >= 0.50
         assert GATLING_TAKE_PROFIT >= 0.04
         assert GATLING_STOP_LOSS >= 0.02
         assert GATLING_TIMEOUT_HOURS >= 24.0
@@ -131,7 +131,7 @@ class TestGatlingProfile:
         setup_risk_profile(algo)
         assert algo._risk_profile == "gatling"
         assert algo._s_min <= 0.25
-        assert algo._alloc <= 0.30
+        assert algo._alloc >= 0.50
         assert algo._tp >= 0.04
         assert algo._sl >= 0.02
         assert algo._toh >= 24.0
@@ -195,13 +195,13 @@ class TestGatlingProfile:
         assert algo._label_sl >= 0.015
         assert algo._label_horizon >= 72
 
-    def test_allocation_survivable(self):
+    def test_allocation_aggressive(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._alloc <= 0.30
-        assert algo._max_alloc <= 0.50
-        assert algo._use_kelly is True
+        assert algo._alloc >= 0.50
+        assert algo._max_alloc >= 0.80
+        assert algo._use_kelly is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
