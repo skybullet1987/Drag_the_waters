@@ -46,11 +46,8 @@ except Exception:
 _hdbscan_lib = None
 HAS_HDBSCAN = False
 
-try:
-    from flaml import AutoML as _FLAMLAutoML
-    HAS_FLAML = True
-except Exception:
-    HAS_FLAML = False
+HAS_FLAML = False
+_FLAMLAutoML = None
 
 
 # ── Buy-probability shadow models ─────────────────────────────────────────────
