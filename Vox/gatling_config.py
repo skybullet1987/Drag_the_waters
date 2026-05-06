@@ -25,11 +25,11 @@ GATLING_EV_GAP                  = 0.0    # no gap between candidates
 GATLING_COST_BPS                = 30     # realistic Kraken fee estimate
 
 # ── Position sizing (survivable — 20% per trade) ────────────────────────────
-GATLING_ALLOCATION              = 0.20   # 20% per trade — survive 10+ losses
-GATLING_MAX_ALLOC               = 0.35   # never more than 35%
-GATLING_MIN_ALLOC               = 0.10   # at least 10% when Kelly active
-GATLING_USE_KELLY               = True   # Kelly sizes up on good edge
-GATLING_KELLY_FRAC              = 0.50   # half-Kelly for safety
+GATLING_ALLOCATION              = 0.80   # 80% per trade — aggressive test
+GATLING_MAX_ALLOC               = 0.90   # max 90%
+GATLING_MIN_ALLOC               = 0.50   # at least 50%
+GATLING_USE_KELLY               = False  # flat 80% per trade
+GATLING_KELLY_FRAC              = 1.00   # full-Kelly (unused when Kelly off)
 
 # ── Exit parameters (trend-following: wide TP, trailing stop) ────────────────
 GATLING_TAKE_PROFIT             = 0.06   # +6% TP target
@@ -126,6 +126,30 @@ GATLING_DIAGNOSTIC_MODELS = [
     "cal_rf",                    # loser: WR=32%, PF=0.48
 ]
 GATLING_SHADOW_MODELS = []
+
+# ── Model weights (winning models weighted 2x) ──────────────────────────────
+GATLING_MODEL_WEIGHTS = {
+    "et_shallow": 2.0,    # PF=2.50, best performer
+    "cal_et": 1.5,        # PF=2.23, strong signal
+    "rf_shallow": 1.5,    # PF=1.47, highest WR
+    "rf": 0.75,           # PF=1.08, marginal
+    "et": 0.75,           # PF=0.86, diversity
+    "hgbc": 0.75,         # base booster
+    "hgbc_l2": 0.5,       # degenerate-prone but some signal
+    "lgbm_dart": 0.75,    # external booster
+    "catboost_bal": 0.75,  # external booster
+}
+
+# ── Regime-adaptive allocation ───────────────────────────────────────────────
+GATLING_REGIME_SIZING = True
+GATLING_REGIME_ALLOC = {
+    "pump": 0.90,             # bullish pump — max aggression
+    "risk_on_trend": 0.80,    # trending — full allocation
+    "high_vol_reversal": 0.50, # volatile — moderate
+    "chop": 0.25,             # choppy — minimal
+    "selloff": 0.10,          # bearish — tiny or skip
+}
+GATLING_REGIME_DEFAULT_ALLOC = 0.50  # unknown regime
 
 # ── Diag logging ─────────────────────────────────────────────────────────────
 GATLING_DIAG_INTERVAL_HOURS     = 1

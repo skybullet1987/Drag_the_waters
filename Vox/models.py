@@ -60,23 +60,11 @@ VOX_ENABLE_CV = False
 # Number of CV folds used when VOX_ENABLE_CV is True.
 CV_SPLITS = 3
 
-# Current output dimension of build_features.
-# Changed from 10 (Vox v2) to 20 (Vox v4) by adding 10 trend/chop features.
-# Backward-compatibility: load_state() detects mismatches and leaves the
-# ensemble unfitted so the next cycle retrains on the new feature set.
-FEATURE_COUNT = 20
+FEATURE_COUNT = 30
 
 # ── Version constants ──────────────────────────────────────────────────────────
-#
-# Bump MODEL_VERSION when the ensemble architecture changes (new estimators,
-# calibration changes, etc.) — persisted pickles with older versions are discarded.
-# Bump FEATURE_VERSION when build_features() output changes (FEATURE_COUNT or
-# feature semantics) — old pickles with a different FEATURE_COUNT are already
-# discarded by load_state(); this version adds an explicit semantic check.
-# Bump LABEL_VERSION when triple_barrier_outcome() semantics change materially.
-# Bump CONFIG_VERSION when risk-profile constants change in a breaking way.
 MODEL_VERSION   = "v4.0"
-FEATURE_VERSION = "v4.0"   # corresponds to FEATURE_COUNT=20 (Vox v4 feature set)
+FEATURE_VERSION = "v5.0"   # FEATURE_COUNT=30 (multi-timeframe features)
 LABEL_VERSION   = "v2.0"   # triple-barrier with cost_fraction
 CONFIG_VERSION  = "v1.0"
 
@@ -153,28 +141,9 @@ def build_features(closes, volumes, btc_closes, hour):
     -------
     numpy.ndarray of shape (FEATURE_COUNT,) or None when insufficient history.
 
-    Feature layout
-    --------------
-    0  ret_1            — 1-bar return
-    1  ret_4            — 4-bar return
-    2  ret_8            — 8-bar return
-    3  ret_16           — 16-bar return
-    4  rsi_14           — RSI(14) normalised to [0, 1]
-    5  atr_n            — ATR(14) / close[-1]
-    6  vol_r            — volume ratio: current / 15-bar mean (capped at 10)
-    7  btc_rel          — 4-bar symbol return minus 4-bar BTC return
-    8  hour_of_day      — hour normalised to [0, 1]
-    9  sma_slope        — 8-bar SMA slope (non-overlapping windows), capped [-0.10, 0.10]
-    10 range_eff        — 16-bar range efficiency (trend purity)
-    11 sma_fast_slope   — 4-bar SMA slope (fast), capped [-0.10, 0.10]
-    12 price_vs_sma_fast — price relative to 4-bar SMA
-    13 price_vs_sma_slow — price relative to 8-bar SMA
-    14 recent_high_breakout — distance above 16-bar prior high, capped [-0.10, 0.10]
-    15 vol_zscore       — volume z-score over 16 bars, capped [-3, 3]
-    16 reversal_frac    — fraction of sign changes in last 8 bars [0, 1]
-    17 green_bar_ratio  — fraction of up-bars in last 8 bars [0, 1]
-    18 atr_expansion    — recent ATR vs lagged ATR ratio minus 1, capped [-1, 2]
-    19 btc_ret_1        — 1-bar BTC return
+    Features 0-19: returns, RSI, ATR, volume, BTC-rel, SMA, range, reversals.
+    Features 20-29: multi-timeframe (48-bar ret, RSI-28, SMA20/50, BTC trends,
+    long vol ratio, 32-bar range eff, 16-bar green ratio, ATR ratio).
     """
     c  = np.asarray(closes,    dtype=float)
     v  = np.asarray(volumes,   dtype=float)
@@ -278,28 +247,48 @@ def build_features(closes, volumes, btc_closes, hour):
     # ── 1-bar BTC return ──────────────────────────────────────────────────────
     btc_ret_1 = (bc[-1] - bc[-2]) / bc[-2] if len(bc) >= 2 and bc[-2] != 0 else 0.0
 
-    return np.array([
-        ret_1,
-        ret_4,
-        ret_8,
-        ret_16,
-        rsi / 100.0,
-        atr_n,
-        vol_r,
-        btc_rel,
-        float(hour) / 23.0,
-        sma_slope,             # feature 9
-        range_eff,             # feature 10 (NEW)
-        sma_fast_slope,        # feature 11 (NEW)
-        price_vs_sma_fast,     # feature 12 (NEW)
-        price_vs_sma_slow,     # feature 13 (NEW)
-        recent_high_breakout,  # feature 14 (NEW)
-        vol_zscore,            # feature 15 (NEW)
-        reversal_frac,         # feature 16 (NEW)
-        green_bar_ratio,       # feature 17 (NEW)
-        atr_expansion,         # feature 18 (NEW)
-        btc_ret_1,             # feature 19 (NEW)
-    ], dtype=float)
+    feat = np.zeros(FEATURE_COUNT)
+    feat[:20] = [ret_1, ret_4, ret_8, ret_16, rsi / 100.0, atr_n, vol_r,
+                 btc_rel, float(hour) / 23.0, sma_slope, range_eff,
+                 sma_fast_slope, price_vs_sma_fast, price_vs_sma_slow,
+                 recent_high_breakout, vol_zscore, reversal_frac,
+                 green_bar_ratio, atr_expansion, btc_ret_1]
+
+    # ── Multi-timeframe features (indices 20-29) ─────────────────────────
+    feat[20] = (last - c[-min(49, len(c))]) / c[-min(49, len(c))] if len(c) >= 49 else feat[3]
+    _diffs28 = np.diff(c[-min(29, len(c)):])
+    _gains28 = np.where(_diffs28 > 0, _diffs28, 0.0)
+    _losses28 = np.where(_diffs28 < 0, -_diffs28, 0.0)
+    _ag28 = np.mean(_gains28[-28:]) if len(_gains28) >= 28 else np.mean(_gains28) if len(_gains28) > 0 else 0.0
+    _al28 = np.mean(_losses28[-28:]) if len(_losses28) >= 28 else np.mean(_losses28) if len(_losses28) > 0 else 1e-9
+    feat[21] = _ag28 / (_ag28 + _al28 + 1e-9)
+    _sma20 = np.mean(c[-min(20, len(c)):])
+    feat[22] = np.clip((last / _sma20 - 1.0), -0.10, 0.10) if _sma20 > 0 else 0.0
+    _sma50 = np.mean(c[-min(50, len(c)):]) if len(c) >= 20 else _sma20
+    feat[23] = np.clip((last / _sma50 - 1.0), -0.10, 0.10) if _sma50 > 0 else 0.0
+    feat[24] = (bc[-1] - bc[-min(5, len(bc))]) / bc[-min(5, len(bc))] if len(bc) >= 5 else 0.0
+    feat[25] = (bc[-1] - bc[-min(17, len(bc))]) / bc[-min(17, len(bc))] if len(bc) >= 5 else 0.0
+    _vol_mean48 = np.mean(v[-min(48, len(v)):]) if len(v) >= 16 else np.mean(v)
+    feat[26] = np.clip(v[-1] / max(_vol_mean48, 1e-9), 0.0, 10.0)
+    if len(c) >= 33:
+        _net32 = abs(c[-1] - c[-33])
+        _gross32 = np.sum(np.abs(np.diff(c[-33:])))
+        feat[27] = _net32 / max(_gross32, 1e-9)
+    else:
+        feat[27] = feat[10]
+    if len(c) >= 17:
+        _d16 = np.diff(c[-17:])
+        feat[28] = np.mean(_d16 > 0)
+    else:
+        feat[28] = feat[17]
+    if len(c) >= 29:
+        _diffs_long = np.abs(np.diff(c[-29:]))
+        _atr28 = np.mean(_diffs_long[-28:])
+        _atr14 = np.mean(_diffs_long[-14:])
+        feat[29] = np.clip(_atr28 / max(_atr14, 1e-9) - 1.0, -1.0, 2.0)
+    else:
+        feat[29] = feat[18]
+    return feat
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1262,7 +1251,7 @@ class VoxEnsemble:
         """Copy fitted state from a previously serialised VoxEnsemble.
 
         If the saved model was trained on a different feature count (i.e., before
-        FEATURE_COUNT was bumped from 10 → 20), the fitted state is rejected and
+        FEATURE_COUNT was bumped), the fitted state is rejected and
         the caller will trigger a retrain on the next cycle.
 
         Version checks:

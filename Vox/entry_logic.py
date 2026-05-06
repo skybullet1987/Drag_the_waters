@@ -500,6 +500,15 @@ def try_enter(algo):
     ev_top           = ev_data[top_sym]
     _top_confirm     = getattr(algo, "_ruthless_confirm_reasons", {}).get(top_sym, "n/a")
 
+    # Gatling regime-adaptive sizing
+    if getattr(algo, "_gatling_regime_sizing", False) and _market_mode:
+        try:
+            from gatling_config import GATLING_REGIME_ALLOC, GATLING_REGIME_DEFAULT_ALLOC
+            _regime_alloc = GATLING_REGIME_ALLOC.get(_market_mode, GATLING_REGIME_DEFAULT_ALLOC)
+            algo._alloc = _regime_alloc
+        except Exception:
+            pass
+
     # Kelly / flat sizing (uses class_proba and ATR TP/SL for Kelly edge)
     qty, alloc = compute_qty(
         mean_proba      = class_proba_top,

@@ -9,7 +9,7 @@ from datetime import timedelta
 # config
 # ===============================================================================
 
-# ── Strategy constants (all overridable via the QC parameter panel) ───────────
+# ── Strategy constants ───────────────────────────────────────────────────
 TAKE_PROFIT          = 0.030   # +3.0 %  close long on gain
 STOP_LOSS            = 0.015   # −1.5 %  close long on loss
 TIMEOUT_HOURS        = 6.0     # close after this many hours regardless
@@ -49,12 +49,10 @@ SKIP_DIAG_INTERVAL_SECS = 21600  # routine skip diagnostics logged at most once 
 DIAG_INTERVAL_HOURS  = 6       # no-candidate summary logged at most once every N hours
 MIN_RETRAIN_INTERVAL_HOURS = 20  # skip scheduled retrain if last retrain was within this many hours
 
-# ── Risk profile ───────────────────────────────────────────────────────────────
-# Values: "balanced" (default), "conservative", "aggressive", "ruthless"
-# Convenience aliases: aggressive_mode=true, ruthless_mode=true
+# ── Risk profile ─────────────────────────────────────────────────────────
 RISK_PROFILE = "balanced"
 
-# ── Aggressive profile defaults ───────────────────────────────────────────────
+# ── Aggressive profile defaults ──────────────────────────────────────────
 AGGRESSIVE_SCORE_MIN               = 0.48
 AGGRESSIVE_MIN_EV                  = 0.0005
 AGGRESSIVE_PRED_RETURN_MIN         = -0.0010
@@ -77,10 +75,10 @@ AGGRESSIVE_PENALTY_COOLDOWN_LOSSES = 3
 AGGRESSIVE_PENALTY_COOLDOWN_HOURS  = 24
 AGGRESSIVE_MAX_DD_PCT              = 0.20
 
-# ── Ruthless V2 (activate via risk_profile=ruthless_v2) ───────────────────────
+# ── Ruthless V2 ─────────────────────────────────────────────────────────
 RUTHLESS_V2_MODE                 = False  # default off; activated by profile/param
 
-# ── APEX PREDATOR constants (see README for formula and trigger paths) ────────
+# ── APEX PREDATOR constants ──────────────────────────────────────────────
 APEX_SCORE_ENTRY        = 0.50   # minimum apex_score to trigger entry (was 0.55)
 APEX_SCORE_PYRAMID      = 0.55   # minimum apex_score to add a pyramid tranche
 APEX_BASE_ALLOC         = 0.20   # baseline allocation (20% of equity)
@@ -104,7 +102,7 @@ APEX_PULLBACK_RSI_MAX        = 35
 APEX_PULLBACK_TREND_BARS     = 10
 APEX_MOMENTUM_CONT_BARS      = 3
 APEX_MOMENTUM_CONT_VOL_MULT  = 1.5
-# ── Apex Predator profile defaults ───────────────────────────────────────────
+# ── Apex Predator profile defaults ───────────────────────────────────────
 APEX_PROFILE_SCORE_MIN               = 0.15
 APEX_PROFILE_PRED_RETURN_MIN         = -0.015
 APEX_PROFILE_VOTE_THRESHOLD          = 0.40
@@ -148,54 +146,54 @@ RUTHLESS_MIN_HOLD_MINUTES        = 10      # was 3; less instant chop
 RUTHLESS_EMERGENCY_SL            = 0.05    # was 0.040; 5 % catastrophic stop
 RUTHLESS_MAX_DAILY_SL            = 5
 RUTHLESS_COOLDOWN_MINS           = 0
-RUTHLESS_SL_COOLDOWN_MINS        = 30     # 30-min per-coin block after any SL exit
+RUTHLESS_SL_COOLDOWN_MINS        = 30
 RUTHLESS_PENALTY_COOLDOWN_LOSSES = 5
 RUTHLESS_PENALTY_COOLDOWN_HOURS  = 12
 RUTHLESS_MAX_DD_PCT              = 0.35
 # Runner / trailing-profit parameters
-RUTHLESS_RUNNER_MODE             = True    # trailing stop instead of instant TP exit
-RUTHLESS_TRAIL_AFTER_TP          = 0.07   # activate trailing once return >= +7%
-RUTHLESS_TRAIL_PCT               = 0.03   # trail 3% from high-water mark
+RUTHLESS_RUNNER_MODE             = True
+RUTHLESS_TRAIL_AFTER_TP          = 0.07
+RUTHLESS_TRAIL_PCT               = 0.03
 
-# ── Ruthless v4: breakeven stop ───────────────────────────────────────────────
+# ── Ruthless v4: breakeven stop ──────────────────────────────────────────
 RUTHLESS_BREAKEVEN_AFTER         = 0.03   # move stop to entry after +3% return seen
 RUTHLESS_BREAKEVEN_BUFFER        = 0.003  # effective stop = entry + this buffer
 
-# ── Ruthless v4: momentum-failure early exit ──────────────────────────────────
+# ── Ruthless v4: momentum-failure early exit ─────────────────────────────
 RUTHLESS_MOM_FAIL_ENABLED        = True
 RUTHLESS_MOM_FAIL_MIN_HOLD_MINUTES = 30   # must hold at least this long
 RUTHLESS_MOM_FAIL_LOSS           = -0.012 # exit if return <= this with broken momentum
 
-# ── Ruthless v4: smarter timeout extension ────────────────────────────────────
+# ── Ruthless v4: smarter timeout extension ───────────────────────────────
 RUTHLESS_TIMEOUT_MIN_PROFIT      = 0.03   # allow timeout exit if return >= this
 RUTHLESS_TIMEOUT_EXTEND_HOURS    = 12     # extend hold by this many hours
 RUTHLESS_MAX_TIMEOUT_HOURS       = 48     # hard cap on total hold time
 
-# ── Market mode detection ─────────────────────────────────────────────────────
+# ── Market mode detection ────────────────────────────────────────────────
 MARKET_MODE_ENABLED              = True
 RUTHLESS_ALLOWED_MODES           = ["risk_on_trend", "pump"]
 
-# ── Ruthless meta-filter ──────────────────────────────────────────────────────
+# ── Ruthless meta-filter ─────────────────────────────────────────────────
 RUTHLESS_META_FILTER_ENABLED     = True
 RUTHLESS_META_MIN_PROBA          = 0.55
 
-# ── Optional entry limit orders ───────────────────────────────────────────────
+# ── Optional entry limit orders ──────────────────────────────────────────
 RUTHLESS_USE_ENTRY_LIMIT_ORDERS  = False  # disabled by default; enable to reduce slippage
 ENTRY_LIMIT_OFFSET               = 0.001  # buy limit at price * (1 - offset)
 ENTRY_LIMIT_TTL_MINUTES          = 3      # cancel unfilled limits after this many minutes
 
-# ── Optional exit limit orders (non-urgent only) ──────────────────────────────
+# ── Optional exit limit orders ───────────────────────────────────────────
 USE_EXIT_LIMIT_ORDERS            = False  # disabled by default
 EXIT_LIMIT_OFFSET                = 0.0005 # sell limit at price * (1 + offset)
 EXIT_LIMIT_TTL_MINUTES           = 1      # cancel unfilled exit limits after 1 minute
 EXIT_LIMIT_FALLBACK_TO_MARKET    = True   # fallback to market if limit not filled in TTL
 
-# ── Optional external ML models ───────────────────────────────────────────────
+# ── Optional external ML models ──────────────────────────────────────────
 USE_LIGHTGBM                     = False  # enable if lightgbm installed
 USE_XGBOOST                      = False  # enable if xgboost installed
 USE_CATBOOST                     = False  # disabled: CatBoost is not available in the QC cloud environment
 
-# ── Per-model static weights (optional weighted ensemble) ─────────────────────
+# ── Per-model static weights ─────────────────────────────────────────────
 # Default 1.0 for active models → unweighted mean (preserves current behavior).
 # GNB and LR are 0.0 by default: both are diagnostic-only (always-bullish /
 # always-bearish observed in live data) and must NOT inflate active consensus.
@@ -213,7 +211,7 @@ MODEL_WEIGHT_CAL_ET       = 0.75
 MODEL_WEIGHT_CAL_RF       = 0.75
 MODEL_WEIGHT_LGBM_BAL     = 2.0   # promoted: best calibration on imbalanced data
 
-# ── Model roles ────────────────────────────────────────────────────────────────
+# ── Model roles ──────────────────────────────────────────────────────────
 # Roles: "active" | "shadow" | "diagnostic" | "disabled"
 #
 #   active     — contributes to ensemble vote; affects trading confidence.
@@ -233,7 +231,7 @@ MODEL_ROLE_LGBM     = "shadow"
 MODEL_ROLE_XGB      = "shadow"
 MODEL_ROLE_CATBOOST = "shadow"
 
-# ── Ruthless profit-voting mode ───────────────────────────────────────────────
+# ── Ruthless profit-voting mode ──────────────────────────────────────────
 # When True and risk_profile=ruthless, use explicit profit-voting/vote-ranking
 # behavior instead of balanced-like cautious thresholds.
 # Has no effect on balanced / conservative / aggressive profiles.
@@ -247,7 +245,7 @@ RUTHLESS_ACTIVE_MODELS    = ["rf", "et", "hgbc_l2", "lgbm_bal", "catboost_bal", 
 RUTHLESS_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal", "cal_et", "cal_rf"]
 RUTHLESS_SHADOW_MODELS     = ["et_shallow", "rf_shallow", "xgb_bal"]
 
-# ── Profit-voting gate thresholds (bootstrap defaults) ────────────────────────
+# ── Profit-voting gate thresholds ────────────────────────────────────────
 # Bootstrap / test defaults — intentionally relaxed to restore trading and gather
 # candidate journal / reject diagnostic data.  Tighten after analysing results.
 # vote_yes_fraction = fraction of active models with P >= RUTHLESS_VOTE_THRESHOLD.
@@ -257,20 +255,20 @@ RUTHLESS_VOTE_YES_FRACTION_MIN  = 0.30   # min yes-fraction for trend/pump entri
 RUTHLESS_TOP3_MEAN_MIN          = 0.45   # min top-3 mean for trend/pump entries
 RUTHLESS_VOTE_EV_FLOOR          = 0.001  # minimum EV required for profit-voting pass
 
-# ── Chop supermajority requirements (ruthless profit-voting mode) ─────────────
+# ── Chop supermajority requirements ──────────────────────────────────────
 # Chop entries require a stricter vote than trend (still bootstrap-relaxed).
 RUTHLESS_CHOP_VOTE_YES_FRAC_MIN = 0.40   # yes-fraction in chop
 RUTHLESS_CHOP_TOP3_MEAN_MIN     = 0.50   # top-3-mean required in chop
 RUTHLESS_CHOP_PRED_RETURN_MIN   = 0.000  # positive pred_return (disabled)
 RUTHLESS_CHOP_EV_MIN            = 0.002  # EV floor required in chop
 
-# ── Ruthless payoff floors ─────────────────────────────────────────────────────
+# ── Ruthless payoff floors ───────────────────────────────────────────────
 # Prevent ruthless mode from scalping tiny +0.2% wins (fixes collapsed avg_win).
 # These are MINIMUM values; ATR-based TP/SL may be larger.
 RUTHLESS_MIN_TP                 = 0.04   # do not intentionally target wins < +4 %
 # Trail and timeout parameters are already in the ruthless section above (v4).
 
-# ── Multi-position scaffold ───────────────────────────────────────────────────
+# ── Multi-position scaffold ──────────────────────────────────────────────
 # SAFE SCAFFOLD — current implementation is single-position only.
 # Set RUTHLESS_MAX_CONCURRENT_POSITIONS = 1 for current behavior.
 # Set to 2 to opt into experimental 2-position mode (TODO: full multi-pos refactor).
@@ -278,14 +276,14 @@ RUTHLESS_MAX_CONCURRENT_POSITIONS = 1    # scaffold only; >1 requires refactor
 RUTHLESS_MAX_NEW_ENTRIES_PER_DAY  = 3    # reference cap (informational for now)
 RUTHLESS_MAX_SYMBOL_ALLOCATION    = 0.45 # reference single-symbol cap (informational)
 
-# ── Candidate journal ─────────────────────────────────────────────────────────
+# ── Candidate journal ────────────────────────────────────────────────────
 # When True, each decision cycle records the top-N candidates (selected + skipped)
 # for post-hoc analysis of missed opportunities.
 PERSIST_CANDIDATE_JOURNAL  = True
 CANDIDATE_JOURNAL_TOP_N    = 5     # candidates journaled per cycle
 CANDIDATE_JOURNAL_MAX_SIZE = 2000  # rolling memory cap
 
-# ── Shadow model lab ───────────────────────────────────────────────────────────
+# ── Shadow model lab ─────────────────────────────────────────────────────
 # When True, additional shadow models (ET/RF variants, calibrated variants, etc.)
 # are trained and predicted alongside the active ensemble.  Shadow predictions
 # are logged but never affect trading.  Disable to reduce training time.
@@ -294,7 +292,7 @@ ENABLE_SHADOW_MODEL_LAB    = True
 SHADOW_MODEL_MAX_COUNT     = 16   # increased cap for new shadow+diagnostic models
 ENABLE_SHADOW_LAB_EXTENDED = True  # enable gbc/ada/regime diagnostic models
 
-# ── Model health diagnostics ──────────────────────────────────────────────────
+# ── Model health diagnostics ─────────────────────────────────────────────
 # Track per-model rolling probability statistics to flag degenerate models.
 # Flags: degenerate_bullish | degenerate_bearish | low_variance
 MODEL_HEALTH_ENABLED        = True
@@ -303,24 +301,24 @@ MODEL_HEALTH_EXTREME_PROBA  = 0.95  # threshold for "extreme" probability
 MODEL_HEALTH_DEGENERATE_FRAC = 0.90 # fraction of obs above/below that triggers flag
 MODEL_HEALTH_LOW_STD        = 0.01  # std below this → low_variance flag
 
-# ── Optional active std/disagreement gate ─────────────────────────────────────
+# ── Optional active std/disagreement gate ────────────────────────────────
 # Disabled by default — trade count is already low; enabling would reduce it.
 # When enabled, ruthless ML entries are blocked if active_std > threshold.
 RUTHLESS_USE_ACTIVE_STD_GATE   = False
 RUTHLESS_MAX_ACTIVE_STD_PROBA  = 0.30
 
-# ── Trade journal config ──────────────────────────────────────────────────────
+# ── Trade journal config ─────────────────────────────────────────────────
 # persist_trade_journal: when True, journal records accumulate in memory and
 # are available via self._trade_journal.get_records() / to_json().
 PERSIST_TRADE_JOURNAL     = True
 TRADE_JOURNAL_MAX_SIZE    = 500   # rolling cap — oldest records dropped first
 
-# ── Vote log config ───────────────────────────────────────────────────────────
+# ── Vote log config ──────────────────────────────────────────────────────
 # log_model_votes: when True, each entry emits a compact [vote] line listing
 # per-model probabilities.  Disabled by default to protect QC's 100KB log cap.
 LOG_MODEL_VOTES           = False
 
-# ── Ruthless good-market-mode relaxation ──────────────────────────────────────
+# ── Ruthless good-market-mode relaxation ─────────────────────────────────
 # When market_mode is pump or risk_on_trend, slightly relax ruthless gates to
 # increase sample size without returning to chop overtrading.
 # Set RUTHLESS_GOOD_MODE_RELAXATION = False to disable all relaxation.
@@ -329,16 +327,16 @@ RUTHLESS_GOOD_MODE_META_MIN_PROBA     = 0.48   # relaxed from 0.52
 RUTHLESS_GOOD_MODE_MIN_EV             = 0.002   # relaxed confirm ev
 RUTHLESS_GOOD_MODE_VOLUME_MIN         = 1.0    # relaxed from 1.3
 
-# ── Ruthless anti-chop: 2-SL-in-24h same-symbol extended block ────────────────
+# ── Ruthless anti-chop: 2-SL-in-24h block ────────────────────────────────
 RUTHLESS_LOSS_WINDOW_HOURS       = 12     # rolling window for counting SL exits
 RUTHLESS_LOSS_LIMIT              = 4      # SL exits in window that trigger long block
 RUTHLESS_LOSS_BLOCK_HOURS        = 6      # block duration when limit exceeded
 
-# ── Ruthless portfolio loss-streak brake ──────────────────────────────────────
+# ── Ruthless portfolio loss-streak brake ─────────────────────────────────
 RUTHLESS_PORTFOLIO_LOSS_STREAK   = 6     # consecutive losses before pause
 RUTHLESS_PORTFOLIO_PAUSE_HOURS   = 2     # hours to pause all new entries
 
-# ── Ruthless confirmation gate thresholds ─────────────────────────────────────
+# ── Ruthless confirmation gate thresholds ────────────────────────────────
 # Ruthless entries must pass one of three confirmation paths:
 #   momentum_override | strong_ml | trend_momentum
 RUTHLESS_CONFIRM_EV_MIN          = 0.002  # strong_ml: minimum ev_score
@@ -348,14 +346,14 @@ RUTHLESS_CONFIRM_RET4_MIN        = 0.004  # trend_momentum: minimum ret_4
 RUTHLESS_CONFIRM_RET16_MIN       = 0.020  # trend_momentum: minimum ret_16
 RUTHLESS_CONFIRM_VOLR_MIN        = 1.5    # trend_momentum: minimum vol_r
 
-# ── Ruthless label parameters (for profile-aligned model training) ─────────────
+# ── Ruthless label parameters ────────────────────────────────────────────
 RUTHLESS_LABEL_TP                = 0.035  # achievable TP for ruthless training labels
 RUTHLESS_LABEL_SL                = 0.015  # matched SL for ruthless training labels
 RUTHLESS_LABEL_HORIZON_HOURS     = 12     # 12h horizon — more labels fire within window
 # Derived bars: horizon_hours × (60 / DECISION_INTERVAL_MIN) = 12×4 = 48 bars
 RUTHLESS_LABEL_HORIZON_BARS      = 48
 
-# ── Momentum breakout override ─────────────────────────────────────────────────
+# ── Momentum breakout override ───────────────────────────────────────────
 # Enabled by default for aggressive/ruthless profiles; disabled otherwise.
 MOMENTUM_RET4_MIN          = 0.015   # minimum 4-bar return for override
 MOMENTUM_RET16_MIN         = 0.025   # minimum 16-bar return for override
@@ -363,7 +361,7 @@ MOMENTUM_VOLUME_MIN        = 2.0     # minimum volume ratio (current / 15-bar av
 MOMENTUM_BTC_REL_MIN       = 0.005   # minimum BTC-relative 4-bar outperformance
 MOMENTUM_OVERRIDE_MIN_EV   = -0.002  # momentum override blocked if EV < this threshold
 
-# ── External profile modules (applied in setup_risk_profile) ─────────────────
+# ── External profile modules ─────────────────────────────────────────────
 import active_research_config as _ar  # noqa: E402
 import gatling_config as _gatling  # noqa: E402
 # Re-export all active_research constants (used by entry_logic, tests)
@@ -562,6 +560,14 @@ def setup_risk_profile(algo):
         algo._gatling_track_model_accuracy = _g.GATLING_TRACK_MODEL_ACCURACY
         algo._ruthless_min_tp = 0.0
         algo._log_model_votes = True  # force vote logging for model assessment
+        # Apply gatling model weights (winning models weighted higher)
+        try:
+            from gatling_config import GATLING_MODEL_WEIGHTS
+            algo._ensemble_model_weights = dict(GATLING_MODEL_WEIGHTS)
+        except Exception:
+            pass
+        # Regime-adaptive sizing flag
+        algo._gatling_regime_sizing = _g.GATLING_REGIME_SIZING if hasattr(_g, 'GATLING_REGIME_SIZING') else False
         algo.log(
             "[gatling] GATLING GUN mode active — 5-min decisions, all gates near-zero."
             " Vote logging ON for model assessment."
