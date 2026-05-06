@@ -1,139 +1,139 @@
-# gatling_config.py — constants for the "gatling" risk profile
+# gatling_config.py — "Gatling V2" trend-following ensemble strategy
 #
-# GATLING MODE: extremely active, high-frequency ensemble-voting strategy.
-# Designed to fire as many trades as possible ("gatling gun") using the
-# ensemble vote to find edge, then assess individual model performance
-# from backtest results.
+# Rebuilt based on 313-trade analysis that proved:
+#   - 5-min scalping has NO learnable signal (24% WR, all models PF<1)
+#   - Degenerate models (lgbm_bal=86% YES, hgbc_l2=84% YES) dominated
+#   - Fee drag at high frequency was catastrophic (40% of capital)
 #
-# Philosophy:
-#   - Near-zero gates: let the ensemble decide, not hard-coded thresholds
-#   - 5-minute decision interval (every bar) instead of 15-minute
-#   - Minimal cooldowns: re-enter immediately after exits
-#   - Fast labels (short horizon, tight TP/SL) so models learn scalp patterns
-#   - Full allocation per trade for maximum capital efficiency
-#   - Profit-voting with ultra-loose thresholds: any model agreement = go
-#   - Per-model accuracy tracked in journal for post-backtest assessment
-#
-# RISK WARNING: This profile is EXTREMELY aggressive. Expect very high
-# trade count, significant fee drag, and large drawdowns. Use for:
-#   1. Backtesting to gather large trade samples for model assessment
-#   2. Identifying which models have genuine predictive power
-#   3. Stress-testing the ensemble under maximum activity
+# V2 Philosophy:
+#   - TREND-FOLLOWING: catch 5-20% crypto moves, not 1% scalps
+#   - 15-min decisions, 24h+ hold, trailing stops to let winners run
+#   - Regime filtering: only trade in trend/pump, skip chop/selloff
+#   - Survivable sizing: 20% per trade, survive 10+ consecutive losses
+#   - Quarantine degenerate models, weight selective models higher
+#   - Wider labels so models learn real trends, not noise
 #
 # Activate via:  risk_profile=gatling  (QC parameter panel)
 
-# ── Entry gates (near-zero to maximize trade frequency) ──────────────────────
-GATLING_SCORE_MIN               = 0.10   # almost any signal passes
-GATLING_MIN_EV                  = -0.005 # allow slightly negative EV trades
-GATLING_PRED_RETURN_MIN         = -0.010 # almost never veto on regression
-GATLING_MAX_DISPERSION          = 0.50   # even highly disagreeing models pass
-GATLING_MIN_AGREE               = 0      # zero agreement required
-GATLING_EV_GAP                  = 0.0    # no gap required between top candidates
-GATLING_COST_BPS                = 15     # optimistic cost assumption
+# ── Entry gates (loose but not zero — require SOME signal) ───────────────────
+GATLING_SCORE_MIN               = 0.18   # require minimal classifier signal
+GATLING_MIN_EV                  = -0.002 # allow slightly negative EV
+GATLING_PRED_RETURN_MIN         = -0.005 # loose regression veto
+GATLING_MAX_DISPERSION          = 0.40   # some model agreement needed
+GATLING_MIN_AGREE               = 0      # zero agreement gate (let voting decide)
+GATLING_EV_GAP                  = 0.0    # no gap between candidates
+GATLING_COST_BPS                = 30     # realistic Kraken fee estimate
 
-# ── Position sizing (full allocation, no Kelly shrinkage) ────────────────────
-GATLING_ALLOCATION              = 0.95   # near-full portfolio per trade
-GATLING_MAX_ALLOC               = 1.00   # allow 100% allocation
-GATLING_MIN_ALLOC               = 0.80   # Kelly cannot shrink below 80%
-GATLING_USE_KELLY               = False  # flat allocation — no Kelly
-GATLING_KELLY_FRAC              = 1.00   # if Kelly enabled, full-Kelly
+# ── Position sizing (survivable — 20% per trade) ────────────────────────────
+GATLING_ALLOCATION              = 0.20   # 20% per trade — survive 10+ losses
+GATLING_MAX_ALLOC               = 0.35   # never more than 35%
+GATLING_MIN_ALLOC               = 0.10   # at least 10% when Kelly active
+GATLING_USE_KELLY               = True   # Kelly sizes up on good edge
+GATLING_KELLY_FRAC              = 0.50   # half-Kelly for safety
 
-# ── Exit parameters (tight scalp targets for fast turnover) ──────────────────
-GATLING_TAKE_PROFIT             = 0.015  # +1.5% TP — fast scalp
-GATLING_STOP_LOSS               = 0.010  # -1.0% SL — tight stop
-GATLING_TIMEOUT_HOURS           = 2.0    # 2h max hold — force turnover
-GATLING_MIN_HOLD_MINUTES        = 0      # no minimum hold
-GATLING_EMERGENCY_SL            = 0.025  # 2.5% emergency stop
+# ── Exit parameters (trend-following: wide TP, trailing stop) ────────────────
+GATLING_TAKE_PROFIT             = 0.06   # +6% TP target
+GATLING_STOP_LOSS               = 0.025  # -2.5% SL — room to breathe
+GATLING_TIMEOUT_HOURS           = 36.0   # 36h hold — let trends develop
+GATLING_MIN_HOLD_MINUTES        = 30     # hold at least 30min (avoid noise chop)
+GATLING_EMERGENCY_SL            = 0.05   # 5% emergency stop
 
-# ── Cooldowns (near-zero for maximum re-entry speed) ─────────────────────────
-GATLING_COOLDOWN_MINS           = 0      # zero global cooldown
-GATLING_SL_COOLDOWN_MINS        = 0      # zero per-coin SL cooldown
-GATLING_PENALTY_COOLDOWN_LOSSES = 100    # effectively never triggers penalty
-GATLING_PENALTY_COOLDOWN_HOURS  = 0      # no penalty cooldown duration
-GATLING_MAX_DAILY_SL            = 50     # extremely high daily SL cap
-GATLING_MAX_DD_PCT              = 0.50   # 50% drawdown before circuit-breaker
+# ── Cooldowns (short but present — avoid re-entering failed trades) ──────────
+GATLING_COOLDOWN_MINS           = 5      # 5min global cooldown
+GATLING_SL_COOLDOWN_MINS        = 30     # 30min per-coin after SL
+GATLING_PENALTY_COOLDOWN_LOSSES = 5      # 5 consecutive SL → penalty
+GATLING_PENALTY_COOLDOWN_HOURS  = 6      # 6h penalty block
+GATLING_MAX_DAILY_SL            = 10     # 10 daily SL cap
+GATLING_MAX_DD_PCT              = 0.30   # 30% drawdown circuit-breaker
 
-# ── Decision frequency ───────────────────────────────────────────────────────
-GATLING_DECISION_INTERVAL_MIN   = 5      # every 5-min bar = decision point
+# ── Decision frequency (15-min — standard, proven to have some signal) ───────
+GATLING_DECISION_INTERVAL_MIN   = 15     # every 15-min bar
 
-# ── Runner mode OFF (instant TP exit, no trailing) ───────────────────────────
-GATLING_RUNNER_MODE             = False  # take profit immediately
-GATLING_TRAIL_AFTER_TP          = 0.0
-GATLING_TRAIL_PCT               = 0.0
+# ── Runner mode ON (trailing stop — let winners run) ─────────────────────────
+GATLING_RUNNER_MODE             = True   # trailing stop instead of instant TP
+GATLING_TRAIL_AFTER_TP          = 0.04   # arm trailing at +4%
+GATLING_TRAIL_PCT               = 0.025  # trail 2.5% from high-water mark
 
-# ── Anti-chop / loss-streak (extremely relaxed) ──────────────────────────────
-GATLING_LOSS_WINDOW_HOURS       = 24
-GATLING_LOSS_LIMIT              = 50     # near-impossible to trigger
-GATLING_LOSS_BLOCK_HOURS        = 0.0    # no block if triggered
-GATLING_PORTFOLIO_LOSS_STREAK   = 50     # near-impossible to trigger
-GATLING_PORTFOLIO_PAUSE_HOURS   = 0.0    # no pause if triggered
+# ── Anti-chop / loss-streak (active — protect from chop regimes) ─────────────
+GATLING_LOSS_WINDOW_HOURS       = 12     # 12h window for SL counting
+GATLING_LOSS_LIMIT              = 4      # 4 SLs in window → block
+GATLING_LOSS_BLOCK_HOURS        = 3.0    # 3h block
+GATLING_PORTFOLIO_LOSS_STREAK   = 6      # 6 consecutive losses → pause
+GATLING_PORTFOLIO_PAUSE_HOURS   = 2.0    # 2h pause
 
-# ── Confirmation gate (disabled — let ensemble alone decide) ─────────────────
-GATLING_CONFIRM_EV_MIN          = -1.0   # any EV passes
-GATLING_CONFIRM_PROBA_MIN       = 0.0    # any proba passes
-GATLING_CONFIRM_AGREE_MIN       = 0      # zero agreement needed
-GATLING_CONFIRM_RET4_MIN        = -1.0   # any momentum passes
+# ── Confirmation gate (disabled — handled by gatling_bypass in strategy.py) ──
+GATLING_CONFIRM_EV_MIN          = -1.0
+GATLING_CONFIRM_PROBA_MIN       = 0.0
+GATLING_CONFIRM_AGREE_MIN       = 0
+GATLING_CONFIRM_RET4_MIN        = -1.0
 GATLING_CONFIRM_RET16_MIN       = -1.0
-GATLING_CONFIRM_VOLR_MIN        = 0.0    # any volume passes
+GATLING_CONFIRM_VOLR_MIN        = 0.0
 
-# ── Label parameters (fast scalp labels for model training) ──────────────────
-GATLING_LABEL_TP                = 0.010  # +1.0% — achievable scalp TP
-GATLING_LABEL_SL                = 0.008  # -0.8% — tight SL for binary
-GATLING_LABEL_HORIZON_BARS      = 24     # 2h at 5-min bars
+# ── Label parameters (WIDE labels — teach models to find real trends) ────────
+GATLING_LABEL_TP                = 0.05   # +5% — real trend target
+GATLING_LABEL_SL                = 0.02   # -2% — meaningful reversal
+GATLING_LABEL_HORIZON_BARS      = 96     # 24h at 15-min bars
 
-# ── Profit-voting (ultra-loose — any model signal fires) ─────────────────────
-GATLING_PROFIT_VOTING_MODE      = True   # use vote-based ranking
-GATLING_VOTE_THRESHOLD          = 0.35   # very low threshold for "yes" vote
-GATLING_VOTE_YES_FRACTION_MIN   = 0.10   # 10% of models saying yes = go
-GATLING_TOP3_MEAN_MIN           = 0.30   # low top-3 mean required
-GATLING_VOTE_EV_FLOOR           = 0.0    # no EV floor in profit voting
+# ── Profit-voting (active with moderate thresholds) ──────────────────────────
+GATLING_PROFIT_VOTING_MODE      = True
+GATLING_VOTE_THRESHOLD          = 0.45   # moderate yes/no split
+GATLING_VOTE_YES_FRACTION_MIN   = 0.15   # at least 15% of models agree
+GATLING_TOP3_MEAN_MIN           = 0.35   # top-3 models mildly bullish
+GATLING_VOTE_EV_FLOOR           = 0.0    # no EV floor
 
-# ── Chop thresholds (also ultra-loose) ───────────────────────────────────────
-GATLING_CHOP_VOTE_YES_FRAC_MIN  = 0.15
-GATLING_CHOP_TOP3_MEAN_MIN      = 0.35
-GATLING_CHOP_PRED_RETURN_MIN    = -1.0   # never blocks
-GATLING_CHOP_EV_MIN             = -1.0   # never blocks
+# ── Chop thresholds (stricter — avoid chop regime trades) ────────────────────
+GATLING_CHOP_VOTE_YES_FRAC_MIN  = 0.25   # need more agreement in chop
+GATLING_CHOP_TOP3_MEAN_MIN      = 0.45   # need stronger signal in chop
+GATLING_CHOP_PRED_RETURN_MIN    = -0.005
+GATLING_CHOP_EV_MIN             = -0.002
 
-# ── Meta-filter (disabled for gatling) ───────────────────────────────────────
-GATLING_META_FILTER_ENABLED     = False  # no meta-filter veto
-GATLING_META_MIN_PROBA          = 0.0    # pass-through if somehow enabled
+# ── Meta-filter (enabled — light filtering) ──────────────────────────────────
+GATLING_META_FILTER_ENABLED     = True
+GATLING_META_MIN_PROBA          = 0.30   # very loose meta-filter
 
-# ── Market mode (disabled — trade in all regimes) ────────────────────────────
-GATLING_MARKET_MODE_ENABLED     = False
-GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop", "selloff", "high_vol_reversal"]
+# ── Market mode (ENABLED — only trade in favorable regimes) ──────────────────
+GATLING_MARKET_MODE_ENABLED     = True
+GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop",
+                                   "high_vol_reversal"]  # skip selloff only
 
-# ── Breakeven / momentum-fail (disabled for maximum activity) ────────────────
-GATLING_BREAKEVEN_AFTER         = 1.0    # effectively never triggers
-GATLING_BREAKEVEN_BUFFER        = 0.001
-GATLING_MOM_FAIL_ENABLED        = False  # no early momentum-fail exit
-GATLING_MOM_FAIL_MIN_HOLD       = 999
-GATLING_MOM_FAIL_LOSS           = -1.0
+# ── Breakeven (active — protect profitable trades) ───────────────────────────
+GATLING_BREAKEVEN_AFTER         = 0.03   # arm breakeven at +3%
+GATLING_BREAKEVEN_BUFFER        = 0.005  # stop at entry + 0.5%
+GATLING_MOM_FAIL_ENABLED        = True   # cut momentum failures early
+GATLING_MOM_FAIL_MIN_HOLD       = 60     # after 1h
+GATLING_MOM_FAIL_LOSS           = -0.015 # if down 1.5% with broken momentum
 
-# ── Timeout extension (disabled) ─────────────────────────────────────────────
-GATLING_TIMEOUT_MIN_PROFIT      = 1.0    # never extends
-GATLING_TIMEOUT_EXTEND_HOURS    = 0
-GATLING_MAX_TIMEOUT_HOURS       = 2.0    # hard cap matches timeout
+# ── Timeout extension (active — let winning trends run) ──────────────────────
+GATLING_TIMEOUT_MIN_PROFIT      = 0.02   # extend if +2% at timeout
+GATLING_TIMEOUT_EXTEND_HOURS    = 12     # extend 12h
+GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 
-# ── V2 model pool (disabled until wiring is validated on QC) ─────────────────
-GATLING_USE_ENSEMBLE_V2 = False  # TODO: enable after V2 models verified on QC
+# ── V2 model pool ────────────────────────────────────────────────────────────
+GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active models: promote ALL shadow models to active for maximum vote diversity
+# Active models: selective models only, degenerates quarantined
 GATLING_ACTIVE_MODELS = [
-    "rf", "et", "hgbc",                                        # base VotingClassifier
-    "et_shallow", "rf_shallow", "hgbc_l2", "cal_et", "cal_rf", # shadow lab
-    "lgbm_bal", "xgb_bal", "catboost_bal", "lgbm_dart",        # external boosters
+    "rf", "et", "hgbc",                         # base classifiers
+    "rf_shallow", "et_shallow", "cal_et",        # best from analysis (PF>0.75)
+    "hgbc_l2",                                   # keep but low weight
+    "lgbm_dart", "catboost_bal",                 # external boosters
 ]
 GATLING_VETO_MODELS = []
-GATLING_DIAGNOSTIC_MODELS = ["gnb", "lr", "lr_bal"]  # always-bull/bear quarantined
-GATLING_SHADOW_MODELS = []  # promote everything to active
+GATLING_DIAGNOSTIC_MODELS = [
+    "gnb", "lr", "lr_bal",       # always-bull/bear — quarantined
+    "lgbm_bal",                  # degenerate: 86% YES rate, PF=0.59
+    "xgb_bal",                   # loser: WR=33%, PF=0.55
+    "cal_rf",                    # loser: WR=32%, PF=0.48
+]
+GATLING_SHADOW_MODELS = []
 
-# ── Diag logging (frequent for analysis) ─────────────────────────────────────
-GATLING_DIAG_INTERVAL_HOURS     = 0.5   # log diagnostics every 30 min
-GATLING_SKIP_DIAG_INTERVAL_SECS = 1800  # routine skip diags every 30 min
+# ── Diag logging ─────────────────────────────────────────────────────────────
+GATLING_DIAG_INTERVAL_HOURS     = 1
+GATLING_SKIP_DIAG_INTERVAL_SECS = 3600
 
 # ── Model assessment tracking ────────────────────────────────────────────────
-GATLING_TRACK_MODEL_ACCURACY    = True  # enable per-model accuracy tracking
-GATLING_MIN_TRADES_FOR_ASSESS   = 10    # minimum trades before model assessment
+GATLING_TRACK_MODEL_ACCURACY    = True
+GATLING_MIN_TRADES_FOR_ASSESS   = 10
 
-# ── Vote logging (MUST be True for model assessment to work) ─────────────────
-GATLING_LOG_MODEL_VOTES         = True  # force per-model vote logging in trade log
+# ── Vote logging ─────────────────────────────────────────────────────────────
+GATLING_LOG_MODEL_VOTES         = True

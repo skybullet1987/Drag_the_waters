@@ -21,53 +21,35 @@ class TestGatlingConstants:
     def test_constants_importable(self):
         from gatling_config import (
             GATLING_SCORE_MIN, GATLING_MIN_EV, GATLING_PRED_RETURN_MIN,
-            GATLING_MAX_DISPERSION, GATLING_MIN_AGREE, GATLING_EV_GAP,
-            GATLING_COST_BPS, GATLING_ALLOCATION, GATLING_MAX_ALLOC,
+            GATLING_MAX_DISPERSION, GATLING_ALLOCATION, GATLING_MAX_ALLOC,
             GATLING_TAKE_PROFIT, GATLING_STOP_LOSS, GATLING_TIMEOUT_HOURS,
-            GATLING_COOLDOWN_MINS, GATLING_SL_COOLDOWN_MINS,
-            GATLING_DECISION_INTERVAL_MIN, GATLING_META_FILTER_ENABLED,
-            GATLING_MARKET_MODE_ENABLED, GATLING_ACTIVE_MODELS,
-            GATLING_TRACK_MODEL_ACCURACY,
+            GATLING_DECISION_INTERVAL_MIN, GATLING_ACTIVE_MODELS,
+            GATLING_RUNNER_MODE, GATLING_LABEL_TP, GATLING_LABEL_HORIZON_BARS,
         )
-        assert GATLING_SCORE_MIN <= 0.15
+        # V2: trend-following parameters
+        assert GATLING_SCORE_MIN <= 0.25
         assert GATLING_MIN_EV < 0
-        assert GATLING_PRED_RETURN_MIN < -0.005
-        assert GATLING_MAX_DISPERSION >= 0.50
-        assert GATLING_MIN_AGREE == 0
-        assert GATLING_EV_GAP == 0.0
-        assert GATLING_ALLOCATION >= 0.90
-        assert GATLING_MAX_ALLOC >= 0.95
-        assert GATLING_TAKE_PROFIT <= 0.020
-        assert GATLING_STOP_LOSS <= 0.015
-        assert GATLING_TIMEOUT_HOURS <= 3.0
-        assert GATLING_COOLDOWN_MINS == 0
-        assert GATLING_SL_COOLDOWN_MINS == 0
-        assert GATLING_DECISION_INTERVAL_MIN == 5
-        assert GATLING_META_FILTER_ENABLED is False
-        assert GATLING_MARKET_MODE_ENABLED is False
-        assert len(GATLING_ACTIVE_MODELS) >= 10
-        assert GATLING_TRACK_MODEL_ACCURACY is True
+        assert GATLING_ALLOCATION <= 0.30
+        assert GATLING_TAKE_PROFIT >= 0.04
+        assert GATLING_STOP_LOSS >= 0.02
+        assert GATLING_TIMEOUT_HOURS >= 24.0
+        assert GATLING_DECISION_INTERVAL_MIN == 15
+        assert GATLING_RUNNER_MODE is True
+        assert GATLING_LABEL_TP >= 0.04
+        assert GATLING_LABEL_HORIZON_BARS >= 72
+        assert len(GATLING_ACTIVE_MODELS) >= 6
 
-    def test_score_min_looser_than_all_profiles(self):
+    def test_score_min_looser_than_balanced(self):
         from gatling_config import GATLING_SCORE_MIN
-        from core import (
-            SCORE_MIN, RUTHLESS_SCORE_MIN, AGGRESSIVE_SCORE_MIN,
-            ACTIVE_RESEARCH_SCORE_MIN,
-        )
-        assert GATLING_SCORE_MIN <= RUTHLESS_SCORE_MIN
-        assert GATLING_SCORE_MIN <= AGGRESSIVE_SCORE_MIN
-        assert GATLING_SCORE_MIN <= ACTIVE_RESEARCH_SCORE_MIN
+        from core import SCORE_MIN
         assert GATLING_SCORE_MIN < SCORE_MIN
 
-    def test_cooldowns_all_zero_or_near_zero(self):
-        from gatling_config import (
-            GATLING_COOLDOWN_MINS, GATLING_SL_COOLDOWN_MINS,
-            GATLING_PENALTY_COOLDOWN_LOSSES, GATLING_PORTFOLIO_LOSS_STREAK,
-        )
-        assert GATLING_COOLDOWN_MINS == 0
-        assert GATLING_SL_COOLDOWN_MINS == 0
-        assert GATLING_PENALTY_COOLDOWN_LOSSES >= 50
-        assert GATLING_PORTFOLIO_LOSS_STREAK >= 50
+    def test_degenerate_models_quarantined(self):
+        from gatling_config import GATLING_DIAGNOSTIC_MODELS, GATLING_ACTIVE_MODELS
+        assert "lgbm_bal" in GATLING_DIAGNOSTIC_MODELS
+        assert "xgb_bal" in GATLING_DIAGNOSTIC_MODELS
+        assert "lgbm_bal" not in GATLING_ACTIVE_MODELS
+        assert "xgb_bal" not in GATLING_ACTIVE_MODELS
 
     def test_confirmation_gate_effectively_disabled(self):
         from gatling_config import (
@@ -83,8 +65,7 @@ class TestGatlingConstants:
         assert "rf" in GATLING_ACTIVE_MODELS
         assert "et" in GATLING_ACTIVE_MODELS
         assert "hgbc" in GATLING_ACTIVE_MODELS
-        assert "hgbc_l2" in GATLING_ACTIVE_MODELS
-        assert len(GATLING_ACTIVE_MODELS) >= 8
+        assert len(GATLING_ACTIVE_MODELS) >= 6
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -144,37 +125,34 @@ class MockAlgo:
 
 
 class TestGatlingProfile:
-    def test_profile_applies_ultra_loose_gates(self):
+    def test_profile_applies_trend_following_gates(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
         assert algo._risk_profile == "gatling"
-        assert algo._s_min <= 0.15
-        assert algo._min_ev < 0
-        assert algo._min_agr == 0
-        assert algo._max_disp >= 0.50
-        assert algo._cd_mins == 0
-        assert algo._sl_cd == 0
-        assert algo._max_sl >= 50
+        assert algo._s_min <= 0.25
+        assert algo._alloc <= 0.30
+        assert algo._tp >= 0.04
+        assert algo._sl >= 0.02
+        assert algo._toh >= 24.0
 
-    def test_meta_filter_disabled(self):
+    def test_meta_filter_enabled(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._meta_filter_enabled is False
+        assert algo._meta_filter_enabled is True
 
-    def test_market_mode_disabled(self):
+    def test_market_mode_enabled(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._market_mode_enabled is False
-        assert len(algo._ruthless_allowed_modes) == 5
+        assert algo._market_mode_enabled is True
 
-    def test_decision_interval_5min(self):
+    def test_decision_interval_15min(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._gatling_decision_interval == 5
+        assert algo._gatling_decision_interval == 15
 
     def test_profit_voting_enabled(self):
         from core import setup_risk_profile
@@ -197,17 +175,11 @@ class TestGatlingProfile:
         assert algo._momentum_override is True
         assert algo._use_momentum_score is True
 
-    def test_runner_mode_off(self):
+    def test_runner_mode_on(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._runner_mode is False
-
-    def test_no_ruthless_min_tp(self):
-        from core import setup_risk_profile
-        algo = MockAlgo("gatling")
-        setup_risk_profile(algo)
-        assert algo._ruthless_min_tp == 0.0
+        assert algo._runner_mode is True
 
     def test_startup_log_emitted(self):
         from core import setup_risk_profile
@@ -215,21 +187,21 @@ class TestGatlingProfile:
         setup_risk_profile(algo)
         assert any("[gatling]" in msg for msg in algo._logs)
 
-    def test_labels_fast_scalp(self):
+    def test_labels_trend_following(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._label_tp <= 0.015
-        assert algo._label_sl <= 0.010
-        assert algo._label_horizon <= 30
+        assert algo._label_tp >= 0.04
+        assert algo._label_sl >= 0.015
+        assert algo._label_horizon >= 72
 
-    def test_allocation_near_full(self):
+    def test_allocation_survivable(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._alloc >= 0.90
-        assert algo._max_alloc >= 0.95
-        assert algo._use_kelly is False
+        assert algo._alloc <= 0.30
+        assert algo._max_alloc <= 0.50
+        assert algo._use_kelly is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
