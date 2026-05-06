@@ -19,31 +19,24 @@ from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    # Tier 1 — mega cap
-    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
-    "XDGUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
-    # Tier 2 — large cap
-    "TRXUSD", "BCHUSD", "MATICUSD", "ATOMUSD", "UNIUSD",
-    "AAVEUSD", "ARBUSD", "OPUSD", "INJUSD", "NEARUSD",
-    # Tier 3 — mid cap, high volume
-    "FILUSD", "ICPUSD", "APTUSD", "IMXUSD", "GRTUSD",
-    "SEIUSD", "SUIUSD", "TIAUSD", "FETUSD", "TAOUSD",
-    "RENDERUSD", "JUPUSD", "FLRUSD", "MKRUSD", "SNXUSD",
-    "PEPEUSD", "SHIBUSD", "BONKUSD", "WIFUSD", "ONDOUSD",
-    # Tier 4 — mid cap diversifiers
-    "ENAUSD", "STXUSD", "MANTUSD", "PENDLEUSD", "KASUSD",
-    "RUNEUMSDUSD", "RUNEUSD", "HBARUSD", "ALGOUSD", "XTZUSD",
-    "FLOWUSD", "EGLDUSD", "MINAUSD", "CROUSD", "GALAUSD",
-    "AXSUSD", "SANDUSD", "MANAUSD", "ENJUSD", "CHZUSD",
-    # Tier 5 — DeFi + infra
-    "COMPUSD", "CRVUSD", "LDOUSD", "GMXUSD", "DYDXUSD",
-    "SUSHIUSD", "BALUSD", "YFIUSD", "RPLUSD", "ZRXUSD",
-    "GNOUSD", "KNCUSD", "LRCUSD", "BANDUSD",
-    # Tier 6 — newer/volatile
-    "WLDUSD", "BLURUSD", "STRKNUSD", "ARKMUSD",
-    "BNTUSD", "ETCUSD", "XMRUSD", "DASHUSD", "ZECUSD",
-    "SCUSD", "ICXUSD", "QTUMUSD", "KAVAUSD",
-    "BATUSD", "STORJUSD", "RLCUSD",
+    # Tier 1 — mega cap ($5M+ daily volume on Kraken)
+    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "XDGUSD",
+    "TAOUSD", "TONUSD", "SUIUSD", "ADAUSD", "LINKUSD",
+    "LTCUSD", "BCHUSD", "AVAXUSD",
+    # Tier 2 — large cap ($1M+ daily volume)
+    "NEARUSD", "FETUSD", "TRXUSD", "FILUSD", "HBARUSD",
+    "RENDERUSD", "ALGOUSD", "STXUSD", "DOTUSD", "ICPUSD",
+    "AAVEUSD", "ENAUSD", "KASUSD", "PENDLEUSD", "CRVUSD",
+    # Tier 3 — mid cap ($200K+ daily volume, liquid on Kraken)
+    "JUPUSD", "TIAUSD", "INJUSD", "EIGENUSD", "UNIUSD",
+    "LDOUSD", "ARBUSD", "GALAUSD", "BONKUSD", "PEPEUSD",
+    "SHIBUSD", "ONDOUSD", "WIFUSD", "APTUSD", "FLRUSD",
+    "ATOMUSD", "POLUSD", "GRTUSD", "OPUSD", "SEIUSD",
+    "STORJUSD", "SANDUSD", "ENJUSD", "WLDUSD", "STRKUSD",
+    "ARKMUSD",
+    # Tier 4 — diversifiers ($100K+ volume, broad coverage)
+    "MATICUSD", "ETCUSD", "XMRUSD", "BNBUSD", "AKTUSD",
+    "QNTUSD", "MORPHOUSD",
 ]
 
 
