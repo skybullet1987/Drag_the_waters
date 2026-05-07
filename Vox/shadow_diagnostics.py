@@ -478,6 +478,50 @@ def _make_knn_cal(logger=None):
         return None
 
 
+def _make_sgd_cal(logger=None):
+    """Calibrated SGD — stochastic linear, different optimization from Ridge."""
+    try:
+        from sklearn.linear_model import SGDClassifier
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(
+            SGDClassifier(loss="modified_huber", alpha=0.001,
+                          class_weight="balanced", max_iter=1000, random_state=42),
+            method="isotonic", cv=3,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] sgd_cal: {exc}")
+        return None
+
+
+def _make_qda_cal(logger=None):
+    """Calibrated QDA — quadratic decision boundaries, totally different from trees."""
+    try:
+        from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(
+            QuadraticDiscriminantAnalysis(reg_param=0.3),
+            method="sigmoid", cv=3,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] qda_cal: {exc}")
+        return None
+
+
+def _make_bag_dt2(logger=None):
+    """Bagged ultra-shallow trees — different from ExtraTrees/RF."""
+    try:
+        from sklearn.ensemble import BaggingClassifier
+        from sklearn.tree import DecisionTreeClassifier
+        return BaggingClassifier(
+            estimator=DecisionTreeClassifier(max_depth=2, class_weight="balanced"),
+            n_estimators=100, max_samples=0.8, max_features=0.8,
+            random_state=42, n_jobs=1,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] bag_dt2: {exc}")
+        return None
+
+
 def extend_shadow_estimators(existing, max_count=20, logger=None):
     """Extend shadow list: Tier-1 (gbc/ada/mlp/bal_rf/rusboost/ngboost) +
     Tier-2 (xgb_dart/flaml) + diagnostics (markov/hmm/kmeans/isoforest/hdbscan)."""
@@ -502,13 +546,17 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
     _try_add("rusboost",    _make_rusboost,        ROLE_SHADOW)
     _try_add("ngboost",     _make_ngboost,         ROLE_SHADOW)
     _try_add("xgb_dart",    _make_xgb_dart,       ROLE_SHADOW)
-    # ── NEW: non-tree diversity models ───────────────────────────────────
+    # ── Non-tree diversity models ────────────────────────────────────────
     _try_add("svc_cal",     _make_svc_cal,         ROLE_SHADOW)
     _try_add("ridge_cal",   _make_ridge_cal,       ROLE_SHADOW)
     _try_add("ebm",         _make_ebm,             ROLE_SHADOW)
     _try_add("catboost_d3", _make_catboost_shallow, ROLE_SHADOW)
     _try_add("lgbm_goss",   _make_lgbm_goss,      ROLE_SHADOW)
     _try_add("knn_cal",     _make_knn_cal,         ROLE_SHADOW)
+    # ── NEW: fast sklearn diversity models ────────────────────────────────
+    _try_add("sgd_cal",     _make_sgd_cal,         ROLE_SHADOW)
+    _try_add("qda_cal",     _make_qda_cal,         ROLE_SHADOW)
+    _try_add("bag_dt2",     _make_bag_dt2,         ROLE_SHADOW)
     if len(shadows) < max_count and HAS_FLAML:
         try: shadows.append(("flaml", FLAMLShadow(time_budget=20), ROLE_SHADOW))
         except Exception as exc:

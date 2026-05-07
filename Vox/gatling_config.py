@@ -124,6 +124,10 @@ GATLING_ACTIVE_MODELS = [
     "mlp",                  # neural net — insufficient data
     "ada",                  # AdaBoost — insufficient data
     "ngboost",              # probabilistic — insufficient data
+    # NEW: fast sklearn diversity
+    "sgd_cal",              # stochastic linear — different from Ridge
+    "qda_cal",              # quadratic discriminant — unique boundaries
+    "bag_dt2",              # bagged ultra-shallow trees (depth=2)
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -155,6 +159,9 @@ GATLING_MODEL_WEIGHTS = {
     "mlp": 0.75,
     "ada": 0.75,
     "ngboost": 0.75,
+    "sgd_cal": 0.75,
+    "qda_cal": 0.75,
+    "bag_dt2": 0.75,
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────
