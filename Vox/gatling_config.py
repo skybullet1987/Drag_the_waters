@@ -111,22 +111,19 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active: ONLY selective models (never-degenerate, <50% YES rate)
-# ALL gradient boosters removed — they ALL become 100% YES on crypto data
+# Active: 4 proven winners + 4 untested non-tree models
+# Based on 4 backtests: shallow trees + gbc are the ONLY consistently profitable
 GATLING_ACTIVE_MODELS = [
-    "gbc",                  # PF=1.16, 9% fire rate — ONLY PF>1 model
-    "rf_shallow",           # PF=1.47 (prior run), very selective
-    "et_shallow",           # PF=2.50 (prior run), very selective
-    "cal_et",               # PF=2.23 (prior run), selective
-    "rf",                   # selective (3% fire rate)
-    "et",                   # selective
-    "ridge_cal",            # linear — different from trees
-    "svc_cal",              # SVM — different geometry
-    "ebm",                  # GAM — different paradigm
-    "knn_cal",              # KNN — instance-based
-    "mlp",                  # neural net — different
-    "ada",                  # AdaBoost — weaker booster, less degenerate
-    "ngboost",              # probabilistic — uncertainty-aware
+    # PROVEN WINNERS (PF>1 across multiple backtests)
+    "cal_et",               # PF=inf/2.23, 75%/47% WR — BEST model
+    "gbc",                  # PF=1.29/1.16, 50% WR — most reliable
+    "et_shallow",           # PF=1.30/2.50, 44%/45% WR — consistent
+    "rf_shallow",           # PF=2.31/1.47, 50%/56% WR — selective
+    # UNTESTED NON-TREE (need more data, keep for diversity)
+    "svc_cal",              # SVM — insufficient data so far
+    "mlp",                  # neural net — insufficient data
+    "ada",                  # AdaBoost — insufficient data
+    "ngboost",              # probabilistic — insufficient data
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -135,30 +132,29 @@ GATLING_DIAGNOSTIC_MODELS = [
     "lgbm_bal", "lgbm_dart",      # LightGBM — always YES
     "catboost_bal", "catboost_d3", # CatBoost — always YES
     "xgb_bal", "lgbm_goss",       # XGBoost/GOSS — always YES
-    "bal_rf",                      # BalancedRF — always YES
+    "bal_rf", "xgb_dart",         # BalancedRF, XGB DART — always YES
     "gnb", "lr", "lr_bal",        # always-bull/bear
-    "cal_rf",                      # anti-signal
+    "cal_rf",                      # anti-signal WR=32%
+    # PROVEN LOSERS (overfitting deep trees + anti-signal non-tree):
+    "rf", "et",                    # depth=5 trees: PF=0.55/0.27, overfit
+    "ridge_cal",                   # 0% WR — complete anti-signal
+    "ebm",                         # 0% WR — anti-signal
+    "knn_cal",                     # didn't vote at all across 4 backtests
 ]
 GATLING_SHADOW_MODELS = []
 
 # ── Model weights (winning models weighted 2x) ──────────────────────────────
 GATLING_MODEL_WEIGHTS = {
-    # Proven selective models (high weight)
-    "gbc": 2.0,            # ONLY PF>1 model in latest run
-    "et_shallow": 2.0,     # PF=2.50 in prior run, very selective
-    "cal_et": 1.5,         # PF=2.23 in prior run
-    "rf_shallow": 1.5,     # PF=1.47 in prior run
-    # Selective tree models
-    "rf": 1.0,             # very selective (3% fire rate)
-    "et": 1.0,             # selective
-    "ada": 0.75,           # weaker booster, less degenerate
-    # Non-tree diversity
-    "ridge_cal": 1.0,      # linear
-    "svc_cal": 1.0,        # SVM
-    "ebm": 1.0,            # GAM
-    "knn_cal": 1.0,        # KNN
-    "mlp": 1.0,            # neural net
-    "ngboost": 1.0,        # probabilistic
+    # PROVEN WINNERS (high weight, consistent across 4 backtests)
+    "cal_et": 2.5,         # PF=inf/2.23 — best model
+    "gbc": 2.0,            # PF=1.29/1.16 — most reliable
+    "et_shallow": 2.0,     # PF=1.30/2.50 — consistent
+    "rf_shallow": 2.0,     # PF=2.31/1.47 — selective
+    # UNTESTED (moderate weight until proven)
+    "svc_cal": 0.75,
+    "mlp": 0.75,
+    "ada": 0.75,
+    "ngboost": 0.75,
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────

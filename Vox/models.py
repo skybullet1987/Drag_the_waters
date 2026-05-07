@@ -807,7 +807,10 @@ class VoxEnsemble:
           try:
             self._shadow_fitted = False
             n_ok = 0
+            _skip_roles = {"diagnostic", "disabled"}
             for name, est, _role in list(self._shadow_models):
+                if self._model_roles.get(name, _role) in _skip_roles:
+                    continue  # don't waste time training degenerate models
                 try:
                     if name == "iforest_veto":
                         est.fit(X)
@@ -926,7 +929,10 @@ class VoxEnsemble:
         # ── Shadow / diagnostic model probabilities ───────────────────────────
         shadow_probas = {}
         if self._shadow_fitted:
+            _skip_r = {"diagnostic", "disabled"}
             for name, est, role in self._shadow_models:
+                if self._model_roles.get(name, role) in _skip_r:
+                    continue
                 try:
                     if name == "iforest_veto":
                         sc = est.score_samples(X_arr)[0]
