@@ -506,6 +506,35 @@ def try_enter(algo):
     ev_top           = ev_data[top_sym]
     _top_confirm     = getattr(algo, "_ruthless_confirm_reasons", {}).get(top_sym, "n/a")
 
+    # ── Meta-labeling gate: block entries in bad conditions ─────────────
+    # Based on backtest analysis: entries during high-vol / low-momentum
+    # periods almost always hit SL. Block them.
+    if algo._risk_profile == "gatling":
+        _top_feat = next((f for s, f in candidates if s == top_sym), None)
+        if _top_feat is not None and len(_top_feat) >= 20:
+            _ret_4 = float(_top_feat[1])    # 4-bar return
+            _ret_16 = float(_top_feat[3])   # 16-bar return
+            _atr_n = float(_top_feat[5])    # ATR normalized
+            _vol_r = float(_top_feat[6])    # volume ratio
+            # Block entry if:
+            # 1. Both short and medium momentum are negative (downtrend)
+            # 2. AND volatility is elevated (SL will get hit fast)
+            if _ret_4 < -0.005 and _ret_16 < -0.01 and _atr_n > 0.02:
+                algo._throttled_skip_debug(
+                    f"[meta] Blocked {top_sym.value}: ret4={_ret_4:.4f} "
+                    f"ret16={_ret_16:.4f} atr={_atr_n:.4f} (downtrend+high vol)"
+                )
+                algo._last_gate_rejection = "meta_label:downtrend_highvol"
+                return
+            # 3. Block if volume is very low (no momentum behind the move)
+            if _vol_r < 0.5 and _ret_4 < 0:
+                algo._throttled_skip_debug(
+                    f"[meta] Blocked {top_sym.value}: vol_r={_vol_r:.2f} "
+                    f"ret4={_ret_4:.4f} (low volume + negative momentum)"
+                )
+                algo._last_gate_rejection = "meta_label:low_vol_neg_mom"
+                return
+
     # Gatling regime-adaptive sizing
     if getattr(algo, "_gatling_regime_sizing", False) and _market_mode:
         try:

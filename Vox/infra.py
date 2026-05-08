@@ -19,10 +19,10 @@ from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    # Top 15 Kraken USD pairs — fast training, no QC timeout
-    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
+    # Top coins — removed SUI (-13.6% loss) and XRP (-6% loss, 0 wins)
+    "BTCUSD", "ETHUSD", "SOLUSD", "ADAUSD",           # mega cap proven
     "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD", "NEARUSD",
-    "SUIUSD", "UNIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",
+    "UNIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",       # mixed results
 ]
 
 

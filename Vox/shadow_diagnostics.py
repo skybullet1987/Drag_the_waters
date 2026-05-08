@@ -523,33 +523,51 @@ def _make_bag_dt2(logger=None):
 
 
 class MarkovVolRegime:
-    """Markov-switching regime detector as a classifier.
+    """Markov-switching regime detector trained on returns.
 
-    Uses statsmodels MarkovRegression to detect 2 regimes (high/low vol).
-    Outputs P(low-vol regime) as the "probability" — higher = safer to trade.
-    Based on QC HandsOnAI book implementation.
+    Learns 2 regimes from training data. At prediction, outputs P(bullish regime)
+    based on the feature pattern matching the bullish regime's characteristics.
     """
     def __init__(self):
         self._fitted = False
+        self._bull_mean = 0.0
+        self._bear_mean = 0.0
+        self._bull_std = 1.0
+        self._bear_std = 1.0
 
     def fit(self, X, y):
+        """Learn regime characteristics from labeled training data."""
+        X_arr = np.atleast_2d(X)
+        y_arr = np.asarray(y)
+        if len(X_arr) < 20:
+            self._fitted = False
+            return self
+        ret_1 = X_arr[:, 0]   # 1-bar return
+        ret_4 = X_arr[:, 1]   # 4-bar return
+        combo = 0.5 * ret_1 + 0.5 * ret_4
+        bull_mask = y_arr == 1
+        if bull_mask.sum() > 3 and (~bull_mask).sum() > 3:
+            self._bull_mean = float(np.mean(combo[bull_mask]))
+            self._bear_mean = float(np.mean(combo[~bull_mask]))
+            self._bull_std = max(float(np.std(combo[bull_mask])), 1e-9)
+            self._bear_std = max(float(np.std(combo[~bull_mask])), 1e-9)
         self._fitted = True
         return self
 
     def predict_proba(self, X):
         n = len(np.atleast_2d(X))
-        try:
-            from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
-            ret_col = np.atleast_2d(X)[:, 0]  # use ret_1 (first feature)
-            if len(ret_col) < 10:
-                return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
-            model = MarkovRegression(ret_col, k_regimes=2, switching_variance=True)
-            res = model.fit(disp=False)
-            probs = res.smoothed_marginal_probabilities
-            low_vol_prob = float(probs.iloc[-1, 0])
-            return np.array([[1 - low_vol_prob, low_vol_prob]])
-        except Exception:
+        if not self._fitted:
             return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
+        X_arr = np.atleast_2d(X)
+        results = []
+        for i in range(n):
+            ret_1 = X_arr[i, 0]; ret_4 = X_arr[i, 1]
+            combo = 0.5 * ret_1 + 0.5 * ret_4
+            d_bull = abs(combo - self._bull_mean) / self._bull_std
+            d_bear = abs(combo - self._bear_mean) / self._bear_std
+            p_bull = 1.0 / (1.0 + np.exp(d_bull - d_bear))
+            results.append([1 - p_bull, p_bull])
+        return np.array(results)
 
 
 def _make_markov_vol(logger=None):
