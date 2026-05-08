@@ -300,10 +300,13 @@ def try_enter(algo):
                     pass
 
             # Size the order
+            pv = float(algo.portfolio.total_portfolio_value)
             qty, alloc = compute_qty(
-                algo=algo, sym=top_sym, price=price,
-                class_proba=_str,  # use momentum strength as proxy
-                tp_use=tp_use, sl_use=sl_use,
+                mean_proba=_str, tp=tp_use, sl=sl_use, price=price,
+                portfolio_value=pv, kelly_frac=algo._kf,
+                max_alloc=algo._max_alloc, cash_buffer=algo._cb,
+                use_kelly=algo._use_kelly, allocation=_alloc,
+                min_alloc=getattr(algo, "_min_alloc", 0.0),
             )
             if qty <= 0:
                 return
