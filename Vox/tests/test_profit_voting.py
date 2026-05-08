@@ -442,7 +442,7 @@ class TestShadowLab:
         assert "ada" in shadow_ids
 
     def test_extend_shadow_adds_regime_models(self):
-        shadows = extend_shadow_estimators([], max_count=16)
+        shadows = extend_shadow_estimators([], max_count=25)
         shadow_ids = [s[0] for s in shadows]
         assert "markov_regime" in shadow_ids
         assert "kmeans_regime" in shadow_ids

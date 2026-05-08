@@ -60,13 +60,14 @@ class TestGatlingConstants:
         assert GATLING_CONFIRM_PROBA_MIN <= 0.0
         assert GATLING_CONFIRM_AGREE_MIN == 0
 
-    def test_active_models_are_proven_4(self):
+    def test_active_models_include_proven_and_industry(self):
         from gatling_config import GATLING_ACTIVE_MODELS, GATLING_DIAGNOSTIC_MODELS
         assert "cal_et" in GATLING_ACTIVE_MODELS
         assert "gbc" in GATLING_ACTIVE_MODELS
-        assert "et_shallow" in GATLING_ACTIVE_MODELS
-        assert "rf_shallow" in GATLING_ACTIVE_MODELS
-        assert len(GATLING_ACTIVE_MODELS) == 4
+        assert "xgb_d2" in GATLING_ACTIVE_MODELS
+        assert "lgbm_d2" in GATLING_ACTIVE_MODELS
+        assert "logreg" in GATLING_ACTIVE_MODELS
+        assert len(GATLING_ACTIVE_MODELS) == 7
         assert "hgbc" in GATLING_DIAGNOSTIC_MODELS
 
 
@@ -162,13 +163,13 @@ class TestGatlingProfile:
         setup_risk_profile(algo)
         assert algo._ruthless_profit_voting_mode is True
 
-    def test_proven_4_models_active(self):
+    def test_7_models_active(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert len(algo._ruthless_active_models) == 4
+        assert len(algo._ruthless_active_models) == 7
         assert "cal_et" in algo._ruthless_active_models
-        assert "gbc" in algo._ruthless_active_models
+        assert "xgb_d2" in algo._ruthless_active_models
 
     def test_momentum_override_enabled(self):
         from core import setup_risk_profile

@@ -111,13 +111,17 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active: ONLY the 4 proven winners (PF>1 across 5 backtests)
-# The 7 untested models NEVER voted YES in 550 trades — zero contribution
+# Active: 4 proven winners + 3 industry-standard models (properly configured)
 GATLING_ACTIVE_MODELS = [
-    "cal_et",               # PF=inf/2.23, 55% WR — #1 model
-    "gbc",                  # PF=1.29/1.16, 50% WR — most reliable
-    "et_shallow",           # PF=1.30/2.50, 45% WR — consistent
-    "rf_shallow",           # PF=2.31/1.47, 53% WR — selective
+    # PROVEN (PF>1 across 5 backtests)
+    "cal_et",               # #1 model — calibrated shallow ExtraTrees
+    "gbc",                  # #2 — compact GradientBoosting
+    "et_shallow",           # #3 — ExtraTrees depth=3
+    "rf_shallow",           # #4 — RandomForest depth=3
+    # INDUSTRY-STANDARD (reconfigured for crypto — depth=2, heavy reg, no balanced)
+    "xgb_d2",               # XGBoost depth=2 — what top firms actually use
+    "lgbm_d2",              # LightGBM depth=2 — most common in crypto
+    "logreg",               # LogisticRegression — simplicity/generalization baseline
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -141,19 +145,10 @@ GATLING_SHADOW_MODELS = []
 
 # ── Model weights (winning models weighted 2x) ──────────────────────────────
 GATLING_MODEL_WEIGHTS = {
-    # PROVEN WINNERS (high weight, consistent across 4 backtests)
-    "cal_et": 2.5,         # PF=inf/2.23 — best model
-    "gbc": 2.0,            # PF=1.29/1.16 — most reliable
-    "et_shallow": 2.0,     # PF=1.30/2.50 — consistent
-    "rf_shallow": 2.0,     # PF=2.31/1.47 — selective
-    # UNTESTED (moderate weight until proven)
-    "svc_cal": 0.75,
-    "mlp": 0.75,
-    "ada": 0.75,
-    "ngboost": 0.75,
-    "sgd_cal": 0.75,
-    "qda_cal": 0.75,
-    "bag_dt2": 0.75,
+    # PROVEN WINNERS
+    "cal_et": 2.5, "gbc": 2.0, "et_shallow": 2.0, "rf_shallow": 2.0,
+    # INDUSTRY-STANDARD (start at 1.0, adjust after assessment)
+    "xgb_d2": 1.0, "lgbm_d2": 1.0, "logreg": 1.0,
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────

@@ -522,6 +522,58 @@ def _make_bag_dt2(logger=None):
         return None
 
 
+def _make_xgb_d2(logger=None):
+    """XGBoost depth=2 — how top crypto firms configure it.
+    Key: depth=2 (not 4), heavy reg, NO class_weight balanced, scale_pos_weight."""
+    try:
+        from xgboost import XGBClassifier
+        return XGBClassifier(
+            n_estimators=60, max_depth=2, learning_rate=0.03,
+            tree_method="hist", eval_metric="logloss",
+            reg_alpha=1.0, reg_lambda=5.0,  # heavy L1+L2 regularization
+            subsample=0.7, colsample_bytree=0.7,
+            min_child_weight=20,  # large = more regularized
+            scale_pos_weight=3.0,  # instead of class_weight="balanced"
+            random_state=42, n_jobs=1, use_label_encoder=False,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] xgb_d2: {exc}")
+        return None
+
+
+def _make_lgbm_d2(logger=None):
+    """LightGBM depth=2 — industry standard crypto config.
+    Key: depth=2, high lambda, NO balanced, scale_pos_weight."""
+    try:
+        from lightgbm import LGBMClassifier
+        return LGBMClassifier(
+            n_estimators=60, max_depth=2, learning_rate=0.03,
+            num_leaves=4,  # 2^depth = 4 leaves max
+            min_child_samples=30,  # very regularized
+            reg_alpha=1.0, reg_lambda=5.0,
+            subsample=0.7, colsample_bytree=0.7,
+            scale_pos_weight=3.0,
+            random_state=42, verbose=-1, n_jobs=1,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] lgbm_d2: {exc}")
+        return None
+
+
+def _make_logreg(logger=None):
+    """LogisticRegression — simplicity baseline, what firms use for generalization."""
+    try:
+        from sklearn.linear_model import LogisticRegression
+        return LogisticRegression(
+            C=0.1,  # strong regularization
+            max_iter=500, solver="saga", penalty="l1",  # L1 = feature selection
+            class_weight="balanced", random_state=42,
+        )
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] logreg: {exc}")
+        return None
+
+
 def extend_shadow_estimators(existing, max_count=20, logger=None):
     """Extend shadow list: Tier-1 (gbc/ada/mlp/bal_rf/rusboost/ngboost) +
     Tier-2 (xgb_dart/flaml) + diagnostics (markov/hmm/kmeans/isoforest/hdbscan)."""
@@ -553,10 +605,14 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
     _try_add("catboost_d3", _make_catboost_shallow, ROLE_SHADOW)
     _try_add("lgbm_goss",   _make_lgbm_goss,      ROLE_SHADOW)
     _try_add("knn_cal",     _make_knn_cal,         ROLE_SHADOW)
-    # ── NEW: fast sklearn diversity models ────────────────────────────────
+    # ── Fast sklearn diversity models ─────────────────────────────────────
     _try_add("sgd_cal",     _make_sgd_cal,         ROLE_SHADOW)
     _try_add("qda_cal",     _make_qda_cal,         ROLE_SHADOW)
     _try_add("bag_dt2",     _make_bag_dt2,         ROLE_SHADOW)
+    # ── Industry-standard (properly configured for crypto) ────────────────
+    _try_add("xgb_d2",      _make_xgb_d2,         ROLE_SHADOW)
+    _try_add("lgbm_d2",     _make_lgbm_d2,        ROLE_SHADOW)
+    _try_add("logreg",      _make_logreg,          ROLE_SHADOW)
     if len(shadows) < max_count and HAS_FLAML:
         try: shadows.append(("flaml", FLAMLShadow(time_budget=20), ROLE_SHADOW))
         except Exception as exc:
