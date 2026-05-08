@@ -591,6 +591,11 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
         except Exception as exc:
             if logger: logger(f"[shadow_lab] {mid}: {exc}")
 
+    # ── Industry-standard (FIRST — these must be created before cap) ─────
+    _try_add("xgb_d2",      _make_xgb_d2,         ROLE_SHADOW)
+    _try_add("lgbm_d2",     _make_lgbm_d2,        ROLE_SHADOW)
+    _try_add("logreg",      _make_logreg,          ROLE_SHADOW)
+    # ── Shadow lab models ─────────────────────────────────────────────────
     _try_add("gbc",         _make_gbc,             ROLE_SHADOW)
     _try_add("ada",         _make_ada,             ROLE_SHADOW)
     _try_add("mlp",         _make_mlp,             ROLE_SHADOW)
@@ -598,21 +603,15 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
     _try_add("rusboost",    _make_rusboost,        ROLE_SHADOW)
     _try_add("ngboost",     _make_ngboost,         ROLE_SHADOW)
     _try_add("xgb_dart",    _make_xgb_dart,       ROLE_SHADOW)
-    # ── Non-tree diversity models ────────────────────────────────────────
     _try_add("svc_cal",     _make_svc_cal,         ROLE_SHADOW)
     _try_add("ridge_cal",   _make_ridge_cal,       ROLE_SHADOW)
     _try_add("ebm",         _make_ebm,             ROLE_SHADOW)
     _try_add("catboost_d3", _make_catboost_shallow, ROLE_SHADOW)
     _try_add("lgbm_goss",   _make_lgbm_goss,      ROLE_SHADOW)
     _try_add("knn_cal",     _make_knn_cal,         ROLE_SHADOW)
-    # ── Fast sklearn diversity models ─────────────────────────────────────
     _try_add("sgd_cal",     _make_sgd_cal,         ROLE_SHADOW)
     _try_add("qda_cal",     _make_qda_cal,         ROLE_SHADOW)
     _try_add("bag_dt2",     _make_bag_dt2,         ROLE_SHADOW)
-    # ── Industry-standard (properly configured for crypto) ────────────────
-    _try_add("xgb_d2",      _make_xgb_d2,         ROLE_SHADOW)
-    _try_add("lgbm_d2",     _make_lgbm_d2,        ROLE_SHADOW)
-    _try_add("logreg",      _make_logreg,          ROLE_SHADOW)
     if len(shadows) < max_count and HAS_FLAML:
         try: shadows.append(("flaml", FLAMLShadow(time_budget=20), ROLE_SHADOW))
         except Exception as exc:

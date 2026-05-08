@@ -111,17 +111,17 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active: 4 proven winners + 3 industry-standard models (properly configured)
+# Active: 4 proven shallow trees + 3 industry-standard (properly configured)
 GATLING_ACTIVE_MODELS = [
-    # PROVEN (PF>1 across 5 backtests)
-    "cal_et",               # #1 model — calibrated shallow ExtraTrees
-    "gbc",                  # #2 — compact GradientBoosting
-    "et_shallow",           # #3 — ExtraTrees depth=3
-    "rf_shallow",           # #4 — RandomForest depth=3
-    # INDUSTRY-STANDARD (reconfigured for crypto — depth=2, heavy reg, no balanced)
-    "xgb_d2",               # XGBoost depth=2 — what top firms actually use
-    "lgbm_d2",              # LightGBM depth=2 — most common in crypto
-    "logreg",               # LogisticRegression — simplicity/generalization baseline
+    # PROVEN shallow trees
+    "cal_et",               # calibrated ExtraTrees — inconsistent but sometimes brilliant
+    "gbc",                  # compact GradientBoosting — most consistent
+    "et_shallow",           # ExtraTrees depth=3
+    "rf_shallow",           # RandomForest depth=3
+    # INDUSTRY-STANDARD (depth=2, heavy reg — what top crypto firms use)
+    "xgb_d2",               # XGBoost depth=2
+    "lgbm_d2",              # LightGBM depth=2
+    "logreg",               # LogReg L1 — generalization baseline
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
