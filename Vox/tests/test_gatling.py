@@ -145,11 +145,11 @@ class TestGatlingProfile:
         setup_risk_profile(algo)
         assert algo._meta_filter_enabled is False
 
-    def test_market_mode_disabled(self):
+    def test_market_mode_enabled_for_sizing(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._market_mode_enabled is False
+        assert algo._market_mode_enabled is True
 
     def test_decision_interval_15min(self):
         from core import setup_risk_profile

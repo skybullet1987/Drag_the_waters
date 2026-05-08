@@ -92,9 +92,9 @@ GATLING_META_FILTER_ENABLED     = False  # disabled — was blocking too many tr
 GATLING_META_MIN_PROBA          = 0.0
 
 # ── Market mode (ENABLED — only trade in favorable regimes) ──────────────────
-GATLING_MARKET_MODE_ENABLED     = False  # disabled — was blocking too many trades
+GATLING_MARKET_MODE_ENABLED     = True   # enabled for SIZING only (not as gate)
 GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop",
-                                   "high_vol_reversal", "selloff"]
+                                   "high_vol_reversal", "selloff"]  # all allowed
 
 # ── Breakeven (active — protect profitable trades) ───────────────────────────
 GATLING_BREAKEVEN_AFTER         = 0.05   # arm breakeven at +5%

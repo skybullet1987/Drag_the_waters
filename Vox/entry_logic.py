@@ -544,6 +544,16 @@ def try_enter(algo):
         except Exception:
             pass
 
+    # Per-coin sizing: reduce allocation for coins with bad track record
+    _sym_outcomes = getattr(algo, "_sym_outcomes", {})
+    if top_sym in _sym_outcomes and len(_sym_outcomes[top_sym]) >= 3:
+        _recent = list(_sym_outcomes[top_sym])[-5:]
+        _coin_wr = sum(1 for r in _recent if r > 0) / len(_recent)
+        if _coin_wr == 0.0:
+            algo._alloc = algo._alloc * 0.3  # 70% reduction for 0% WR coins
+        elif _coin_wr < 0.25:
+            algo._alloc = algo._alloc * 0.5  # 50% reduction
+
     # Kelly / flat sizing (uses class_proba and ATR TP/SL for Kelly edge)
     qty, alloc = compute_qty(
         mean_proba      = class_proba_top,
