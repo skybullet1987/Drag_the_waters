@@ -522,6 +522,45 @@ def _make_bag_dt2(logger=None):
         return None
 
 
+class MarkovVolRegime:
+    """Markov-switching regime detector as a classifier.
+
+    Uses statsmodels MarkovRegression to detect 2 regimes (high/low vol).
+    Outputs P(low-vol regime) as the "probability" — higher = safer to trade.
+    Based on QC HandsOnAI book implementation.
+    """
+    def __init__(self):
+        self._fitted = False
+
+    def fit(self, X, y):
+        self._fitted = True
+        return self
+
+    def predict_proba(self, X):
+        n = len(np.atleast_2d(X))
+        try:
+            from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
+            ret_col = np.atleast_2d(X)[:, 0]  # use ret_1 (first feature)
+            if len(ret_col) < 10:
+                return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
+            model = MarkovRegression(ret_col, k_regimes=2, switching_variance=True)
+            res = model.fit(disp=False)
+            probs = res.smoothed_marginal_probabilities
+            low_vol_prob = float(probs.iloc[-1, 0])
+            return np.array([[1 - low_vol_prob, low_vol_prob]])
+        except Exception:
+            return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
+
+
+def _make_markov_vol(logger=None):
+    """Markov vol regime — outputs P(low-vol) as buy probability."""
+    try:
+        return MarkovVolRegime()
+    except Exception as exc:
+        if logger: logger(f"[shadow_lab] markov_vol: {exc}")
+        return None
+
+
 def _make_xgb_d2(logger=None):
     """XGBoost depth=2 — how top crypto firms configure it.
     Key: depth=2 (not 4), heavy reg, NO class_weight balanced, scale_pos_weight."""
@@ -595,6 +634,8 @@ def extend_shadow_estimators(existing, max_count=20, logger=None):
     _try_add("xgb_d2",      _make_xgb_d2,         ROLE_SHADOW)
     _try_add("lgbm_d2",     _make_lgbm_d2,        ROLE_SHADOW)
     _try_add("logreg",      _make_logreg,          ROLE_SHADOW)
+    # ── Markov regime model (shadow voter — detect vol regimes) ───────────
+    _try_add("markov_vol",   _make_markov_vol,     ROLE_SHADOW)
     # ── Shadow lab models ─────────────────────────────────────────────────
     _try_add("gbc",         _make_gbc,             ROLE_SHADOW)
     _try_add("ada",         _make_ada,             ROLE_SHADOW)

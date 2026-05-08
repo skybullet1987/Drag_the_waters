@@ -198,13 +198,12 @@ class TestGatlingProfile:
         assert algo._label_sl >= 0.015
         assert algo._label_horizon >= 72
 
-    def test_allocation_aggressive(self):
+    def test_allocation_kelly(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._alloc >= 0.50
-        assert algo._max_alloc >= 0.80
-        assert algo._use_kelly is False
+        assert algo._alloc >= 0.40
+        assert algo._use_kelly is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -391,8 +390,8 @@ class TestGatlingEnsembleEndToEnd:
         from gatling_config import GATLING_LABEL_TP, GATLING_LABEL_SL, GATLING_LABEL_HORIZON_BARS
 
         np.random.seed(99)
-        n = 300
-        prices = 100 * np.cumprod(1 + np.random.randn(n) * 0.003)
+        n = 600
+        prices = 100 * np.cumprod(1 + np.random.randn(n) * 0.01)  # 1% vol for wider labels
         volumes = np.random.uniform(1000, 5000, n)
 
         X_list = []

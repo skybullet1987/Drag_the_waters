@@ -24,19 +24,19 @@ GATLING_MIN_AGREE               = 0      # zero agreement gate (let voting decid
 GATLING_EV_GAP                  = 0.0    # no gap between candidates
 GATLING_COST_BPS                = 30     # realistic Kraken fee estimate
 
-# ── Position sizing (survivable — 20% per trade) ────────────────────────────
-GATLING_ALLOCATION              = 0.80   # 80% per trade — aggressive test
-GATLING_MAX_ALLOC               = 0.90   # max 90%
-GATLING_MIN_ALLOC               = 0.50   # at least 50%
-GATLING_USE_KELLY               = False  # flat 80% per trade
+# ── Position sizing (Kelly-adaptive — GBC-focused) ──────────────────────────
+GATLING_ALLOCATION              = 0.50   # 50% base — survive losing streaks
+GATLING_MAX_ALLOC               = 0.70   # cap at 70%
+GATLING_MIN_ALLOC               = 0.25   # at least 25%
+GATLING_USE_KELLY               = True   # Kelly sizes up when GBC is confident
 GATLING_KELLY_FRAC              = 1.00   # full-Kelly (unused when Kelly off)
 
 # ── Exit parameters (trend-following: wide TP, trailing stop) ────────────────
-GATLING_TAKE_PROFIT             = 0.08   # +8% TP — bigger trend target
-GATLING_STOP_LOSS               = 0.04   # -4% SL — crypto needs room (was 2.5%)
-GATLING_TIMEOUT_HOURS           = 48.0   # 48h hold — let trends develop
-GATLING_MIN_HOLD_MINUTES        = 60     # hold 1h minimum (avoid instant SL)
-GATLING_EMERGENCY_SL            = 0.05   # 5% emergency stop
+GATLING_TAKE_PROFIT             = 0.10   # +10% TP — big trend target
+GATLING_STOP_LOSS               = 0.05   # -5% SL — crypto swings 3-4% normally
+GATLING_TIMEOUT_HOURS           = 72.0   # 72h hold — give trends 3 days
+GATLING_MIN_HOLD_MINUTES        = 120    # hold 2h minimum (avoid noise exits)
+GATLING_EMERGENCY_SL            = 0.08   # 8% emergency stop
 
 # ── Cooldowns (short but present — avoid re-entering failed trades) ──────────
 GATLING_COOLDOWN_MINS           = 5      # 5min global cooldown
@@ -51,8 +51,8 @@ GATLING_DECISION_INTERVAL_MIN   = 15     # every 15-min bar
 
 # ── Runner mode ON (trailing stop — let winners run) ─────────────────────────
 GATLING_RUNNER_MODE             = True   # trailing stop instead of instant TP
-GATLING_TRAIL_AFTER_TP          = 0.05   # arm trailing at +5%
-GATLING_TRAIL_PCT               = 0.03   # trail 3% from high-water mark
+GATLING_TRAIL_AFTER_TP          = 0.06   # arm trailing at +6%
+GATLING_TRAIL_PCT               = 0.035  # trail 3.5% from high-water mark
 
 # ── Anti-chop / loss-streak (active — protect from chop regimes) ─────────────
 GATLING_LOSS_WINDOW_HOURS       = 12     # 12h window for SL counting
@@ -70,9 +70,9 @@ GATLING_CONFIRM_RET16_MIN       = -1.0
 GATLING_CONFIRM_VOLR_MIN        = 0.0
 
 # ── Label parameters (WIDE labels — teach models to find real trends) ────────
-GATLING_LABEL_TP                = 0.05   # +5% — real trend target
-GATLING_LABEL_SL                = 0.02   # -2% — meaningful reversal
-GATLING_LABEL_HORIZON_BARS      = 96     # 24h at 15-min bars
+GATLING_LABEL_TP                = 0.08   # +8% — aligned with execution TP
+GATLING_LABEL_SL                = 0.04   # -4% — aligned with execution SL
+GATLING_LABEL_HORIZON_BARS      = 192    # 48h at 15-min bars (3-day trends)
 
 # ── Profit-voting (active with moderate thresholds) ──────────────────────────
 GATLING_PROFIT_VOTING_MODE      = True
@@ -97,7 +97,7 @@ GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop",
                                    "high_vol_reversal", "selloff"]
 
 # ── Breakeven (active — protect profitable trades) ───────────────────────────
-GATLING_BREAKEVEN_AFTER         = 0.04   # arm breakeven at +4%
+GATLING_BREAKEVEN_AFTER         = 0.05   # arm breakeven at +5%
 GATLING_BREAKEVEN_BUFFER        = 0.005  # stop at entry + 0.5%
 GATLING_MOM_FAIL_ENABLED        = False  # disabled — was causing premature exits
 GATLING_MOM_FAIL_MIN_HOLD       = 999
@@ -111,17 +111,16 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active: 4 proven shallow trees + 3 industry-standard (properly configured)
+# GBC-FOCUSED: gbc is the ONLY consistently profitable model across 7 backtests
+# Other models as confirmers/shadow for data collection
 GATLING_ACTIVE_MODELS = [
-    # PROVEN shallow trees
-    "cal_et",               # calibrated ExtraTrees — inconsistent but sometimes brilliant
-    "gbc",                  # compact GradientBoosting — most consistent
-    "et_shallow",           # ExtraTrees depth=3
-    "rf_shallow",           # RandomForest depth=3
-    # INDUSTRY-STANDARD (depth=2, heavy reg — what top crypto firms use)
-    "xgb_d2",               # XGBoost depth=2
-    "lgbm_d2",              # LightGBM depth=2
-    "logreg",               # LogReg L1 — generalization baseline
+    "gbc",                  # ★ CORE: PF>1 in 3/4 backtests, 78% WR in latest
+    "cal_et",               # confirmer — sometimes brilliant
+    "et_shallow",           # confirmer — shallow tree
+    "xgb_d2",               # industry standard depth=2
+    "lgbm_d2",              # industry standard depth=2
+    "logreg",               # generalization baseline
+    "markov_vol",           # regime detector — P(low-vol) = safer to trade
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -138,17 +137,22 @@ GATLING_DIAGNOSTIC_MODELS = [
     "ridge_cal",                   # 0% WR — complete anti-signal
     "ebm",                         # 0% WR — anti-signal
     "knn_cal",                     # didn't vote at all across 4 backtests
-    # UNTESTED — never voted YES in 550 trades, skip training to save time
+    "rf_shallow",                  # collapsed to PF=0.04 in latest run
+    # UNTESTED — never voted YES or insufficient data
     "svc_cal", "mlp", "ada", "ngboost", "sgd_cal", "qda_cal", "bag_dt2",
 ]
 GATLING_SHADOW_MODELS = []
 
 # ── Model weights (winning models weighted 2x) ──────────────────────────────
 GATLING_MODEL_WEIGHTS = {
-    # PROVEN WINNERS
-    "cal_et": 2.5, "gbc": 2.0, "et_shallow": 2.0, "rf_shallow": 2.0,
-    # INDUSTRY-STANDARD (start at 1.0, adjust after assessment)
-    "xgb_d2": 1.0, "lgbm_d2": 1.0, "logreg": 1.0,
+    # GBC is king — 3x weight (most consistent across all backtests)
+    "gbc": 3.0,
+    # Confirmers
+    "cal_et": 1.5, "et_shallow": 1.0,
+    # Industry standard
+    "xgb_d2": 1.0, "lgbm_d2": 1.0, "logreg": 0.75,
+    # Regime
+    "markov_vol": 1.0,
 }
 
 # ── Regime-adaptive allocation ───────────────────────────────────────────────
