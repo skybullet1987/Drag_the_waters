@@ -158,7 +158,8 @@ class VoxAlgorithm(QCAlgorithm):
         )
 
         self._ensemble    = VoxEnsemble(logger=self.log, use_calibration=self._use_calibration)
-        self._persistence = PersistenceManager(self)
+        _flush = 1 if getattr(self, "_risk_profile", "") == "gatling" else 50
+        self._persistence = PersistenceManager(self, flush_every=_flush)
         self._fill_tracker= PartialFillTracker()
         self._model_ready = False
 

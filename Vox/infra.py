@@ -19,12 +19,10 @@ from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    # Top 25 Kraken USD pairs by 24h volume — keeps training fast
-    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "XDGUSD",
-    "ADAUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
-    "TRXUSD", "BCHUSD", "NEARUSD", "SUIUSD", "INJUSD",
-    "ATOMUSD", "UNIUSD", "AAVEUSD", "ARBUSD", "OPUSD",
-    "FETUSD", "RENDERUSD", "ONDOUSD", "TIAUSD", "PEPEUSD",
+    # Top 15 Kraken USD pairs — fast training, no QC timeout
+    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
+    "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD", "NEARUSD",
+    "SUIUSD", "UNIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",
 ]
 
 

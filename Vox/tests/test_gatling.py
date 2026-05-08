@@ -137,17 +137,17 @@ class TestGatlingProfile:
         assert algo._sl >= 0.02
         assert algo._toh >= 24.0
 
-    def test_meta_filter_enabled(self):
+    def test_meta_filter_disabled(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._meta_filter_enabled is True
+        assert algo._meta_filter_enabled is False
 
-    def test_market_mode_enabled(self):
+    def test_market_mode_disabled(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._market_mode_enabled is True
+        assert algo._market_mode_enabled is False
 
     def test_decision_interval_15min(self):
         from core import setup_risk_profile

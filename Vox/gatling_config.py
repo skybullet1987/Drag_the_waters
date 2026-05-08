@@ -16,8 +16,8 @@
 # Activate via:  risk_profile=gatling  (QC parameter panel)
 
 # ── Entry gates (loose but not zero — require SOME signal) ───────────────────
-GATLING_SCORE_MIN               = 0.18   # require minimal classifier signal
-GATLING_MIN_EV                  = -0.002 # allow slightly negative EV
+GATLING_SCORE_MIN               = 0.12   # very low — let models decide (was 0.18)
+GATLING_MIN_EV                  = -0.005 # allow negative EV (was -0.002)
 GATLING_PRED_RETURN_MIN         = -0.005 # loose regression veto
 GATLING_MAX_DISPERSION          = 0.40   # some model agreement needed
 GATLING_MIN_AGREE               = 0      # zero agreement gate (let voting decide)
@@ -32,10 +32,10 @@ GATLING_USE_KELLY               = False  # flat 80% per trade
 GATLING_KELLY_FRAC              = 1.00   # full-Kelly (unused when Kelly off)
 
 # ── Exit parameters (trend-following: wide TP, trailing stop) ────────────────
-GATLING_TAKE_PROFIT             = 0.06   # +6% TP target
-GATLING_STOP_LOSS               = 0.025  # -2.5% SL — room to breathe
-GATLING_TIMEOUT_HOURS           = 36.0   # 36h hold — let trends develop
-GATLING_MIN_HOLD_MINUTES        = 30     # hold at least 30min (avoid noise chop)
+GATLING_TAKE_PROFIT             = 0.08   # +8% TP — bigger trend target
+GATLING_STOP_LOSS               = 0.04   # -4% SL — crypto needs room (was 2.5%)
+GATLING_TIMEOUT_HOURS           = 48.0   # 48h hold — let trends develop
+GATLING_MIN_HOLD_MINUTES        = 60     # hold 1h minimum (avoid instant SL)
 GATLING_EMERGENCY_SL            = 0.05   # 5% emergency stop
 
 # ── Cooldowns (short but present — avoid re-entering failed trades) ──────────
@@ -51,8 +51,8 @@ GATLING_DECISION_INTERVAL_MIN   = 15     # every 15-min bar
 
 # ── Runner mode ON (trailing stop — let winners run) ─────────────────────────
 GATLING_RUNNER_MODE             = True   # trailing stop instead of instant TP
-GATLING_TRAIL_AFTER_TP          = 0.04   # arm trailing at +4%
-GATLING_TRAIL_PCT               = 0.025  # trail 2.5% from high-water mark
+GATLING_TRAIL_AFTER_TP          = 0.05   # arm trailing at +5%
+GATLING_TRAIL_PCT               = 0.03   # trail 3% from high-water mark
 
 # ── Anti-chop / loss-streak (active — protect from chop regimes) ─────────────
 GATLING_LOSS_WINDOW_HOURS       = 12     # 12h window for SL counting
@@ -88,20 +88,20 @@ GATLING_CHOP_PRED_RETURN_MIN    = -0.005
 GATLING_CHOP_EV_MIN             = -0.002
 
 # ── Meta-filter (enabled — light filtering) ──────────────────────────────────
-GATLING_META_FILTER_ENABLED     = True
-GATLING_META_MIN_PROBA          = 0.30   # very loose meta-filter
+GATLING_META_FILTER_ENABLED     = False  # disabled — was blocking too many trades
+GATLING_META_MIN_PROBA          = 0.0
 
 # ── Market mode (ENABLED — only trade in favorable regimes) ──────────────────
-GATLING_MARKET_MODE_ENABLED     = True
+GATLING_MARKET_MODE_ENABLED     = False  # disabled — was blocking too many trades
 GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop",
-                                   "high_vol_reversal"]  # skip selloff only
+                                   "high_vol_reversal", "selloff"]
 
 # ── Breakeven (active — protect profitable trades) ───────────────────────────
-GATLING_BREAKEVEN_AFTER         = 0.03   # arm breakeven at +3%
+GATLING_BREAKEVEN_AFTER         = 0.04   # arm breakeven at +4%
 GATLING_BREAKEVEN_BUFFER        = 0.005  # stop at entry + 0.5%
-GATLING_MOM_FAIL_ENABLED        = True   # cut momentum failures early
-GATLING_MOM_FAIL_MIN_HOLD       = 60     # after 1h
-GATLING_MOM_FAIL_LOSS           = -0.015 # if down 1.5% with broken momentum
+GATLING_MOM_FAIL_ENABLED        = False  # disabled — was causing premature exits
+GATLING_MOM_FAIL_MIN_HOLD       = 999
+GATLING_MOM_FAIL_LOSS           = -1.0
 
 # ── Timeout extension (active — let winning trends run) ──────────────────────
 GATLING_TIMEOUT_MIN_PROFIT      = 0.02   # extend if +2% at timeout
