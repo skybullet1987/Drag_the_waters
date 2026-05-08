@@ -23,6 +23,7 @@ from journals import (
 )
 from audit_utils import audit_safe_float, audit_trim_votes
 from core import compute_momentum_score
+from momentum_entry import momentum_entry_decision
 
 
 def check_exit(algo, price):
@@ -233,13 +234,124 @@ def try_enter(algo):
         candidates.append((sym, feat))
 
     if not candidates:
-        # Only log occasionally to avoid spamming the 100KB log cap
         if algo.time.minute == 0 and algo.time.hour % 6 == 0:
-            algo.log(
-                f"[diag] no_features symbols={len(algo._symbols)} "
-                f"(build_features returned None for all)"
-            )
+            algo.log(f"[diag] no_features symbols={len(algo._symbols)}")
         return
+
+    # ══ GATLING MOMENTUM-FIRST ENTRY PATH ═════════════════════════════════
+    # Instead of ML predicting "buy?", detect momentum already happening
+    # and use trailing stop to capture it. ML only confirms/filters.
+    if algo._risk_profile == "gatling":
+        _fc_cache = getattr(algo, "_forecast_cache", {})
+        _btc_ret4 = 0.0
+        if len(btc_closes) >= 5:
+            _btc_ret4 = (btc_closes[-1] - btc_closes[-5]) / btc_closes[-5]
+
+        momentum_scores = {}
+        for sym, feat in candidates:
+            st = algo._state[sym]
+            closes = list(st["closes"])
+            volumes = list(st["volumes"])
+            highs = list(st.get("highs", closes))
+
+            _fc = _fc_cache.get(sym, (0.0, 0.0))
+            decision = momentum_entry_decision(
+                closes=closes, volumes=volumes, highs=highs,
+                chronos_forecast=_fc[0], wavelet_forecast=_fc[1],
+                btc_ret_4=_btc_ret4,
+                breakout_lookback=20, vol_mult=1.3, min_strength=0.2,
+                require_chronos_confirm=False,
+            )
+            if decision["enter"]:
+                momentum_scores[sym] = (decision["strength"], decision["reason"], feat)
+
+        if momentum_scores:
+            # Pick strongest momentum signal
+            top_sym = max(momentum_scores, key=lambda s: momentum_scores[s][0])
+            _str, _reason, _feat = momentum_scores[top_sym]
+            price = float(algo.securities[top_sym].price)
+            if price <= 0:
+                return
+
+            st = algo._state[top_sym]
+            atr = compute_atr(
+                highs=list(st["highs"]), lows=list(st["lows"]),
+                closes=list(st["closes"]),
+            )
+            tp_use = max(algo._tp, atr * algo._atr_tp if atr > 0 else algo._tp)
+            sl_use = max(algo._sl, atr * algo._atr_sl if atr > 0 else algo._sl)
+
+            # Per-coin sizing: reduce for coins with bad track record
+            _alloc = algo._alloc
+            _sym_outcomes = getattr(algo, "_sym_outcomes", {})
+            if top_sym in _sym_outcomes and len(_sym_outcomes[top_sym]) >= 3:
+                _recent = list(_sym_outcomes[top_sym])[-5:]
+                _coin_wr = sum(1 for r in _recent if r > 0) / len(_recent)
+                if _coin_wr == 0.0: _alloc *= 0.3
+                elif _coin_wr < 0.25: _alloc *= 0.5
+
+            # Regime-adaptive sizing
+            _market_mode = getattr(algo, "_current_market_mode", None)
+            if getattr(algo, "_gatling_regime_sizing", False) and _market_mode:
+                try:
+                    from gatling_config import GATLING_REGIME_ALLOC, GATLING_REGIME_DEFAULT_ALLOC
+                    _alloc = GATLING_REGIME_ALLOC.get(_market_mode, GATLING_REGIME_DEFAULT_ALLOC)
+                except Exception:
+                    pass
+
+            # Size the order
+            qty, alloc = compute_qty(
+                algo=algo, sym=top_sym, price=price,
+                class_proba=_str,  # use momentum strength as proxy
+                tp_use=tp_use, sl_use=sl_use,
+            )
+            if qty <= 0:
+                return
+
+            # Set dynamic TP/SL
+            algo._tp_dyn = tp_use
+            algo._sl_dyn = sl_use
+
+            algo.log(
+                f"[momentum] ENTRY {top_sym.value} reason={_reason} "
+                f"strength={_str:.3f} px={price:.4f} qty={qty:.6f} "
+                f"alloc={alloc:.3f} tp={tp_use:.4f} sl={sl_use:.4f} "
+                f"btc_ret4={_btc_ret4:.4f}"
+            )
+
+            # Place the order
+            algo._pending_sym = top_sym
+            algo._entry_pred = {
+                "class_proba": _str, "pred_return": 0.0,
+                "n_agree": len(momentum_scores), "std_proba": 0.0,
+                "time": algo.time, "model_votes": {},
+                "active_votes": {}, "shadow_votes": {},
+                "diagnostic_votes": {},
+            }
+            order = algo.market_order(top_sym, qty, tag="ENTRY")
+            algo._pending_oid = order.order_id
+
+            # Log trade
+            algo._persistence.log_trade({
+                "event": "entry_attempt", "time": str(algo.time),
+                "symbol": top_sym.value, "price": price,
+                "qty": qty, "alloc": alloc,
+                "class_proba": _str, "pred_return": 0.0,
+                "n_agree": len(momentum_scores), "std_proba": 0.0,
+                "model_votes": {}, "active_votes": {},
+                "shadow_votes": {},
+                "vote_score": _str, "vote_yes_fraction": 1.0,
+                "top3_mean": _str,
+                "tp": tp_use, "sl": sl_use,
+                "ev_score": 0.0, "final_score": _str,
+                "cost_bps": algo._cost_bps,
+                "entry_path": f"momentum_{_reason}",
+                "market_mode": _market_mode,
+                "confirm": f"momentum_{_reason}",
+            })
+            return  # momentum entry done, skip ML path
+
+        # No momentum signal — fall through to ML path (original behavior)
 
     X_all = np.vstack([c[1] for c in candidates])
     try:
