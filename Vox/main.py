@@ -220,6 +220,11 @@ class VoxAlgorithm(QCAlgorithm):
         self._trail_active     = False
         self._trail_high_px    = 0.0
 
+        # ── Forecast feature cache (Chronos + Wavelet) ───────────────────────
+        self._forecast_cache = {}    # symbol -> (chronos_ret, wavelet_ret)
+        self._forecast_last_update = None  # datetime of last forecast refresh
+        self._forecast_interval_hours = 4  # update every 4h (too slow for every bar)
+
         # ── Ruthless v4 position state ────────────────────────────────────────
         self._max_return_seen     = 0.0
         self._breakeven_active    = False
@@ -331,6 +336,10 @@ class VoxAlgorithm(QCAlgorithm):
                     fallback_px = float(self.securities[self._pos_sym].price)
                     if fallback_px > 0:
                         self._check_exit(fallback_px)
+
+        # ── Update forecast features periodically ─────────────────────────────
+        if getattr(self, "_risk_profile", "") == "gatling":
+            self._update_forecasts()
 
         # ── Entry logic — fire only at decision interval boundaries ──────────
         _decision_interval = getattr(self, "_gatling_decision_interval", DECISION_INTERVAL_MIN)
@@ -697,6 +706,32 @@ class VoxAlgorithm(QCAlgorithm):
         """Score all symbols; if a clear winner passes all gates, place a buy order."""
         _try_enter_fn(self)
 
+
+    # ── Forecast features (Chronos + Wavelet) ──────────────────────────────
+
+    def _update_forecasts(self):
+        """Refresh Chronos + Wavelet forecasts for all symbols (every 4h)."""
+        if self._forecast_last_update is not None:
+            elapsed = (self.time - self._forecast_last_update).total_seconds() / 3600
+            if elapsed < self._forecast_interval_hours:
+                return
+        try:
+            from forecast_features import chronos_forecast_return, wavelet_forecast_return
+            n_ok = 0
+            for sym in self._symbols:
+                st = self._state.get(sym)
+                if st is None or len(st.get("closes", [])) < 64:
+                    continue
+                closes = list(st["closes"])
+                c_ret = chronos_forecast_return(closes)
+                w_ret = wavelet_forecast_return(closes)
+                self._forecast_cache[sym] = (c_ret, w_ret)
+                n_ok += 1
+            self._forecast_last_update = self.time
+            if n_ok > 0:
+                self.debug(f"[forecast] Updated {n_ok} symbols, sample: {list(self._forecast_cache.values())[:2]}")
+        except Exception as exc:
+            self.debug(f"[forecast] Update failed: {exc}")
 
     # ── Retrain ───────────────────────────────────────────────────────────────
 

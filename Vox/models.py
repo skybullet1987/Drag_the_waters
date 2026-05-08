@@ -60,11 +60,11 @@ VOX_ENABLE_CV = False
 # Number of CV folds used when VOX_ENABLE_CV is True.
 CV_SPLITS = 3
 
-FEATURE_COUNT = 30
+FEATURE_COUNT = 32  # 30 base + chronos_forecast[30] + wavelet_forecast[31]
 
 # ── Version constants ──────────────────────────────────────────────────────────
 MODEL_VERSION   = "v4.0"
-FEATURE_VERSION = "v5.0"   # FEATURE_COUNT=30 (multi-timeframe features)
+FEATURE_VERSION = "v6.0"   # FEATURE_COUNT=32 (+chronos_forecast, +wavelet_forecast)
 LABEL_VERSION   = "v2.0"   # triple-barrier with cost_fraction
 CONFIG_VERSION  = "v1.0"
 

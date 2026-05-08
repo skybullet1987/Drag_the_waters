@@ -207,8 +207,8 @@ class TestVersionConstants:
         assert isinstance(LABEL_VERSION, str) and len(LABEL_VERSION) > 0
 
     def test_feature_version_matches_feature_count(self):
-        """FEATURE_VERSION description should mention v5 (FEATURE_COUNT=30)."""
-        assert "v5" in FEATURE_VERSION
+        """FEATURE_VERSION description should mention v6 (FEATURE_COUNT=32)."""
+        assert "v6" in FEATURE_VERSION
 
     def test_versions_stored_in_fitted_ensemble(self):
         """After fit(), VoxEnsemble should carry version stamps."""

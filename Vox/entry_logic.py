@@ -224,6 +224,12 @@ def try_enter(algo):
         if feat is None:
             continue
 
+        # Inject Chronos + Wavelet forecast features from cache
+        _fc = getattr(algo, "_forecast_cache", {}).get(sym)
+        if _fc and len(feat) >= 32:
+            feat[30] = np.clip(_fc[0], -0.10, 0.10)  # chronos forecast return
+            feat[31] = np.clip(_fc[1], -0.10, 0.10)  # wavelet forecast return
+
         candidates.append((sym, feat))
 
     if not candidates:
