@@ -76,8 +76,8 @@ GATLING_LABEL_HORIZON_BARS      = 96     # 24h at 15-min bars
 
 # ── Profit-voting (active with moderate thresholds) ──────────────────────────
 GATLING_PROFIT_VOTING_MODE      = True
-GATLING_VOTE_THRESHOLD          = 0.40   # lower threshold so models CAN vote yes
-GATLING_VOTE_YES_FRACTION_MIN   = 0.10   # at least 1 of 8 models must say yes
+GATLING_VOTE_THRESHOLD          = 0.40   # threshold for model "yes" vote
+GATLING_VOTE_YES_FRACTION_MIN   = 0.20   # at least 1 of 4 proven models must say yes
 GATLING_TOP3_MEAN_MIN           = 0.25   # low bar for top-3
 GATLING_VOTE_EV_FLOOR           = 0.0    # no EV floor
 
@@ -111,23 +111,13 @@ GATLING_MAX_TIMEOUT_HOURS       = 48     # max 48h total hold
 # ── V2 model pool ────────────────────────────────────────────────────────────
 GATLING_USE_ENSEMBLE_V2 = False  # legacy models for now
 
-# Active: 4 proven winners + 4 untested non-tree models
-# Based on 4 backtests: shallow trees + gbc are the ONLY consistently profitable
+# Active: ONLY the 4 proven winners (PF>1 across 5 backtests)
+# The 7 untested models NEVER voted YES in 550 trades — zero contribution
 GATLING_ACTIVE_MODELS = [
-    # PROVEN WINNERS (PF>1 across multiple backtests)
-    "cal_et",               # PF=inf/2.23, 75%/47% WR — BEST model
+    "cal_et",               # PF=inf/2.23, 55% WR — #1 model
     "gbc",                  # PF=1.29/1.16, 50% WR — most reliable
-    "et_shallow",           # PF=1.30/2.50, 44%/45% WR — consistent
-    "rf_shallow",           # PF=2.31/1.47, 50%/56% WR — selective
-    # UNTESTED NON-TREE (need more data, keep for diversity)
-    "svc_cal",              # SVM — insufficient data so far
-    "mlp",                  # neural net — insufficient data
-    "ada",                  # AdaBoost — insufficient data
-    "ngboost",              # probabilistic — insufficient data
-    # NEW: fast sklearn diversity
-    "sgd_cal",              # stochastic linear — different from Ridge
-    "qda_cal",              # quadratic discriminant — unique boundaries
-    "bag_dt2",              # bagged ultra-shallow trees (depth=2)
+    "et_shallow",           # PF=1.30/2.50, 45% WR — consistent
+    "rf_shallow",           # PF=2.31/1.47, 53% WR — selective
 ]
 GATLING_VETO_MODELS = []
 GATLING_DIAGNOSTIC_MODELS = [
@@ -144,6 +134,8 @@ GATLING_DIAGNOSTIC_MODELS = [
     "ridge_cal",                   # 0% WR — complete anti-signal
     "ebm",                         # 0% WR — anti-signal
     "knn_cal",                     # didn't vote at all across 4 backtests
+    # UNTESTED — never voted YES in 550 trades, skip training to save time
+    "svc_cal", "mlp", "ada", "ngboost", "sgd_cal", "qda_cal", "bag_dt2",
 ]
 GATLING_SHADOW_MODELS = []
 
