@@ -16,8 +16,8 @@
 # Activate via:  risk_profile=gatling  (QC parameter panel)
 
 # ── Entry gates (loose but not zero — require SOME signal) ───────────────────
-GATLING_SCORE_MIN               = 0.12   # very low — let models decide (was 0.18)
-GATLING_MIN_EV                  = -0.005 # allow negative EV (was -0.002)
+GATLING_SCORE_MIN               = 0.25   # require SOME model confidence
+GATLING_MIN_EV                  = -0.003 # slight negative EV OK
 GATLING_PRED_RETURN_MIN         = -0.005 # loose regression veto
 GATLING_MAX_DISPERSION          = 0.40   # some model agreement needed
 GATLING_MIN_AGREE               = 0      # zero agreement gate (let voting decide)
@@ -76,9 +76,9 @@ GATLING_LABEL_HORIZON_BARS      = 96     # 24h at 15-min bars
 
 # ── Profit-voting (active with moderate thresholds) ──────────────────────────
 GATLING_PROFIT_VOTING_MODE      = True
-GATLING_VOTE_THRESHOLD          = 0.45   # moderate yes/no split
-GATLING_VOTE_YES_FRACTION_MIN   = 0.15   # at least 15% of models agree
-GATLING_TOP3_MEAN_MIN           = 0.35   # top-3 models mildly bullish
+GATLING_VOTE_THRESHOLD          = 0.40   # lower threshold so models CAN vote yes
+GATLING_VOTE_YES_FRACTION_MIN   = 0.10   # at least 1 of 8 models must say yes
+GATLING_TOP3_MEAN_MIN           = 0.25   # low bar for top-3
 GATLING_VOTE_EV_FLOOR           = 0.0    # no EV floor
 
 # ── Chop thresholds (stricter — avoid chop regime trades) ────────────────────
