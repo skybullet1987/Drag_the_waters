@@ -294,18 +294,30 @@ class HydraAlgorithm(QCAlgorithm):
         if action:
             self._exit(action, price)
 
+    def _safe_sell_qty(self, sym):
+        """Get safe sell quantity respecting CashBook balance."""
+        port_qty = float(self.portfolio[sym].quantity)
+        if port_qty <= 0:
+            return 0.0
+        lot = self.securities[sym].symbol_properties.lot_size
+        min_order = self.securities[sym].symbol_properties.minimum_order_size
+        # Check CashBook for actual base currency balance
+        try:
+            quote_ccy = self.securities[sym].symbol_properties.quote_currency
+            base_ccy = sym.value.replace(quote_ccy, "")
+            if base_ccy in self.portfolio.cash_book:
+                cash_qty = float(self.portfolio.cash_book[base_ccy].amount)
+                port_qty = min(port_qty, cash_qty)
+        except Exception:
+            pass
+        qty = max(0, (port_qty // lot) * lot - lot)  # subtract 1 lot buffer
+        return qty if qty >= min_order else 0.0
+
     def _exit(self, tag, price):
         """Submit exit order."""
         if self._exiting:
             return
-        qty = float(self.portfolio[self._pos_sym].quantity)
-        if qty <= 0:
-            self._clear_state()
-            return
-
-        # Floor to lot size
-        lot = self.securities[self._pos_sym].symbol_properties.lot_size
-        qty = (qty // lot) * lot
+        qty = self._safe_sell_qty(self._pos_sym)
         if qty <= 0:
             self._clear_state()
             return
@@ -346,10 +358,30 @@ class HydraAlgorithm(QCAlgorithm):
                 )
 
     def on_order_event(self, order_event):
-        if order_event.status != OrderStatus.FILLED:
-            if order_event.status == OrderStatus.INVALID:
-                self._exiting = False
+        if order_event.status == OrderStatus.INVALID:
+            tag = ""
+            try:
+                tag = self.transactions.get_order_by_id(order_event.order_id).tag
+            except Exception:
+                pass
+            if tag.startswith("EXIT"):
+                self._exit_retry_count = getattr(self, "_exit_retry_count", 0) + 1
+                if self._exit_retry_count >= 3:
+                    self.log(f"[hydra] EXIT INVALID 3x — clearing state for {self._pos_sym}")
+                    sym = self._pos_sym
+                    if sym:
+                        self._last_sl_time[sym] = self.time
+                        self._daily_sl_count += 1
+                    self._exit_time = self.time
+                    self._clear_state()
+                else:
+                    self._exiting = False  # allow retry
+            else:
                 self._pending_sym = None
+                self._exiting = False
+            return
+
+        if order_event.status != OrderStatus.FILLED:
             return
 
         sym = order_event.symbol
@@ -360,19 +392,17 @@ class HydraAlgorithm(QCAlgorithm):
             self._entry_px = float(order_event.fill_price)
             self._entry_time = self.time
             self._pending_sym = None
+            self._exit_retry_count = 0
             self._trail.reset(self._entry_px)
 
         elif tag.startswith("PYRAMID"):
-            pass  # position already tracked
+            pass
 
         elif tag.startswith("EXIT"):
             is_sl = "SL" in tag
-            ret = (float(order_event.fill_price) - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
-
             if is_sl:
                 self._daily_sl_count += 1
                 self._last_sl_time[sym] = self.time
-
             self._exit_time = self.time
             self._clear_state()
 
