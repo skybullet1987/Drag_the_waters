@@ -50,6 +50,7 @@ from backtest_audit.qc_runner import deploy_pulse, run_backtest
 from backtest_audit.qc_orders import fetch_backtest_trades
 from backtest_audit.compare import build_report
 from backtest_audit.report import write_audit_page
+from backtest_audit.qc_sweep_runner import render_runtime_overrides
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,14 +117,24 @@ def run_phase2(
         print(f"[phase2] Deploying Pulse to project {project_id}...")
         deploy_pulse(client=c, project_id=project_id)
 
+    # ── STANDARD backtest: clear any existing runtime overrides ──────────
     print(f"[phase2] === STANDARD backtest: {standard_name} ===")
+    print(f"[phase2] Clearing runtime_overrides.py (use_harsh_sim=False)")
+    c.update_file(
+        project_id, "runtime_overrides.py",
+        render_runtime_overrides({"use_harsh_sim": False}),
+    )
     standard_bt = run_backtest(project_id, standard_name, client=c)
     standard_id = (standard_bt.get("backtestId")
                    or (standard_bt.get("backtest", {}) or {}).get("backtestId"))
 
+    # ── HARSH backtest: push runtime_overrides with use_harsh_sim=True ───
     print(f"[phase2] === HARSH backtest: {harsh_name} ===")
-    print(f"[phase2] NOTE: harsh-sim must currently be enabled inside main.py")
-    print(f"[phase2]       (auto-flag wiring is a Phase 4+ follow-up)")
+    print(f"[phase2] Pushing runtime_overrides.py with use_harsh_sim=True")
+    c.update_file(
+        project_id, "runtime_overrides.py",
+        render_runtime_overrides({"use_harsh_sim": True}),
+    )
     harsh_bt = run_backtest(project_id, harsh_name, client=c)
     harsh_id = (harsh_bt.get("backtestId")
                 or (harsh_bt.get("backtest", {}) or {}).get("backtestId"))
