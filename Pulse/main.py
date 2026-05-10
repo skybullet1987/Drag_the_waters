@@ -185,6 +185,13 @@ if HAS_QC:
         # ── Initialize ─────────────────────────────────────────────────────
 
         def Initialize(self):
+            # ── Apply runtime overrides (Phase 3 sweep) BEFORE parameters ──
+            # If a runtime_overrides.py file is present in the project, its
+            # OVERRIDES dict is merged into Pulse.config module attributes.
+            # Useful for pushing per-backtest parameter overrides without
+            # re-uploading the whole codebase.
+            self._apply_runtime_overrides()
+
             # ── Parameters ────────────────────────────────────────────────
             start_year = int(self.GetParameter("start_year") or 2025)
             end_year   = int(self.GetParameter("end_year")   or 2026)
@@ -192,6 +199,15 @@ if HAS_QC:
             self._decision_interval_min = int(
                 self.GetParameter("decision_interval_min") or 15
             )
+
+            # ── Phase 2 harsh-sim flag (auto-applied if true) ─────────────
+            harsh_raw = self.GetParameter("use_harsh_sim")
+            self._use_harsh_sim = (
+                str(harsh_raw).lower() in ("true", "1", "yes")
+                if harsh_raw else False
+            )
+            if self._use_harsh_sim:
+                self.Log("[pulse] HARSH-SIM mode enabled — pessimistic slippage/fees")
 
             self.SetStartDate(start_year, 1, 1)
             self.SetEndDate(end_year, 12, 31)
@@ -261,10 +277,51 @@ if HAS_QC:
 
         def _on_security_added(self, security):
             try:
-                security.SetSlippageModel(RealisticCryptoSlippage())
-                security.SetFeeModel(KrakenTieredFeeModel())
+                if getattr(self, "_use_harsh_sim", False):
+                    # Phase 2 harsh simulator: pessimistic slippage + 100% taker
+                    from harsh_simulator import (
+                        HarshConfig, HarshSlippageModel, HarshFeeModel,
+                    )
+                    cfg = HarshConfig()
+                    security.SetSlippageModel(HarshSlippageModel(cfg))
+                    security.SetFeeModel(HarshFeeModel(cfg))
+                else:
+                    # Standard Pulse slippage + tiered Kraken fees
+                    security.SetSlippageModel(RealisticCryptoSlippage())
+                    security.SetFeeModel(KrakenTieredFeeModel())
             except Exception as exc:
                 self.Debug(f"security init failed for {security.Symbol}: {exc}")
+
+        def _apply_runtime_overrides(self):
+            """Apply per-backtest parameter overrides from runtime_overrides.py.
+
+            Convention: a Phase 3 sweep helper pushes a tiny `runtime_overrides.py`
+            to the project containing:
+                OVERRIDES = {
+                    "SCALP_ENTRY_THRESHOLD": 0.55,
+                    "QUICK_TAKE_PROFIT_PCT": 0.12,
+                    ...
+                }
+            We import it (gracefully no-op if missing) and assign each key
+            into the `config` module so subsequent imports pick up the new
+            values.
+
+            This sidesteps QC's per-backtest parameter API limitations while
+            keeping the override file small and easy to push.
+            """
+            try:
+                import config as _cfg
+                import runtime_overrides as _ro
+            except Exception:
+                return   # No overrides file → use defaults
+            overrides = getattr(_ro, "OVERRIDES", {}) or {}
+            applied = 0
+            for k, v in overrides.items():
+                if hasattr(_cfg, k):
+                    setattr(_cfg, k, v)
+                    applied += 1
+            if applied:
+                self.Log(f"[pulse] runtime_overrides applied: {applied} params")
 
         def _initial_universe(self) -> list[str]:
             """Curated 25-symbol Kraken Pro universe.
