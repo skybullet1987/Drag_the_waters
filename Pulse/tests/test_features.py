@@ -343,3 +343,124 @@ def test_rsi_neutral_oscillation_around_50():
     closes = [100 + (i % 2) for i in range(30)]
     r = rsi(closes, period=14)
     assert 40 < r < 60
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Liquidity cluster targeting (Phase 4)
+# ───────────────────────────────────────────────────────────────────────────────
+
+from Pulse.features import (
+    liquidity_clusters, nearest_cluster_above, liquidity_cluster_score_boost,
+)
+
+
+def test_liquidity_clusters_empty_on_short_data():
+    assert liquidity_clusters([100], [10]) == []
+
+
+def test_liquidity_clusters_finds_top_volume_buckets():
+    """A symbol with most volume around price 100 should put the cluster there."""
+    prices  = [100.5] * 50 + [101.5] * 30 + [99.5] * 20
+    volumes = [10] * 100
+    clusters = liquidity_clusters(prices, volumes, n_clusters=3, bucket_pct=0.01)
+    assert len(clusters) > 0
+    # Highest-rank cluster should be the price level with most bars (100.5)
+    top = clusters[0]
+    assert top["low_price"] <= 100.5 <= top["high_price"]
+
+
+def test_liquidity_clusters_skips_zero_prices_volumes():
+    prices  = [0, 100, 100, 0, 101]
+    volumes = [10, 0, 10, 10, 10]
+    clusters = liquidity_clusters(prices, volumes, n_clusters=3)
+    # Should produce at least one cluster from the valid bars
+    assert len(clusters) > 0
+
+
+def test_liquidity_clusters_ranked_by_dollar_volume():
+    """Buckets returned with rank 0 = most volume."""
+    prices  = [100] * 50 + [110] * 10
+    volumes = [10] * 60
+    clusters = liquidity_clusters(prices, volumes, n_clusters=3)
+    # First cluster has more volume than second
+    if len(clusters) >= 2:
+        assert clusters[0]["dollar_volume"] >= clusters[1]["dollar_volume"]
+        assert clusters[0]["rank"] == 0
+
+
+def test_nearest_cluster_above_basic():
+    clusters = [
+        {"center_price": 105, "low_price": 104.5, "high_price": 105.5,
+         "total_volume": 100, "dollar_volume": 10500, "rank": 0},
+        {"center_price": 110, "low_price": 109.5, "high_price": 110.5,
+         "total_volume": 50, "dollar_volume": 5500, "rank": 1},
+    ]
+    nearest = nearest_cluster_above(current_price=102, clusters=clusters,
+                                     max_distance_pct=0.10)
+    assert nearest is not None
+    assert nearest["center_price"] == 105
+    assert "distance_pct" in nearest
+
+
+def test_nearest_cluster_above_filters_too_far():
+    clusters = [
+        {"center_price": 200, "low_price": 199, "high_price": 201,
+         "total_volume": 100, "dollar_volume": 20000, "rank": 0},
+    ]
+    nearest = nearest_cluster_above(100, clusters, max_distance_pct=0.05)
+    assert nearest is None     # 200 is 100% above 100, way past max_distance
+
+
+def test_nearest_cluster_above_returns_none_when_all_below():
+    clusters = [
+        {"center_price": 90, "low_price": 89, "high_price": 91,
+         "total_volume": 100, "dollar_volume": 9000, "rank": 0},
+    ]
+    nearest = nearest_cluster_above(100, clusters)
+    assert nearest is None
+
+
+def test_cluster_score_boost_only_with_positive_cvd():
+    """Boost requires both proximity to a cluster AND positive CVD slope."""
+    clusters = [{"center_price": 103, "low_price": 102.5, "high_price": 103.5,
+                 "total_volume": 100, "dollar_volume": 10300, "rank": 0}]
+    # Price is ~3% below cluster; CVD positive → boost
+    s_pos = liquidity_cluster_score_boost(
+        current_price=100, clusters=clusters, cvd_slope_value=0.05,
+    )
+    assert s_pos == 0.10
+    # Same setup, CVD negative → no boost
+    s_neg = liquidity_cluster_score_boost(
+        current_price=100, clusters=clusters, cvd_slope_value=-0.05,
+    )
+    assert s_neg == 0.0
+
+
+def test_cluster_score_boost_distance_window():
+    clusters = [{"center_price": 105, "low_price": 104.5, "high_price": 105.5,
+                 "total_volume": 100, "dollar_volume": 10500, "rank": 0}]
+    # Too close (< 2%) — no magnet effect
+    s_close = liquidity_cluster_score_boost(
+        current_price=104, clusters=clusters, cvd_slope_value=0.05,
+        min_distance_pct=0.02, max_distance_pct=0.04,
+    )
+    assert s_close == 0.0
+    # Sweet spot (2-4% below) — boost
+    s_sweet = liquidity_cluster_score_boost(
+        current_price=101, clusters=clusters, cvd_slope_value=0.05,
+        min_distance_pct=0.02, max_distance_pct=0.04,
+    )
+    assert s_sweet == 0.10
+    # Too far (> 4%) — no boost (would chase the cluster too aggressively)
+    s_far = liquidity_cluster_score_boost(
+        current_price=95, clusters=clusters, cvd_slope_value=0.05,
+        min_distance_pct=0.02, max_distance_pct=0.04,
+    )
+    assert s_far == 0.0
+
+
+def test_cluster_score_boost_no_clusters_no_boost():
+    s = liquidity_cluster_score_boost(
+        current_price=100, clusters=[], cvd_slope_value=0.05,
+    )
+    assert s == 0.0

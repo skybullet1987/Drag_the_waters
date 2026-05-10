@@ -485,3 +485,112 @@ def rsi(closes: Sequence[float], period: int = 14) -> float:
         return 100.0
     rs = avg_gain / avg_loss
     return 100.0 - 100.0 / (1.0 + rs)
+
+
+# ─── 8. Liquidity cluster targeting (Phase 4 / PLAN.md §6.C.1) ──────────────
+
+def liquidity_clusters(
+    prices: Sequence[float],
+    volumes: Sequence[float],
+    n_clusters: int = 5,
+    bucket_pct: float = 0.01,
+) -> list[dict]:
+    """Identify the top-N price levels with the highest aggregate volume.
+
+    Buckets the price range into ``bucket_pct``-wide buckets (default 1%),
+    sums dollar volume per bucket, and returns the top N by total volume.
+
+    Each returned dict contains:
+        - center_price:  midpoint of the bucket
+        - low_price / high_price
+        - total_volume:  raw volume sum in that bucket
+        - dollar_volume: price-weighted volume sum
+        - rank:          0 = highest-volume bucket
+    """
+    n = min(len(prices), len(volumes))
+    if n < 5 or n_clusters <= 0 or bucket_pct <= 0:
+        return []
+    p_min = min(p for p in prices[:n] if p > 0)
+    p_max = max(prices[:n])
+    if p_min <= 0 or p_max <= p_min:
+        return []
+    bucket_size = p_min * bucket_pct
+    if bucket_size <= 0:
+        return []
+    buckets: dict[int, dict] = {}
+    for i in range(n):
+        if prices[i] <= 0 or volumes[i] <= 0:
+            continue
+        idx = int((prices[i] - p_min) / bucket_size)
+        b = buckets.setdefault(idx, {
+            "center_price": p_min + (idx + 0.5) * bucket_size,
+            "low_price":    p_min + idx * bucket_size,
+            "high_price":   p_min + (idx + 1) * bucket_size,
+            "total_volume": 0.0,
+            "dollar_volume": 0.0,
+        })
+        b["total_volume"]  += float(volumes[i])
+        b["dollar_volume"] += float(volumes[i]) * float(prices[i])
+    sorted_b = sorted(buckets.values(),
+                      key=lambda x: x["dollar_volume"],
+                      reverse=True)
+    out = []
+    for rank, b in enumerate(sorted_b[:n_clusters]):
+        b = dict(b)
+        b["rank"] = rank
+        out.append(b)
+    return out
+
+
+def nearest_cluster_above(
+    current_price: float,
+    clusters: Sequence[dict],
+    max_distance_pct: float = 0.05,
+) -> dict | None:
+    """Find the closest cluster strictly ABOVE the current price.
+
+    Returns the cluster dict (with an extra `distance_pct` key) or None.
+    Used for "magnet" targeting — enter when price is X% below a cluster
+    and trending toward it.
+    """
+    if current_price <= 0:
+        return None
+    candidates = []
+    for c in clusters:
+        center = c["center_price"]
+        if center > current_price:
+            dist = (center - current_price) / current_price
+            if dist <= max_distance_pct:
+                candidates.append((dist, c))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    dist, best = candidates[0]
+    out = dict(best)
+    out["distance_pct"] = dist
+    return out
+
+
+def liquidity_cluster_score_boost(
+    current_price: float,
+    clusters: Sequence[dict],
+    cvd_slope_value: float,
+    min_distance_pct: float = 0.02,
+    max_distance_pct: float = 0.04,
+    boost: float = 0.10,
+) -> float:
+    """Score boost when price is 2-4% below a cluster AND CVD slope is positive.
+
+    Per PLAN.md §6.C.1: clusters act as magnets when price is approaching from
+    below. Only fires when buying pressure (CVD slope > 0) confirms the
+    direction.
+    """
+    if cvd_slope_value <= 0:
+        return 0.0
+    nearest = nearest_cluster_above(current_price, clusters,
+                                    max_distance_pct=max_distance_pct)
+    if not nearest:
+        return 0.0
+    if not (min_distance_pct <= nearest["distance_pct"] <= max_distance_pct):
+        return 0.0
+    return boost
