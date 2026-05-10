@@ -185,3 +185,165 @@ if HAS_QC:
                 return None
 else:
     FearGreedData = None  # type: ignore
+
+
+# ─── Tier C.4: Funding rate proxy ───────────────────────────────────────────
+
+"""
+Funding rate proxy (Tier C.4 from PLAN.md §6.C.4).
+
+Even though we trade Kraken cash spot, the funding rate on Bybit / Binance
+perpetuals is a free signal we can read. It captures positioning extremes:
+
+  - High positive funding (>+0.05% per 8h)
+      Late longs paying premium to shorts.
+      Crowded trade → mean-reversion BEARISH risk.
+  - High negative funding (<-0.05% per 8h)
+      Late shorts paying premium to longs.
+      Crowded short squeeze → mean-reversion BULLISH opportunity.
+  - Mild funding (-0.01% to +0.01%)
+      Balanced; no crowding signal.
+
+The Bybit/Binance public funding endpoints don't need an API key, but we
+keep the QC subscription class optional and graceful — when the data isn't
+available the strategy reverts to a neutral signal (multiplier = 1.0).
+
+Two layers (mirrors the Fear&Greed pattern):
+  1. ``BybitFundingData`` — QC custom-data subscription (Bybit BTCUSD perp)
+  2. ``FundingSignal`` — pure-Python signal helper (testable without QC)
+"""
+
+
+FUNDING_REGIMES = (
+    "deep_short_squeeze",   # rate <= -0.05%
+    "shorts_paying",         # -0.05% < rate <= -0.01%
+    "balanced",              # -0.01% < rate < +0.01%
+    "longs_paying",          # +0.01% <= rate < +0.05%
+    "deep_long_crowd",       # rate >= +0.05%
+)
+
+# Default thresholds (per 8h funding period, Bybit/Binance convention)
+DEFAULT_FUNDING_DEEP_NEG_THRESHOLD = -0.0005   # -0.05%
+DEFAULT_FUNDING_NEG_THRESHOLD      = -0.0001   # -0.01%
+DEFAULT_FUNDING_POS_THRESHOLD      = +0.0001   # +0.01%
+DEFAULT_FUNDING_DEEP_POS_THRESHOLD = +0.0005   # +0.05%
+
+
+def funding_regime(rate: float | None) -> str:
+    """Map raw funding rate (decimal, NOT percent) to a named regime."""
+    if rate is None:
+        return "balanced"
+    r = float(rate)
+    if r <= DEFAULT_FUNDING_DEEP_NEG_THRESHOLD:
+        return "deep_short_squeeze"
+    if r <= DEFAULT_FUNDING_NEG_THRESHOLD:
+        return "shorts_paying"
+    if r < DEFAULT_FUNDING_POS_THRESHOLD:
+        return "balanced"
+    if r < DEFAULT_FUNDING_DEEP_POS_THRESHOLD:
+        return "longs_paying"
+    return "deep_long_crowd"
+
+
+def funding_size_modifier(rate: float | None) -> float:
+    """Per-trade size multiplier from funding regime.
+
+    Long-bias strategies (Pulse is long-only on Kraken cash):
+      deep_short_squeeze (rate < -0.05%) → 1.20  (squeeze opportunity)
+      shorts_paying      (rate < -0.01%) → 1.05
+      balanced                            → 1.00
+      longs_paying       (rate > +0.01%) → 0.85
+      deep_long_crowd    (rate > +0.05%) → 0.50  (crowded — danger)
+    """
+    return {
+        "deep_short_squeeze": 1.20,
+        "shorts_paying":      1.05,
+        "balanced":           1.00,
+        "longs_paying":       0.85,
+        "deep_long_crowd":    0.50,
+    }.get(funding_regime(rate), 1.00)
+
+
+def funding_block_new_entries(rate: float | None,
+                              block_above: float = 0.0010) -> bool:
+    """Hard gate: block new long entries when funding is extreme positive.
+
+    Default threshold +0.10% per 8h ≈ +109% annualized — pure mania territory.
+    """
+    if rate is None:
+        return False
+    return float(rate) >= block_above
+
+
+def funding_bias_toward_bounce(rate: float | None,
+                               threshold: float = -0.0005) -> bool:
+    """Bias mean-reversion / bounce setups when shorts are crowded."""
+    if rate is None:
+        return False
+    return float(rate) <= threshold
+
+
+@dataclass(frozen=True)
+class FundingSignal:
+    """One-shot snapshot of the funding-rate signal for a strategy tick."""
+    rate:                     float | None
+    regime:                   str
+    size_modifier:            float
+    block_new_entries:        bool
+    bias_toward_bounce:       bool
+
+    @classmethod
+    def from_rate(cls, rate: float | None) -> "FundingSignal":
+        return cls(
+            rate=rate,
+            regime=funding_regime(rate),
+            size_modifier=funding_size_modifier(rate),
+            block_new_entries=funding_block_new_entries(rate),
+            bias_toward_bounce=funding_bias_toward_bounce(rate),
+        )
+
+
+# QC custom-data class (Bybit BTC perp funding, public, no key)
+if HAS_QC:
+
+    class BybitFundingData(PythonData):
+        """Bybit BTCUSDT perpetual funding rate — public, no API key needed.
+
+        Bybit returns the most recent funding rate per call. We poll once
+        per 4h via QC's hourly resolution to stay well below rate limits.
+        """
+
+        def GetSource(self, config, date, isLiveMode):
+            url = (
+                "https://api.bybit.com/v5/market/funding/history"
+                "?category=linear&symbol=BTCUSDT&limit=1"
+            )
+            return SubscriptionDataSource(
+                url, SubscriptionTransportMedium.RemoteFile,
+            )
+
+        def Reader(self, config, line, date, isLiveMode):
+            if not line or not line.strip():
+                return None
+            try:
+                obj = json.loads(line)
+                result_list = obj.get("result", {}).get("list", [])
+                if not result_list:
+                    return None
+                latest = result_list[0]
+                rate = float(latest["fundingRate"])
+                ts_ms = int(latest.get("fundingRateTimestamp", 0))
+                from datetime import datetime as _dt, timedelta as _td
+                t = _dt.utcfromtimestamp(ts_ms / 1000) if ts_ms else date
+                result = BybitFundingData()
+                result.Symbol = config.Symbol
+                result.Time = t
+                # Store the rate in .Value for downstream access
+                result.Value = rate
+                # Funding cycle is 8h on Bybit
+                result.EndTime = result.Time + _td(hours=8)
+                return result
+            except Exception:
+                return None
+else:
+    BybitFundingData = None  # type: ignore
