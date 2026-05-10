@@ -333,6 +333,12 @@ if HAS_QC:
             # ── Open positions tracker ────────────────────────────────────
             self._open: dict[Any, OpenPosition] = {}
 
+            # Per-symbol cooldown after invalid order or recent fill — blocks
+            # rapid re-entry attempts on the same symbol (was a major source
+            # of "Insufficient buying power" spam in the Jan-2025 backtest).
+            self._symbol_cooldown_until: dict[str, datetime] = {}
+            self._reentry_cooldown_minutes = 30
+
             # ── Cross-symbol context (filled each cycle) ──────────────────
             self._market_context = MarketContext()
 
@@ -497,9 +503,17 @@ if HAS_QC:
             effective_max = max(1, round(base_max * fg_signal.max_positions_multiplier))
 
             # ── Submit entries up to effective_max ────────────────────────
+            # Match by symbol VALUE (string), not by Symbol object —
+            # self._open keys are QC Symbol objects, score.symbol is a string,
+            # so 'in' returned False for everything and we opened duplicates.
+            held_values = {s.Value for s in self._open.keys()}
             slots_open = effective_max - len(self._open)
             for score in ranked[:max(0, slots_open)]:
-                if score.symbol in self._open:
+                if score.symbol in held_values:
+                    continue
+                # Per-symbol cooldown (post-invalid or recent-fill)
+                cd = self._symbol_cooldown_until.get(score.symbol)
+                if cd is not None and now < cd:
                     continue
                 self._try_enter(score, now)
 
@@ -508,6 +522,14 @@ if HAS_QC:
         def OnOrderEvent(self, event):
             try:
                 res = _on_order_event_impl(self, event, self._audit)
+                sym_value = (event.Symbol.Value if hasattr(event.Symbol, "Value")
+                              else str(event.Symbol))
+                # Cooldown on invalid → don't keep retrying same symbol every minute
+                status_str = str(event.Status).split(".")[-1]
+                if status_str == "Invalid":
+                    self._symbol_cooldown_until[sym_value] = (
+                        self.Time + timedelta(minutes=self._reentry_cooldown_minutes)
+                    )
                 # If we just got an entry fill, track an OpenPosition
                 if res.action == "entry_recorded":
                     sym_obj = event.Symbol
@@ -655,17 +677,33 @@ if HAS_QC:
                 else:
                     size_usd *= 0.7
 
-                # ── Hard cap by available BUYING POWER (not total NAV) ─────
-                # Use MarginRemaining: this accounts for held positions AND
-                # any open buy orders, so we don't over-commit.
-                # Fall back to CashBook[USD] if MarginRemaining is unavailable.
+                # ── Hard cap by AVAILABLE USD CASH (not total NAV) ─────────
+                # Lesson learned (live backtest 2025-01-02→01-06):
+                # In QC crypto CASH accounts, Portfolio.MarginRemaining and
+                # Portfolio.Cash both return TOTAL NAV (cash + crypto value).
+                # The only API that returns true unspent USD is
+                # Portfolio.CashBook["USD"].Amount. Use it FIRST.
+                #
+                # We also subtract the USD value of any open BUY orders that
+                # are pending fill — QC doesn't auto-reserve cash for them
+                # in cash mode, so multiple in-flight orders can stack up.
                 try:
-                    available = float(self.Portfolio.MarginRemaining)
+                    available = float(self.Portfolio.CashBook["USD"].Amount)
                 except Exception:
                     try:
-                        available = float(self.Portfolio.CashBook["USD"].Amount)
+                        available = float(self.Portfolio.MarginRemaining)
                     except Exception:
                         available = float(self.Portfolio.Cash)
+                # Subtract pending buy-order value (best-effort)
+                try:
+                    pending_usd = sum(
+                        float(t.Quantity) * float(self.Securities[t.Symbol].Price)
+                        for t in self.Transactions.GetOpenOrders()
+                        if hasattr(t, "Direction") and t.Quantity > 0
+                    )
+                    available = max(0.0, available - pending_usd)
+                except Exception:
+                    pass
                 # 95% of available — leave 5% headroom for fees/slippage
                 size_usd = min(size_usd, available * 0.95)
 
