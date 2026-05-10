@@ -71,6 +71,7 @@ PULSE_FILES = (
     "sizing.py",
     "online_learning.py",   # imported by main.py
     "optimal_execution.py", # imported by main.py
+    "runtime_overrides.py", # default empty; replaced per-backtest by sweep runner
     "main.py",              # entry point — keep last
 )
 

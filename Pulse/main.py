@@ -364,14 +364,22 @@ if HAS_QC:
 
         def _apply_runtime_overrides(self):
             """Load + apply runtime_overrides.py if present. See module-level
-            split_runtime_overrides() for the underlying logic."""
+            split_runtime_overrides() for the underlying logic.
+
+            Bare ``except:`` catches BaseException, since QC's Python.NET
+            hosted runtime sometimes raises non-Exception subclasses on
+            module-not-found errors. Defensive — overrides are always optional.
+            """
             self._runtime_overrides: dict = {}
             try:
                 import config as _cfg
-                import runtime_overrides as _ro
-            except Exception:
+            except BaseException:
                 return
-            overrides = getattr(_ro, "OVERRIDES", {}) or {}
+            try:
+                import runtime_overrides as _ro
+                overrides = getattr(_ro, "OVERRIDES", {}) or {}
+            except BaseException:
+                overrides = {}
             self._runtime_overrides = split_runtime_overrides(overrides, _cfg)
             if self._runtime_overrides or overrides:
                 self.Log(
