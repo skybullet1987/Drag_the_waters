@@ -1,15 +1,21 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HYDRA v8 — Relative Strength Momentum Rotation
+# HYDRA FINAL — Adaptive Trend Basket
 #
-# 100% into the hottest coin. Rotate when a hotter one appears.
-# Regime filter prevents trading in bear markets.
+# Synthesis of 25+ backtests and professional quant research.
 #
-# This is the simplest strategy that could 100x:
-#   - Rank coins by 24h momentum every 4 hours
-#   - Go 100% into the leader (maximum concentration = maximum compounding)
-#   - Only rotate when new leader is 2%+ stronger
-#   - Golden cross regime: cash during bear
-#   - Trailing stop: 5% from high to protect gains
+# PROVEN FINDINGS:
+#   1. Regime filter > signal quality (biggest alpha source)
+#   2. Multi-position > single position (diversification edge)
+#   3. Fewer trades > more trades (fees destroy returns)
+#   4. Let winners run (biggest leak was exiting too early)
+#   5. ML for regime/risk, NOT for prediction
+#
+# ARCHITECTURE:
+#   - Regime: golden cross, only trade confirmed bull
+#   - Basket: top 3 momentum coins, volatility-weighted
+#   - Turnover: rebalance weekly, not daily
+#   - Exits: wide ATR trail (let winners run), tight SL (cut losers fast)
+#   - Target: 25-60% CAGR with controlled drawdowns
 # ══════════════════════════════════════════════════════════════════════════════
 
 from AlgorithmImports import *
@@ -25,6 +31,16 @@ COINS = [
     "ONDOUSD", "KASUSD", "PENDLEUSD", "CRVUSD", "INJUSD",
 ]
 
+BASKET_SIZE       = 3      # hold top 3 coins
+REBALANCE_DAYS    = 7      # rebalance weekly (proven: less turnover = better)
+MOMENTUM_PERIOD   = 30     # 30-day momentum for ranking
+MIN_MOMENTUM      = 0.01   # minimum 1% monthly return to qualify
+ROTATION_THRESHOLD = 0.05  # only rotate if new coin is 5%+ stronger
+SL_PCT            = 0.04   # 4% stop loss (cut losers fast)
+TRAIL_ARM         = 0.05   # arm trail at +5%
+TRAIL_ATR_MULT    = 3.0    # trail = 3 × ATR (wide — let winners run)
+TARGET_VOL        = 0.03   # 3% target vol per position (vol-weighted sizing)
+
 
 class HydraAlgorithm(QCAlgorithm):
 
@@ -38,7 +54,7 @@ class HydraAlgorithm(QCAlgorithm):
         self._symbols = []
         for ticker in COINS:
             try:
-                s = self.add_crypto(ticker, Resolution.HOUR, Market.KRAKEN).symbol
+                s = self.add_crypto(ticker, Resolution.DAILY, Market.KRAKEN).symbol
                 self._symbols.append(s)
             except Exception:
                 pass
@@ -49,165 +65,212 @@ class HydraAlgorithm(QCAlgorithm):
                 self._btc = s
                 break
 
-        self._current_leader = None
-        self._entry_px = 0.0
-        self._high_water = 0.0
+        # Track positions
+        self._entries = {}   # sym -> {px, time, high}
+        self._last_rebalance = None
 
-        # Rebalance every 4 hours
-        for hour in range(0, 24, 4):
-            self.schedule.on(
-                self.date_rules.every_day(),
-                self.time_rules.at(hour, 0),
-                self._rebalance,
-            )
+        # Weekly rebalance
+        self.schedule.on(
+            self.date_rules.every(DayOfWeek.MONDAY),
+            self.time_rules.at(12, 0),
+            self._weekly_rebalance,
+        )
 
-        # Trailing stop check every hour
+        # Daily risk check
         self.schedule.on(
             self.date_rules.every_day(),
-            self.time_rules.every(timedelta(hours=1)),
-            self._check_trail,
+            self.time_rules.at(8, 0),
+            self._daily_risk_check,
         )
 
         self.set_warmup(timedelta(days=60))
 
-    # ── REGIME ───────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════
+    # REGIME (the #1 alpha source)
+    # ═══════════════════════════════════════════════════════════════════════
 
     def _is_bull(self):
-        """Golden cross + BTC above SMA50. Simple, proven."""
+        """Golden cross + positive 30d momentum. Simple, proven."""
         if not self._btc:
             return False
         h = self.history(self._btc, 210, Resolution.DAILY)
         if h.empty or len(h) < 200:
-            return True  # not enough data, assume bull (optimistic start)
+            return False
         c = h["close"].values
         sma50 = np.mean(c[-50:])
         sma200 = np.mean(c[-200:])
-        price = c[-1]
-        return price > sma50 and sma50 > sma200
+        ret_30d = (c[-1] - c[-30]) / c[-30] if len(c) >= 30 else 0
+        return c[-1] > sma50 and sma50 > sma200 and ret_30d > -0.05
 
-    # ── RANKING ──────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════
+    # RANKING (cross-sectional + time-series momentum)
+    # ═══════════════════════════════════════════════════════════════════════
 
-    def _rank_by_momentum(self):
-        """Rank all coins by 24h rate of change. Also check 50-SMA filter."""
-        rankings = []
+    def _rank_coins(self):
+        """Rank by momentum. Filter by trend (above SMA50). Vol-weight."""
+        candidates = []
         for sym in self._symbols:
-            h = self.history(sym, 52, Resolution.HOUR)  # ~2 days
-            if h.empty or len(h) < 24:
+            h = self.history(sym, MOMENTUM_PERIOD + 55, Resolution.DAILY)
+            if h.empty or len(h) < MOMENTUM_PERIOD:
                 continue
             c = h["close"].values
-            roc_24h = (c[-1] - c[-24]) / c[-24]
+            v = h["volume"].values
 
-            # Must be above 50h SMA (not a dead cat bounce)
-            h_long = self.history(sym, 55, Resolution.HOUR)
-            if not h_long.empty and len(h_long) >= 50:
-                sma50h = np.mean(h_long["close"].values[-50:])
-                if c[-1] < sma50h:
-                    continue  # below SMA = skip
-
-            # Must have positive momentum
-            if roc_24h <= 0:
+            # Cross-sectional momentum: 30d return
+            ret = (c[-1] - c[-MOMENTUM_PERIOD]) / c[-MOMENTUM_PERIOD]
+            if ret < MIN_MOMENTUM:
                 continue
 
-            rankings.append((sym, roc_24h))
+            # Time-series filter: must be above 50-day SMA (actually trending)
+            if len(c) >= 50:
+                sma50 = np.mean(c[-50:])
+                if c[-1] < sma50:
+                    continue
 
-        rankings.sort(key=lambda x: x[1], reverse=True)
-        return rankings
+            # Volatility for position sizing
+            daily_rets = np.diff(c[-21:]) / c[-21:-1] if len(c) >= 21 else np.array([0.03])
+            vol = np.std(daily_rets) if len(daily_rets) > 1 else 0.03
+            vol = max(vol, 0.005)  # floor
 
-    # ── REBALANCE ────────────────────────────────────────────────────────
+            candidates.append({
+                "sym": sym,
+                "ret": ret,
+                "vol": vol,
+                "weight": TARGET_VOL / vol,  # inverse-vol weight
+            })
 
-    def _rebalance(self):
+        # Sort by momentum
+        candidates.sort(key=lambda x: x["ret"], reverse=True)
+
+        # Normalize weights for top N
+        top = candidates[:BASKET_SIZE]
+        if top:
+            total_w = sum(c["weight"] for c in top)
+            for c in top:
+                c["weight"] = min(c["weight"] / total_w, 0.50)  # cap at 50% per coin
+
+        return top
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # WEEKLY REBALANCE (low turnover — proven better)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _weekly_rebalance(self):
         if self.is_warming_up:
             return
 
-        # BEAR → liquidate, go cash
+        # BEAR → go to cash
         if not self._is_bull():
-            if self._current_leader:
+            if self.portfolio.invested:
                 self.liquidate()
-                self.log(f"[hydra] BEAR → CASH")
-                self._current_leader = None
-                self._entry_px = 0.0
-                self._high_water = 0.0
+                self.log("[hydra] BEAR → CASH")
+                self._entries.clear()
             return
 
-        # BULL → find the hottest coin
-        rankings = self._rank_by_momentum()
-        if not rankings:
+        # Rank coins
+        ranked = self._rank_coins()
+        if not ranked:
             return
 
-        best_sym, best_roc = rankings[0]
+        new_syms = {c["sym"] for c in ranked}
+        current_syms = set(self._entries.keys())
 
-        # Already holding the best? Check if something is 2%+ better
-        if self._current_leader and self._current_leader == best_sym:
-            return  # already in the leader, hold
+        # Sell anything not in the new basket (only if dropped significantly)
+        for sym in list(current_syms):
+            if sym not in new_syms:
+                # Check if it just barely missed — don't rotate for tiny differences
+                sym_ret = 0
+                h = self.history(sym, MOMENTUM_PERIOD + 5, Resolution.DAILY)
+                if not h.empty and len(h) >= MOMENTUM_PERIOD:
+                    c = h["close"].values
+                    sym_ret = (c[-1] - c[-MOMENTUM_PERIOD]) / c[-MOMENTUM_PERIOD]
 
-        if self._current_leader:
-            # Current holding's momentum
-            current_roc = 0
-            for sym, roc in rankings:
-                if sym == self._current_leader:
-                    current_roc = roc
-                    break
+                if ranked and ranked[-1]["ret"] - sym_ret > ROTATION_THRESHOLD:
+                    self.set_holdings(sym, 0)
+                    self._entries.pop(sym, None)
+                    self.log(f"[hydra] SELL {sym.value} (dropped from basket)")
 
-            # Only rotate if new leader is significantly stronger
-            if best_roc < current_roc + 0.02:
-                return  # not 2%+ better, don't rotate
+        # Buy new basket members
+        for coin in ranked:
+            sym = coin["sym"]
+            target_weight = coin["weight"] * 0.95  # leave buffer for fees
 
-        # ROTATE: sell current, buy new leader
-        self.liquidate()
-        self.set_holdings(best_sym, 0.98)  # 98% (leave 2% for fees)
-        self._current_leader = best_sym
-        self._entry_px = float(self.securities[best_sym].price)
-        self._high_water = self._entry_px
+            if sym not in self._entries:
+                self.set_holdings(sym, target_weight)
+                px = float(self.securities[sym].price)
+                self._entries[sym] = {"px": px, "time": self.time, "high": px}
+                self.log(f"[hydra] BUY {sym.value} ret30d={coin['ret']:+.1%}"
+                         f" vol={coin['vol']:.3f} weight={target_weight:.0%}")
 
-        self.log(f"[hydra] ROTATE → {best_sym.value} ROC24h={best_roc:+.1%}"
-                 f" px={self._entry_px:.4f} pv=${float(self.portfolio.total_portfolio_value):.2f}")
+    # ═══════════════════════════════════════════════════════════════════════
+    # DAILY RISK CHECK (exits: SL + trail + regime)
+    # ═══════════════════════════════════════════════════════════════════════
 
-    # ── TRAILING STOP ────────────────────────────────────────────────────
-
-    def _check_trail(self):
-        if self.is_warming_up or not self._current_leader:
+    def _daily_risk_check(self):
+        if self.is_warming_up:
             return
 
-        sym = self._current_leader
-        price = float(self.securities[sym].price)
-        if price <= 0 or self._entry_px <= 0:
-            return
-
-        # Update high water
-        if price > self._high_water:
-            self._high_water = price
-
-        ret = (price - self._entry_px) / self._entry_px
-        max_ret = (self._high_water - self._entry_px) / self._entry_px
-
-        # Hard stop: -5% from entry
-        if ret < -0.05:
-            self.liquidate()
-            self.log(f"[hydra] STOP LOSS {sym.value} ret={ret:+.1%}")
-            self._current_leader = None
-            return
-
-        # Trailing: once we're +3% up, trail at 5% from high
-        if max_ret >= 0.03:
-            trail_stop = self._high_water * 0.95
-            if price < trail_stop:
-                self.liquidate()
-                self.log(f"[hydra] TRAIL EXIT {sym.value} ret={ret:+.1%} max={max_ret:+.1%}")
-                self._current_leader = None
-                return
-
-        # BTC fast crash check
+        # BTC crash: -5% in 3 days → emergency exit ALL
         if self._btc:
-            btc_h = self.history(self._btc, 25, Resolution.HOUR)
-            if not btc_h.empty and len(btc_h) >= 24:
-                btc_ret = (btc_h["close"].values[-1] - btc_h["close"].values[0]) / btc_h["close"].values[0]
-                if btc_ret < -0.03:
+            h = self.history(self._btc, 5, Resolution.DAILY)
+            if not h.empty and len(h) >= 3:
+                c = h["close"].values
+                if (c[-1] - c[0]) / c[0] < -0.05:
                     self.liquidate()
-                    self.log(f"[hydra] BTC CRASH {btc_ret:+.1%} → CASH")
-                    self._current_leader = None
+                    self.log("[hydra] BTC CRASH → LIQUIDATE ALL")
+                    self._entries.clear()
+                    return
+
+        # Per-position checks
+        for sym in list(self._entries.keys()):
+            pos = self._entries[sym]
+            px = float(self.securities[sym].price)
+            if px <= 0 or pos["px"] <= 0:
+                continue
+
+            ret = (px - pos["px"]) / pos["px"]
+
+            # Update high water
+            if px > pos["high"]:
+                pos["high"] = px
+            max_ret = (pos["high"] - pos["px"]) / pos["px"]
+
+            # STOP LOSS: cut losers fast (-4%)
+            if ret < -SL_PCT:
+                self.set_holdings(sym, 0)
+                self.log(f"[hydra] SL {sym.value} ret={ret:+.1%}")
+                self._entries.pop(sym, None)
+                continue
+
+            # TRAILING STOP: ATR-based, arms at +5%
+            if max_ret >= TRAIL_ARM:
+                h = self.history(sym, 15, Resolution.DAILY)
+                if not h.empty and len(h) >= 10:
+                    c = h["close"].values
+                    atr = np.mean(np.abs(np.diff(c[-10:])))
+                    trail_pct = max(0.03, min(TRAIL_ATR_MULT * atr / px, 0.12))
+                else:
+                    trail_pct = 0.05
+
+                trail_stop = pos["high"] * (1 - trail_pct)
+                if px < trail_stop:
+                    self.set_holdings(sym, 0)
+                    self.log(f"[hydra] TRAIL {sym.value} ret={ret:+.1%} max={max_ret:+.1%} trail={trail_pct:.1%}")
+                    self._entries.pop(sym, None)
+                    continue
+
+        # REGIME CHANGE: bear → exit all losers
+        if not self._is_bull():
+            for sym in list(self._entries.keys()):
+                ret = (float(self.securities[sym].price) - self._entries[sym]["px"]) / self._entries[sym]["px"]
+                if ret < 0.02:
+                    self.set_holdings(sym, 0)
+                    self.log(f"[hydra] REGIME EXIT {sym.value} ret={ret:+.1%}")
+                    self._entries.pop(sym, None)
 
     def on_order_event(self, order_event):
-        if order_event.status == OrderStatus.FILLED:
-            if order_event.fill_quantity > 0:  # buy
-                self._entry_px = float(order_event.fill_price)
-                self._high_water = self._entry_px
+        if order_event.status == OrderStatus.FILLED and order_event.fill_quantity > 0:
+            sym = order_event.symbol
+            if sym in self._entries:
+                self._entries[sym]["px"] = float(order_event.fill_price)
+                self._entries[sym]["high"] = float(order_event.fill_price)
