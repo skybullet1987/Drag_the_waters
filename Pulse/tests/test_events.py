@@ -201,13 +201,20 @@ def test_invalid_increments_failed_exit():
     assert s.failed_exit_counts["BTCUSD"] == 1
 
 
-def test_invalid_force_cleanup_after_3():
+def test_invalid_force_cleanup_after_10():
+    """Threshold raised from 3 → 10 to avoid abandoning positions after
+    a transient QC data-gap (e.g. one bad bar where Securities[sym].Price
+    momentarily reads 0). 10 retries spans many bars; truly stuck position
+    will fail past that, transient gaps will recover."""
     s = OrderAuditState()
     s.entry_prices["BTCUSD"] = 50_000.0
     s.highest_prices["BTCUSD"] = 50_000.0
-    for _ in range(3):
+    # Below 10: state preserved
+    for _ in range(9):
         handle_order_event(s, _ev(OrderStatusName.INVALID.value, side="Sell"))
-    # After 3 failed exits, state should be cleared
+    assert "BTCUSD" in s.entry_prices
+    # 10th: force cleanup
+    handle_order_event(s, _ev(OrderStatusName.INVALID.value, side="Sell"))
     assert "BTCUSD" not in s.entry_prices
 
 

@@ -524,9 +524,19 @@ if HAS_QC:
                 res = _on_order_event_impl(self, event, self._audit)
                 sym_value = (event.Symbol.Value if hasattr(event.Symbol, "Value")
                               else str(event.Symbol))
-                # Cooldown on invalid → don't keep retrying same symbol every minute
+                # Cooldown on invalid ENTRIES only (not exits).
+                # Failed exits should NOT block future entries on the same
+                # symbol — that prevents the strategy from ever re-engaging
+                # with a coin after a transient data gap.
+                # Direction 0 = Buy = entry; 1 = Sell = exit.
                 status_str = str(event.Status).split(".")[-1]
-                if status_str == "Invalid":
+                is_entry = False
+                try:
+                    from AlgorithmImports import OrderDirection
+                    is_entry = (event.Direction == OrderDirection.Buy)
+                except Exception:
+                    is_entry = (str(event.Direction).endswith("Buy"))
+                if status_str == "Invalid" and is_entry:
                     self._symbol_cooldown_until[sym_value] = (
                         self.Time + timedelta(minutes=self._reentry_cooldown_minutes)
                     )
@@ -749,9 +759,18 @@ if HAS_QC:
                 self.Debug(f"_try_enter error {score.symbol}: {exc}")
 
         def _manage_open_positions(self, now):
+            # ── First: sync local state with actual portfolio (recover from
+            #    earlier force-cleanups where local state diverged) ─────────
+            for sym in list(self._open.keys()):
+                actual_qty = float(self.Portfolio[sym].Quantity)
+                if actual_qty == 0:
+                    # Position closed externally; clear local state
+                    self._open.pop(sym, None)
             for sym, pos in list(self._open.items()):
                 price = float(self.Securities[sym].Price)
                 if price <= 0:
+                    # No market data this bar — defer; market orders
+                    # against price=0 get rejected as Invalid by QC.
                     continue
                 pos.update_extremes(price)
                 ret = (price - pos.entry_price) / pos.entry_price

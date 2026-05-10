@@ -254,7 +254,11 @@ def handle_order_event(
         if event.direction == "Sell":
             cnt = s.failed_exit_counts.get(sym, 0) + 1
             s.failed_exit_counts[sym] = cnt
-            if cnt >= 3:
+            # Was 3 — too eager to abandon the position after a transient
+            # data gap. With 10, we keep retrying (typically the next bar
+            # with valid data succeeds). The 'force_cleanup' branch is now
+            # a true safety valve, not a routine reaction to noisy data.
+            if cnt >= 10:
                 _clear_position_state(s, sym)
                 return HandleResult(action="invalid_force_cleanup",
                                     cleared_state=True)
