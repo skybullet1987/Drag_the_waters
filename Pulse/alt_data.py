@@ -347,3 +347,97 @@ if HAS_QC:
                 return None
 else:
     BybitFundingData = None  # type: ignore
+
+
+# ─── Tier D.3: Twitter / X mention burst (PLAN.md §6.D.3) ──────────────────
+
+"""
+Twitter / X mention-burst signal.
+
+User explicitly deferred this in §0.B (no API key available yet). The
+scaffold is here so when an X bearer token DOES become available, the
+strategy can flip a single config flag and start using it without any
+code changes to the engine.
+
+Design:
+  - Pure-Python `XMentionSignal` is always available; defaults to neutral.
+  - A live `MentionRateClient` subclass would call X's API; we ship only
+    the offline stub that returns 1.0 (baseline) for any symbol.
+  - When mention rate ≥ MENTION_BURST_RATIO × baseline, we mark "buzzy"
+    and add +0.10 to the scalp score (mirrors the spillover boost).
+
+The user can plug in their own API client by subclassing
+`MentionRateClient` and overriding `get_recent_mention_rate(symbol)`.
+"""
+
+
+DEFAULT_MENTION_BURST_RATIO   = 3.0     # 3× baseline = pre-pump
+DEFAULT_MENTION_SCORE_BOOST   = 0.10
+DEFAULT_BUZZ_FADE_THRESHOLD   = 0.5     # < 0.5× baseline = stale signal
+
+
+class MentionRateClient:
+    """Base class for live mention-rate feeds.
+
+    Subclass and override `get_recent_mention_rate(symbol)` to return:
+        (current_rate, baseline_rate)  — both in mentions per hour
+    Both = 0.0 means "no data" → caller treats as neutral.
+
+    The default base-class implementation returns neutral (no buzz),
+    so the strategy works without any API key.
+    """
+
+    def get_recent_mention_rate(self, symbol: str) -> tuple[float, float]:
+        return (0.0, 0.0)   # neutral default
+
+
+@dataclass(frozen=True)
+class XMentionSignal:
+    """One-shot snapshot of X mention buzz for a single symbol."""
+    symbol:        str
+    current_rate:  float
+    baseline_rate: float
+    ratio:         float       # current / baseline (1.0 = neutral)
+    is_buzzy:      bool        # True if ratio >= burst_ratio
+    is_stale:      bool        # True if ratio <= fade_threshold
+    score_boost:   float       # 0.0 or +0.10
+
+    @classmethod
+    def from_rates(
+        cls,
+        symbol: str,
+        current_rate: float,
+        baseline_rate: float,
+        burst_ratio: float = DEFAULT_MENTION_BURST_RATIO,
+        score_boost: float = DEFAULT_MENTION_SCORE_BOOST,
+        fade_threshold: float = DEFAULT_BUZZ_FADE_THRESHOLD,
+    ) -> "XMentionSignal":
+        if baseline_rate <= 0 or current_rate <= 0:
+            return cls(
+                symbol=symbol, current_rate=current_rate,
+                baseline_rate=baseline_rate,
+                ratio=1.0, is_buzzy=False, is_stale=False, score_boost=0.0,
+            )
+        ratio = current_rate / baseline_rate
+        is_buzzy = ratio >= burst_ratio
+        is_stale = ratio <= fade_threshold
+        return cls(
+            symbol=symbol, current_rate=current_rate,
+            baseline_rate=baseline_rate,
+            ratio=ratio,
+            is_buzzy=is_buzzy,
+            is_stale=is_stale,
+            score_boost=score_boost if is_buzzy else 0.0,
+        )
+
+    @classmethod
+    def from_client(
+        cls, symbol: str, client: MentionRateClient | None,
+        **kwargs,
+    ) -> "XMentionSignal":
+        """Convenience: pull rates from a client and build the signal."""
+        if client is None:
+            return cls(symbol=symbol, current_rate=0.0, baseline_rate=0.0,
+                       ratio=1.0, is_buzzy=False, is_stale=False, score_boost=0.0)
+        cur, base = client.get_recent_mention_rate(symbol)
+        return cls.from_rates(symbol, cur, base, **kwargs)

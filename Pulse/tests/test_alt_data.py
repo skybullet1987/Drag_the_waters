@@ -379,3 +379,82 @@ def test_funding_blocks_when_extreme_long_crowd():
     """At +0.15% funding, no new long entries even with strong scalp signal."""
     funding = FundingSignal.from_rate(0.0015)
     assert funding.block_new_entries
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Tier D.3: X mention burst scaffold
+# ───────────────────────────────────────────────────────────────────────────────
+
+from Pulse.alt_data import (
+    DEFAULT_MENTION_BURST_RATIO,
+    MentionRateClient, XMentionSignal,
+)
+
+
+def test_mention_client_default_returns_neutral():
+    """Default base-class client = no buzz → strategy works without API key."""
+    c = MentionRateClient()
+    cur, base = c.get_recent_mention_rate("BTCUSD")
+    assert cur == 0.0 and base == 0.0
+
+
+def test_x_signal_from_zero_rates_is_neutral():
+    s = XMentionSignal.from_rates("BTC", 0.0, 0.0)
+    assert s.ratio == 1.0
+    assert not s.is_buzzy
+    assert s.score_boost == 0.0
+
+
+def test_x_signal_buzzy_at_3x_baseline():
+    """Default burst ratio is 3.0× baseline."""
+    s = XMentionSignal.from_rates("SOL", current_rate=300, baseline_rate=100)
+    assert s.ratio == 3.0
+    assert s.is_buzzy
+    assert s.score_boost == 0.10
+
+
+def test_x_signal_not_buzzy_below_threshold():
+    s = XMentionSignal.from_rates("SOL", current_rate=200, baseline_rate=100)
+    assert s.ratio == 2.0
+    assert not s.is_buzzy
+    assert s.score_boost == 0.0
+
+
+def test_x_signal_stale_at_half_baseline():
+    """When current rate falls to half the baseline → stale signal."""
+    s = XMentionSignal.from_rates("BTC", current_rate=40, baseline_rate=100)
+    assert s.is_stale
+    assert not s.is_buzzy
+
+
+def test_x_signal_custom_threshold():
+    """Override default burst ratio."""
+    s = XMentionSignal.from_rates("ETH", current_rate=200, baseline_rate=100,
+                                  burst_ratio=2.0)
+    assert s.is_buzzy
+    assert s.score_boost == 0.10
+
+
+def test_x_signal_from_none_client_neutral():
+    s = XMentionSignal.from_client("BTC", client=None)
+    assert s.ratio == 1.0
+    assert not s.is_buzzy
+
+
+def test_x_signal_from_default_client_neutral():
+    """Default MentionRateClient returns 0/0 → neutral signal."""
+    s = XMentionSignal.from_client("BTC", client=MentionRateClient())
+    assert s.ratio == 1.0
+    assert not s.is_buzzy
+
+
+def test_x_signal_subclass_returns_buzz():
+    """User can plug in their own client without touching engine code."""
+
+    class FakeClient(MentionRateClient):
+        def get_recent_mention_rate(self, symbol):
+            return (500.0, 100.0)   # 5× = buzzy
+
+    s = XMentionSignal.from_client("DOGE", client=FakeClient())
+    assert s.is_buzzy
+    assert s.score_boost == 0.10
