@@ -266,3 +266,88 @@ def test_kasusd_live_scenario_caught():
     assert not d_actual.should_kill
     d_worst = kill.evaluate("KASUSD", 0.04057, 0.04057 * 0.90)     # -10%
     assert d_worst.should_kill
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# EquityCurveStop (Phase 4.E.2)
+# ───────────────────────────────────────────────────────────────────────────────
+
+from Pulse.circuit import EquityCurveStop, EquityStopState
+
+
+def test_equity_stop_invalid_args():
+    with pytest.raises(ValueError):
+        EquityCurveStop(stale_days=0, pause_days=7)
+    with pytest.raises(ValueError):
+        EquityCurveStop(stale_days=14, pause_days=-1)
+
+
+def test_equity_stop_init():
+    s = EquityCurveStop()
+    out = s.update(1000.0, datetime(2026, 1, 1))
+    assert out["action"] == "init"
+    assert s.can_enter_new_positions(datetime(2026, 1, 1))
+
+
+def test_equity_stop_new_high_resets_clock():
+    s = EquityCurveStop(stale_days=14, pause_days=7)
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    s.update(1100.0, t0 + timedelta(days=5))
+    state = s.state(t0 + timedelta(days=5))
+    assert state.last_high_equity == 1100.0
+    assert state.days_since_high == 0
+
+
+def test_equity_stop_triggers_after_14_stale_days():
+    s = EquityCurveStop(stale_days=14, pause_days=7)
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    # 14 days later, equity still below high
+    out = s.update(950.0, t0 + timedelta(days=14))
+    assert out["action"] == "stale"
+    assert "paused_until" in out
+    assert not s.can_enter_new_positions(t0 + timedelta(days=14))
+
+
+def test_equity_stop_does_not_trigger_before_stale_threshold():
+    s = EquityCurveStop(stale_days=14, pause_days=7)
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    out = s.update(950.0, t0 + timedelta(days=10))
+    assert out["action"] == "noop"
+    assert s.can_enter_new_positions(t0 + timedelta(days=10))
+
+
+def test_equity_stop_pause_expires_after_M_days():
+    s = EquityCurveStop(stale_days=14, pause_days=7)
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    s.update(950.0, t0 + timedelta(days=14))   # triggers pause
+    assert not s.can_enter_new_positions(t0 + timedelta(days=15))
+    # 7 days later the pause expires
+    out = s.update(960.0, t0 + timedelta(days=21, hours=1))
+    assert out["action"] == "released"
+    assert s.can_enter_new_positions(t0 + timedelta(days=21, hours=2))
+
+
+def test_equity_stop_new_high_during_pause_releases():
+    """A new high mid-pause should release the pause immediately."""
+    s = EquityCurveStop(stale_days=14, pause_days=7)
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    s.update(950.0, t0 + timedelta(days=14))   # paused
+    out = s.update(1100.0, t0 + timedelta(days=15))
+    assert out["action"] == "new_high_released_pause"
+    assert s.can_enter_new_positions(t0 + timedelta(days=15))
+
+
+def test_equity_stop_state_snapshot():
+    s = EquityCurveStop()
+    t0 = datetime(2026, 1, 1)
+    s.update(1000.0, t0)
+    snap = s.state(t0 + timedelta(days=5))
+    assert isinstance(snap, EquityStopState)
+    assert snap.last_high_equity == 1000.0
+    assert snap.days_since_high == 5
+    assert not snap.is_paused

@@ -1,6 +1,6 @@
 """circuit — multi-layer risk circuit breakers.
 
-Three independent risk gates:
+Four independent risk gates:
 
 1. ``DrawdownCircuitBreaker``
    - Trips at MAX_DRAWDOWN_TRIP_PCT (default 20%); halts at MAX_DRAWDOWN_HALT_PCT (25%)
@@ -16,6 +16,12 @@ Three independent risk gates:
    - Catastrophic per-trade -8% market liquidation override
    - Backtest's largest intra-trade DD on MG36 was -41%; that's the time bomb
    - This bounds the worst case at -8% per name
+
+4. ``EquityCurveStop`` (PLAN.md §6.E.2)
+   - After N calendar days without a new equity high: pause new entries for M days
+   - Open positions are managed normally (exits still fire)
+   - Resume after pause window OR when equity stamps a new high
+   - Catches "strategy stopped working" without waiting for a full drawdown
 
 All pure-Python, no QC dep. Tests work offline.
 """
@@ -287,3 +293,117 @@ class PerTradeKill:
                 reason=f"hard_kill_{ret*100:.2f}%",
             )
         return TradeKillDecision(symbol, ret, False, None)
+
+
+# ─── EquityCurveStop ─────────────────────────────────────────────────────────
+
+@dataclass
+class EquityStopState:
+    """Read-only snapshot of EquityCurveStop state."""
+    last_high_equity:         float
+    last_high_time:           datetime | None
+    days_since_high:          int
+    paused_until:             datetime | None
+    is_paused:                bool
+
+
+class EquityCurveStop:
+    """Pause new entries when the equity curve stalls.
+
+    Triggered when equity has gone N calendar days without making a new high.
+    On trigger, new entries are paused for M days. Open positions are not
+    affected (exits still fire normally).
+
+    Usage::
+
+        stop = EquityCurveStop(stale_days=14, pause_days=7)
+        # Each day:
+        action = stop.update(current_equity, now)
+        if not stop.can_enter_new_positions(now):
+            return   # skip entry; managing-only mode
+
+    Args:
+        stale_days: trigger after this many calendar days without a new high
+        pause_days: pause new entries for this many days when triggered
+    """
+
+    def __init__(self, stale_days: int = 14, pause_days: int = 7):
+        if stale_days <= 0 or pause_days <= 0:
+            raise ValueError("stale_days and pause_days must be > 0")
+        self.stale_days = stale_days
+        self.pause_days = pause_days
+
+        self._last_high_equity: float = 0.0
+        self._last_high_time: datetime | None = None
+        self._paused_until: datetime | None = None
+
+    def update(self, equity: float, now: datetime) -> dict:
+        """Update state with the latest equity value.
+
+        Returns an action dict, e.g.:
+            {"action": "init"}             — first call
+            {"action": "new_high"}         — equity made a new high
+            {"action": "stale"}            — N+ days without new high; pause now
+            {"action": "released"}         — pause window ended
+            {"action": "noop"}             — within pause window or below stale threshold
+        """
+        if equity <= 0:
+            return {"action": "noop_invalid_equity"}
+
+        # First-ever update: seed
+        if self._last_high_equity <= 0 or self._last_high_time is None:
+            self._last_high_equity = equity
+            self._last_high_time = now
+            return {"action": "init", "high": equity}
+
+        # New high — reset pause if any
+        if equity > self._last_high_equity:
+            self._last_high_equity = equity
+            self._last_high_time = now
+            old_pause = self._paused_until
+            self._paused_until = None
+            if old_pause is not None and now < old_pause:
+                return {
+                    "action":      "new_high_released_pause",
+                    "high":        equity,
+                    "released_at": now.isoformat(),
+                }
+            return {"action": "new_high", "high": equity}
+
+        # Currently paused — check if window expired
+        if self._paused_until is not None:
+            if now >= self._paused_until:
+                self._paused_until = None
+                # Reset the staleness clock so we don't immediately re-trigger
+                self._last_high_time = now
+                return {"action": "released"}
+            return {"action": "noop_paused"}
+
+        # Not paused — check if we've been stale long enough to trigger
+        days_stale = (now - self._last_high_time).days
+        if days_stale >= self.stale_days:
+            self._paused_until = now + timedelta(days=self.pause_days)
+            return {
+                "action":         "stale",
+                "days_stale":     days_stale,
+                "paused_until":   self._paused_until.isoformat(),
+            }
+
+        return {"action": "noop", "days_stale": days_stale}
+
+    def can_enter_new_positions(self, now: datetime) -> bool:
+        """True if we are NOT in a pause window."""
+        return not (self._paused_until is not None and now < self._paused_until)
+
+    def state(self, now: datetime) -> EquityStopState:
+        if self._last_high_time is None:
+            days = 0
+        else:
+            days = (now - self._last_high_time).days
+        return EquityStopState(
+            last_high_equity=self._last_high_equity,
+            last_high_time=self._last_high_time,
+            days_since_high=days,
+            paused_until=self._paused_until,
+            is_paused=not self.can_enter_new_positions(now),
+        )
