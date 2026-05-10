@@ -125,7 +125,10 @@ from Pulse.fees import KrakenTieredFeeModel
 from Pulse.slippage import RealisticCryptoSlippage
 from Pulse.online_learning import OnlineThresholdLearner
 from Pulse.optimal_execution import build_slice_plan, DEFAULT_LARGE_ORDER_THRESHOLD_BPS
-from Pulse.execution import min_quantity_fallback, KRAKEN_MIN_QTY_FALLBACK
+from Pulse.execution import (
+    min_quantity_fallback, KRAKEN_MIN_QTY_FALLBACK,
+    safe_sell_quantity, round_to_lot,
+)
 
 
 # ─── Per-symbol rolling state ────────────────────────────────────────────────
@@ -863,41 +866,97 @@ if HAS_QC:
                 pos.update_extremes(price)
                 ret = (price - pos.entry_price) / pos.entry_price
 
+                # ── Pick exit reason (cascade) ────────────────────────────
+                exit_tag = None
                 # 1. Per-trade hard kill at -8%
                 kill_dec = self._kill.evaluate(sym.Value, pos.entry_price, price)
                 if kill_dec.should_kill:
                     self.Log(f"[pulse] HARD KILL {sym.Value} ret={ret:+.2%}")
-                    self.Liquidate(sym, tag="HARD_KILL")
-                    continue
-
+                    exit_tag = "HARD_KILL"
                 # 2. Hard SL at -3.5%
-                if ret <= -TIGHT_STOP_LOSS_PCT:
-                    self.Liquidate(sym, tag="STOP_LOSS")
-                    continue
-
+                elif ret <= -TIGHT_STOP_LOSS_PCT:
+                    exit_tag = "STOP_LOSS"
                 # 3. Time stop
-                if pos.held_hours(now) >= TIME_STOP_HOURS:
-                    self.Liquidate(sym, tag="TIME_STOP")
+                elif pos.held_hours(now) >= TIME_STOP_HOURS:
+                    exit_tag = "TIME_STOP"
+                else:
+                    # 4. Trail (arm at +4%, trail 2.5% from high)
+                    max_ret = (pos.high_price - pos.entry_price) / pos.entry_price
+                    if max_ret >= TRAIL_ACTIVATION_PCT:
+                        pos.trail_armed = True
+                    if pos.trail_armed:
+                        trail_stop_price = pos.high_price * (1 - TRAIL_STOP_PCT)
+                        if price < trail_stop_price:
+                            exit_tag = "TRAIL_STOP"
+                    # 5. Take profit at +12%
+                    if exit_tag is None and ret >= QUICK_TAKE_PROFIT_PCT:
+                        exit_tag = "TAKE_PROFIT"
+
+                if exit_tag is None:
                     continue
 
-                # 4. Trail (arm at +4%, trail 2.5% from high)
-                max_ret = (pos.high_price - pos.entry_price) / pos.entry_price
-                if max_ret >= TRAIL_ACTIVATION_PCT:
-                    pos.trail_armed = True
-                if pos.trail_armed:
-                    trail_stop_price = pos.high_price * (1 - TRAIL_STOP_PCT)
-                    if price < trail_stop_price:
-                        self.Liquidate(sym, tag="TRAIL_STOP")
-                        continue
+                # ── ROOT-CAUSE FIX: safe-sell quantity from CashBook ───────
+                # The Vox CashBook bug, finally wired into the exit path.
+                # In QC crypto cash mode, Portfolio[sym].Quantity can drift
+                # SLIGHTLY ABOVE the true CashBook[base].Amount (fees are
+                # paid from the base currency on each leg). self.Liquidate
+                # tries to sell Portfolio.Quantity → CashBook says "you
+                # don't have that much" → INVALID. We compute a safe sell
+                # qty using the lower of (Portfolio, CashBook) minus a
+                # 1-lot buffer, then submit a market order for that.
+                self._submit_safe_exit(sym, exit_tag)
 
-                # 5. Take profit at +12% (or ATR-based; using fixed for now)
-                if ret >= QUICK_TAKE_PROFIT_PCT:
-                    self.Liquidate(sym, tag="TAKE_PROFIT")
-                    continue
+        def _submit_safe_exit(self, sym, tag: str):
+            """Sell `sym` using safe_sell_quantity (CashBook-aware)."""
+            try:
+                portfolio_qty = float(self.Portfolio[sym].Quantity)
+                if portfolio_qty == 0:
+                    self._open.pop(sym, None)
+                    return
+                # Find the base currency: Kraken pairs are SYMUSD → SYM
+                sym_value = sym.Value
+                base_ccy = sym_value[:-3] if sym_value.endswith("USD") else None
+                cashbook_qty = portfolio_qty
+                if base_ccy:
+                    try:
+                        cashbook_qty = float(
+                            self.Portfolio.CashBook[base_ccy].Amount
+                        )
+                    except Exception:
+                        cashbook_qty = portfolio_qty
+                # Lot size + min order from QC SymbolProperties (fallback to table)
+                sec = self.Securities[sym]
+                sp  = getattr(sec, "SymbolProperties", None)
+                lot_size = (float(sp.LotSize)
+                            if sp and sp.LotSize and float(sp.LotSize) > 0
+                            else min_quantity_fallback(sym_value))
+                min_ord  = (float(sp.MinimumOrderSize)
+                            if sp and sp.MinimumOrderSize and float(sp.MinimumOrderSize) > 0
+                            else min_quantity_fallback(sym_value))
+                safe_qty = safe_sell_quantity(
+                    portfolio_quantity=abs(portfolio_qty),
+                    cashbook_quantity=abs(cashbook_qty),
+                    lot_size=lot_size,
+                    min_order_size=min_ord,
+                    exit_qty_buffer_lots=1,
+                )
+                if safe_qty <= 0:
+                    # Position is dust — clear local state + give up
+                    self.Log(
+                        f"[pulse] {tag} {sym_value}: dust qty "
+                        f"(port={portfolio_qty:.10f} cashbook={cashbook_qty:.10f} "
+                        f"min={min_ord:.10f}); clearing local state"
+                    )
+                    self._open.pop(sym, None)
+                    return
+                # Market sell the safe quantity
+                self.MarketOrder(sym, -safe_qty, tag=tag)
+            except Exception as exc:
+                self.Debug(f"_submit_safe_exit error {sym}: {exc}")
 
         def _liquidate_all_open(self):
             for sym in list(self._open.keys()):
-                self.Liquidate(sym, tag="CIRCUIT_HALT")
+                self._submit_safe_exit(sym, tag="CIRCUIT_HALT")
             self._open.clear()
 
         def OnEndOfAlgorithm(self):
