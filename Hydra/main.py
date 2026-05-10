@@ -29,8 +29,8 @@ COINS = [
 class HydraAlgorithm(QCAlgorithm):
 
     def initialize(self):
-        self.set_start_date(2024, 10, 1)
-        self.set_end_date(2025, 3, 31)
+        self.set_start_date(2024, 1, 1)
+        self.set_end_date(2026, 12, 31)
         self.set_cash(100)
         self.set_brokerage_model(BrokerageName.KRAKEN, AccountType.CASH)
         self.settings.free_portfolio_value_percentage = 0.01
@@ -111,8 +111,9 @@ class HydraAlgorithm(QCAlgorithm):
             if sym in data.bars:
                 self._check_exit(sym, float(data.bars[sym].close))
 
-        # Scan every 4 hours — fewer trades, bigger size, less fees
-        if self.time.hour % 4 != 0 or self.time.minute != 0:
+        # Scan frequency: aggressive in strong_bull, conservative otherwise
+        _scan_interval = 2 if regime == "strong_bull" else 4
+        if self.time.hour % _scan_interval != 0 or self.time.minute != 0:
             return
         if self._daily_sl >= 4:
             return
@@ -158,8 +159,10 @@ class HydraAlgorithm(QCAlgorithm):
         if regime == "bear":
             return
 
+        # More positions in strong bull = more exposure to pumps
+        _max_pos = 3 if regime == "strong_bull" else 2
         open_count = len(self._positions)
-        if open_count >= self.MAX_POSITIONS:
+        if open_count >= _max_pos:
             return
 
         candidates = []
@@ -257,7 +260,7 @@ class HydraAlgorithm(QCAlgorithm):
                 if score > best_score:
                     best_score = score
                     best_reason = "dip_buy"
-                    best_alloc = 0.55 if regime == "strong_bull" else 0.40
+                    best_alloc = 0.80 if regime == "strong_bull" else 0.45
 
         # ── STRATEGY 2: MOMENTUM CONTINUATION (strong_bull) ─────────────
         if regime == "strong_bull":
@@ -272,7 +275,7 @@ class HydraAlgorithm(QCAlgorithm):
                 if score > best_score:
                     best_score = score
                     best_reason = "momentum"
-                    best_alloc = 0.50
+                    best_alloc = 0.75
 
         # ── STRATEGY 3: MEAN REVERSION (bull + chop) ────────────────────
         if regime in ("bull", "chop") and price > sma50:
@@ -292,8 +295,10 @@ class HydraAlgorithm(QCAlgorithm):
                     best_reason = "mean_revert"
                     best_alloc = 0.35
 
-        if best_score < 0.55:
-            return None  # ONLY top-quality trades. Fewer trades = less fees = more profit
+        # Dynamic threshold: aggressive in strong_bull, strict otherwise
+        _min_score = 0.40 if regime == "strong_bull" else 0.55
+        if best_score < _min_score:
+            return None
 
         return (best_score, best_reason, best_alloc)
 
