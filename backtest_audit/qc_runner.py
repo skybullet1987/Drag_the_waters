@@ -50,6 +50,9 @@ from backtest_audit.qc_api import QCClient, QCError
 
 
 # Files that constitute the Pulse package — pushed in order
+# IMPORTANT: every Pulse/*.py that is imported by any other Pulse module or
+# by main.py MUST be in this list, or QC compile will fail with
+# "No module named X". Verified by test_qc_runner_manifest_complete.
 PULSE_FILES = (
     "config.py",
     "universe.py",
@@ -66,7 +69,9 @@ PULSE_FILES = (
     "mr_engine.py",
     "portfolio.py",
     "sizing.py",
-    "main.py",
+    "online_learning.py",   # imported by main.py
+    "optimal_execution.py", # imported by main.py
+    "main.py",              # entry point — keep last
 )
 
 

@@ -187,3 +187,57 @@ def test_cli_no_args_prints_help_or_errors(capsys, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["qc_runner.py"])
     with pytest.raises((SystemExit, QCError)):
         qc_runner.main()
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Regression: PULSE_FILES manifest must include every Pulse/*.py that is
+# imported by main.py or by any other Pulse module. Catches the bug where
+# online_learning.py / optimal_execution.py were added to Pulse but never
+# to PULSE_FILES, causing QC compile to fail with "No module named X".
+# ───────────────────────────────────────────────────────────────────────────────
+
+def test_pulse_files_manifest_complete_for_real_pulse_dir():
+    """Every .py file in /workspace/Pulse (except __init__, sanity_check,
+    tests/) must appear in PULSE_FILES."""
+    import glob
+    import os as _os
+    pulse_dir = _os.path.join(
+        _os.path.dirname(__file__), "..", "..", "Pulse",
+    )
+    on_disk = set()
+    for path in glob.glob(_os.path.join(pulse_dir, "*.py")):
+        name = _os.path.basename(path)
+        if name in ("__init__.py", "sanity_check.py"):
+            continue
+        on_disk.add(name)
+    in_manifest = set(PULSE_FILES)
+    missing = on_disk - in_manifest
+    assert not missing, (
+        f"PULSE_FILES manifest is missing these Pulse modules: {sorted(missing)}\n"
+        f"Add them to qc_runner.PULSE_FILES or QC compile will fail with "
+        f"'No module named X'."
+    )
+
+
+def test_pulse_files_manifest_imports_resolve():
+    """Cross-check: every name imported in main.py via 'from X import' or
+    'import X' must either be in PULSE_FILES or be a known stdlib/third-party.
+    Detects accidentally renamed modules.
+    """
+    import re
+    import os as _os
+    main_py = _os.path.join(
+        _os.path.dirname(__file__), "..", "..", "Pulse", "main.py",
+    )
+    with open(main_py) as f:
+        src = f.read()
+    # Find 'from Pulse.X import' and 'from X import' (after rewrite)
+    pulse_imports = re.findall(r"from\s+Pulse\.(\w+)\s+import", src)
+    bare_imports  = re.findall(r"^from\s+(\w+)\s+import", src, flags=re.M)
+    # Pulse imports become 'from X import' after qc_runner rewrites them
+    expected_from_main = set(pulse_imports)
+    for name in expected_from_main:
+        assert f"{name}.py" in PULSE_FILES, (
+            f"main.py imports 'from Pulse.{name}' but '{name}.py' "
+            f"is not in qc_runner.PULSE_FILES manifest"
+        )
