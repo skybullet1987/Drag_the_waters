@@ -340,6 +340,16 @@ if HAS_QC:
             self._symbol_cooldown_until: dict[str, datetime] = {}
             self._reentry_cooldown_minutes = 30
 
+            # Per-symbol tracker for which symbols have a FRESH bar this tick.
+            # Exits should ONLY fire on symbols that just received new data,
+            # otherwise QC fills market orders at price=0 (data gap).
+            self._symbols_with_fresh_bar_this_tick: set = set()
+
+            # Per-symbol failed-exit backoff: after N failed exits, pause
+            # exit attempts for M minutes so we stop spamming the order book.
+            self._exit_failure_count: dict[str, int] = {}
+            self._exit_pause_until: dict[str, datetime] = {}
+
             # ── Cross-symbol context (filled each cycle) ──────────────────
             self._market_context = MarketContext()
 
@@ -439,12 +449,15 @@ if HAS_QC:
         def OnData(self, slice):
             now = self.Time
 
+            # Reset per-tick fresh-bar tracker (used by exit logic)
+            self._symbols_with_fresh_bar_this_tick = set()
             # Update per-symbol buffers
             for sym, buf in self._buffers.items():
                 if slice.Bars.ContainsKey(sym):
                     bar = slice.Bars[sym]
                     buf.update_bar(bar.Open, bar.High, bar.Low,
                                   bar.Close, bar.Volume)
+                    self._symbols_with_fresh_bar_this_tick.add(sym)
                 if slice.QuoteBars.ContainsKey(sym):
                     qb = slice.QuoteBars[sym]
                     # QC sometimes delivers QuoteBars with Bid or Ask = None
@@ -515,17 +528,29 @@ if HAS_QC:
             effective_max = min(effective_max, capital_max)
 
             # ── Submit entries up to effective_max ────────────────────────
-            # Match by symbol VALUE (string), not by Symbol object —
-            # self._open keys are QC Symbol objects, score.symbol is a string,
-            # so 'in' returned False for everything and we opened duplicates.
+            # Match by symbol VALUE (string), not by Symbol object.
             held_values = {s.Value for s in self._open.keys()}
             slots_open = effective_max - len(self._open)
             for score in ranked[:max(0, slots_open)]:
                 if score.symbol in held_values:
                     continue
+                # ALSO check actual portfolio quantity — the Sardine bug
+                # was opening duplicates after force-cleanup wiped local
+                # state but the position was still actually held.
+                sym_obj = next(
+                    (s for s in self._symbols if s.Value == score.symbol), None
+                )
+                if sym_obj is not None and \
+                   abs(float(self.Portfolio[sym_obj].Quantity)) > 0:
+                    continue
                 # Per-symbol cooldown (post-invalid or recent-fill)
                 cd = self._symbol_cooldown_until.get(score.symbol)
                 if cd is not None and now < cd:
+                    continue
+                # Per-symbol exit-attempt pause: if we're paused on exits,
+                # don't open a new position either (we couldn't sell it).
+                ep = self._exit_pause_until.get(score.symbol)
+                if ep is not None and now < ep:
                     continue
                 self._try_enter(score, now)
 
@@ -552,6 +577,21 @@ if HAS_QC:
                     self._symbol_cooldown_until[sym_value] = (
                         self.Time + timedelta(minutes=self._reentry_cooldown_minutes)
                     )
+                # Exit-side failure backoff: 3 strikes → 30-min pause on
+                # exit attempts for THIS symbol. Stops the per-minute
+                # spam pattern observed in the orders log.
+                if status_str == "Invalid" and not is_entry:
+                    cnt = self._exit_failure_count.get(sym_value, 0) + 1
+                    self._exit_failure_count[sym_value] = cnt
+                    if cnt >= 3:
+                        self._exit_pause_until[sym_value] = (
+                            self.Time + timedelta(minutes=30)
+                        )
+                        self._exit_failure_count[sym_value] = 0   # reset counter
+                # Successful exit fill clears the failure counter
+                if status_str == "Filled" and not is_entry:
+                    self._exit_failure_count.pop(sym_value, None)
+                    self._exit_pause_until.pop(sym_value, None)
                 # If we just got an entry fill, track an OpenPosition
                 if res.action == "entry_recorded":
                     sym_obj = event.Symbol
@@ -798,18 +838,27 @@ if HAS_QC:
                 self.Debug(f"_try_enter error {score.symbol}: {exc}")
 
         def _manage_open_positions(self, now):
-            # ── First: sync local state with actual portfolio (recover from
-            #    earlier force-cleanups where local state diverged) ─────────
+            # ── Sync local state with actual portfolio ────────────────────
             for sym in list(self._open.keys()):
                 actual_qty = float(self.Portfolio[sym].Quantity)
                 if actual_qty == 0:
-                    # Position closed externally; clear local state
                     self._open.pop(sym, None)
+
             for sym, pos in list(self._open.items()):
+                # Only attempt exits when a FRESH bar arrived this tick.
+                # If we don't have new data, QC will fill the market order
+                # at price=0 (rejected as Invalid). Defer to next tick.
+                if sym not in self._symbols_with_fresh_bar_this_tick:
+                    continue
+
+                # Per-symbol exit-attempt pause (after N consecutive failures)
+                pause = self._exit_pause_until.get(sym.Value)
+                if pause is not None and now < pause:
+                    continue
+
                 price = float(self.Securities[sym].Price)
                 if price <= 0:
-                    # No market data this bar — defer; market orders
-                    # against price=0 get rejected as Invalid by QC.
+                    # Defensive: even with a fresh bar, double-check price
                     continue
                 pos.update_extremes(price)
                 ret = (price - pos.entry_price) / pos.entry_price
