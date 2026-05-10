@@ -89,7 +89,7 @@ class HydraAlgorithm(QCAlgorithm):
 
         # FAST REGIME KILL SWITCH: exit ALL when BTC turns weak
         regime = self._get_regime()
-        if regime == "bear" and self._positions:
+        if regime in ("bear", "chop") and self._positions:
             for sym in list(self._positions.keys()):
                 pos = self._positions[sym]
                 ret = (float(self.securities[sym].price) - pos["entry_px"]) / pos["entry_px"] if pos["entry_px"] > 0 else 0
@@ -124,28 +124,33 @@ class HydraAlgorithm(QCAlgorithm):
     # ══════════════════════════════════════════════════════════════════════
 
     def _get_regime(self):
-        """Detect market regime from BTC.
+        """Strict regime detection — only trade in CONFIRMED bull.
 
-        Returns: "bull", "strong_bull", "bear", "chop"
+        Golden cross (SMA50 > SMA200) + price above both + positive momentum.
+        This single filter matters more than all indicators combined.
         """
         if not self._btc or len(self._closes[self._btc]) < 200:
-            return "chop"
+            return "bear"  # default to bear (safe) until enough data
 
         c = np.array(list(self._closes[self._btc]))
         price = c[-1]
         sma50 = np.mean(c[-50:])
-        sma200 = np.mean(c[-200:]) if len(c) >= 200 else np.mean(c)
-        ret_24h = (c[-1] - c[-25]) / c[-25] if len(c) >= 25 else 0
-        ret_7d = (c[-1] - c[-168]) / c[-168] if len(c) >= 168 else 0
+        sma200 = np.mean(c[-200:])
+        ret_30d = (c[-1] - c[-min(720, len(c))]) / c[-min(720, len(c))]
+        ret_7d = (c[-1] - c[-min(168, len(c))]) / c[-min(168, len(c))]
 
-        if price > sma50 and sma50 > sma200 and ret_7d > 0.05:
+        # GOLDEN CROSS + price above both + 30d momentum positive
+        golden_cross = sma50 > sma200
+        above_both = price > sma50 and price > sma200
+
+        if golden_cross and above_both and ret_30d > 0.05 and ret_7d > 0.02:
             return "strong_bull"
-        elif price > sma50 and sma50 > sma200:
+        elif golden_cross and above_both and ret_30d > 0:
             return "bull"
-        elif price < sma50 and price < sma200:
+        elif price < sma200 or (price < sma50 and ret_30d < -0.05):
             return "bear"
         else:
-            return "chop"
+            return "chop"  # chop = minimal exposure
 
     # ══════════════════════════════════════════════════════════════════════
     # SIGNAL DETECTION (3 strategies, regime-dependent)
@@ -154,8 +159,8 @@ class HydraAlgorithm(QCAlgorithm):
     def _scan_entries(self):
         regime = self._get_regime()
 
-        # BEAR: no new entries
-        if regime == "bear":
+        # BEAR or CHOP: no new entries — only trade confirmed bull/strong_bull
+        if regime in ("bear", "chop"):
             return
 
         open_count = len(self._positions)
@@ -307,6 +312,14 @@ class HydraAlgorithm(QCAlgorithm):
             return
 
         pv = float(self.portfolio.total_portfolio_value)
+        # Volatility-weighted sizing: less on volatile, more on stable trenders
+        c = self._closes.get(sym)
+        if c and len(c) >= 20:
+            ca = np.array(list(c))
+            vol = np.std(np.diff(ca[-20:]) / ca[-20:-1]) if len(ca) > 20 else 0.03
+            vol_adj = min(0.03 / max(vol, 0.005), 2.0)  # 3% target vol, cap at 2x
+            alloc = alloc * min(vol_adj, 1.5)  # boost stable trenders, cut volatile
+            alloc = min(alloc, 0.60)  # hard cap
         qty = (pv * alloc * 0.99) / price
 
         lot = self.securities[sym].symbol_properties.lot_size
