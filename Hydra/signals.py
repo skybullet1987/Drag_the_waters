@@ -103,14 +103,53 @@ def detect_all_signals(closes, highs, lows, volumes,
     elif chronos_forecast < -0.005:
         combined_strength *= 0.5  # dampen if Chronos says down
 
-    # RSI overbought filter: don't enter if already overbought
+    # ── FILTERS (block bad entries) ─────────────────────────────────────
+    # RSI overbought: don't chase tops
     diffs = np.diff(c[-15:])
     gains = np.mean(np.where(diffs > 0, diffs, 0))
     losses_val = np.mean(np.where(diffs < 0, -diffs, 0))
     rs = gains / max(losses_val, 1e-9)
     rsi = 100.0 - (100.0 / (1.0 + rs))
-    if rsi > 85:
+    if rsi > 82:
         return {"enter": False, "strength": 0.0, "reason": "overbought", "details": {"rsi": rsi}}
+
+    # VWAP trend: price should be above VWAP (bullish)
+    if n >= 20:
+        _vwap_num = np.sum(c[-20:] * v[-20:])
+        _vwap_den = np.sum(v[-20:])
+        vwap = _vwap_num / max(_vwap_den, 1e-9)
+        if c[-1] < vwap * 0.995:  # below VWAP = bearish, skip
+            combined_strength *= 0.6  # dampen, don't block entirely
+
+    # ATR filter: skip if volatility is extremely low (dead market)
+    if n >= 15:
+        atr = np.mean(np.abs(np.diff(c[-15:])))
+        atr_pct = atr / c[-1] if c[-1] > 0 else 0
+        if atr_pct < 0.001:  # less than 0.1% movement = dead
+            return {"enter": False, "strength": 0.0, "reason": "dead_market", "details": {}}
+
+    # EMA alignment: 8 EMA > 21 EMA = uptrend
+    ema_boost = 0.0
+    if n >= 22:
+        ema8 = _ema(c[-22:], 8)
+        ema21 = _ema(c[-22:], 21)
+        if ema8 > ema21:
+            ema_boost = 0.10  # trending up = bonus
+        else:
+            combined_strength *= 0.7  # counter-trend = dampen
+
+    combined_strength = min(combined_strength + ema_boost, 1.0)
+
+    # MACD confirmation: signal line crossover
+    macd_boost = 0.0
+    if n >= 30:
+        ema12 = _ema(c[-30:], 12)
+        ema26 = _ema(c[-30:], 26)
+        macd_line = ema12 - ema26
+        if macd_line > 0:
+            macd_boost = 0.05
+
+    combined_strength = min(combined_strength + macd_boost, 1.0)
 
     return {
         "enter": True,
@@ -121,5 +160,18 @@ def detect_all_signals(closes, highs, lows, volumes,
             "rsi": round(rsi, 1),
             "chronos": round(chronos_forecast, 4),
             "n_signals": len(signals),
+            "ema_aligned": ema_boost > 0,
+            "macd_positive": macd_boost > 0,
         },
     }
+
+
+def _ema(data, period):
+    """Simple EMA calculation."""
+    if len(data) < period:
+        return float(np.mean(data))
+    mult = 2.0 / (period + 1)
+    ema = float(data[0])
+    for val in data[1:]:
+        ema = (float(val) - ema) * mult + ema
+    return ema
