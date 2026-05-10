@@ -352,14 +352,14 @@ class HydraAlgorithm(QCAlgorithm):
         max_ret = (pos["high_water"] - entry_px) / entry_px
 
         # ── EXIT 1: Stop Loss (adaptive by reason) ──────────────────────
-        sl = 0.04 if pos["reason"] == "momentum" else 0.035
+        sl = 0.07 if pos["reason"] == "momentum" else 0.05  # wide SL — hold through swings
         if ret <= -sl:
             self._do_exit(sym, "EXIT_SL")
             return
 
         # ── EXIT 2: Trailing Stop ────────────────────────────────────────
-        trail_arm = 0.03 if pos["reason"] == "dip_buy" else 0.05
-        trail_pct = 0.03  # 3% trail — wide enough for hourly bars
+        trail_arm = 0.05 if pos["reason"] == "dip_buy" else 0.08
+        trail_pct = 0.15  # 15% trail — ride the ENTIRE multi-week pump
 
         if not pos["trail_active"] and max_ret >= trail_arm:
             pos["trail_active"] = True
@@ -380,10 +380,10 @@ class HydraAlgorithm(QCAlgorithm):
                     return
 
         # ── EXIT 4: Time Decay ───────────────────────────────────────────
-        if elapsed_h >= 48:
+        if elapsed_h >= 336:  # 14 days max hold
             self._do_exit(sym, "EXIT_TIMEOUT")
             return
-        if elapsed_h >= 24 and ret < 0.005:
+        if elapsed_h >= 168 and ret < 0.01:  # 7 days flat = exit
             self._do_exit(sym, "EXIT_TIMEOUT")
             return
 
