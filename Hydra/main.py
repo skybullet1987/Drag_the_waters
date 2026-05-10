@@ -64,6 +64,9 @@ class HydraAlgorithm(QCAlgorithm):
         self._last_exit = {}  # sym -> time
         self._portfolio_high = 100.0
 
+        # HMM regime confidence
+        self._hmm_bullish = True  # default optimistic until trained
+
         self.set_warmup(timedelta(days=30))
         self.schedule.on(self.date_rules.every_day(),
                          self.time_rules.midnight, self._daily_reset)
@@ -87,24 +90,34 @@ class HydraAlgorithm(QCAlgorithm):
         if self._portfolio_high > 0 and (self._portfolio_high - pv) / self._portfolio_high > 0.20:
             return
 
-        # FAST REGIME KILL SWITCH: exit ALL when BTC turns weak
+        # ── MULTI-LAYER RISK-OFF (fast + medium + slow) ────────────────────
         regime = self._get_regime()
+
+        # LAYER 1 (FAST): BTC below 20-hour EMA → immediate risk reduction
+        if self._btc and len(self._closes[self._btc]) >= 25 and self._positions:
+            btc_c = np.array(list(self._closes[self._btc]))
+            btc_ema20 = np.mean(btc_c[-20:])
+            btc_ret24h = (btc_c[-1] - btc_c[-25]) / btc_c[-25]
+
+            # BTC crash: -3% in 24h → exit ALL
+            if btc_ret24h < -0.03:
+                for sym in list(self._positions.keys()):
+                    self._do_exit(sym, "EXIT_BTC_CRASH")
+                return
+
+            # BTC below EMA20 → exit losing positions, keep winners
+            if btc_c[-1] < btc_ema20:
+                for sym in list(self._positions.keys()):
+                    pos = self._positions[sym]
+                    ret = (float(self.securities[sym].price) - pos["entry_px"]) / pos["entry_px"] if pos["entry_px"] > 0 else 0
+                    if ret < 0.005:
+                        self._do_exit(sym, "EXIT_BTC_WEAK")
+
+        # LAYER 2 (MEDIUM): regime = bear/chop → exit ALL
         if regime in ("bear", "chop") and self._positions:
             for sym in list(self._positions.keys()):
-                pos = self._positions[sym]
-                ret = (float(self.securities[sym].price) - pos["entry_px"]) / pos["entry_px"] if pos["entry_px"] > 0 else 0
-                if ret < 0.01:  # exit anything not solidly profitable
-                    self._do_exit(sym, "EXIT_REGIME_KILL")
-            return  # don't scan for entries in bear
-
-        # BTC momentum deterioration: exit if BTC drops 2%+ in 24h
-        if self._btc and len(self._closes[self._btc]) >= 25:
-            btc_c = list(self._closes[self._btc])
-            btc_ret24h = (btc_c[-1] - btc_c[-25]) / btc_c[-25]
-            if btc_ret24h < -0.03 and self._positions:
-                for sym in list(self._positions.keys()):
-                    self._do_exit(sym, "EXIT_BTC_WEAK")
-                return
+                self._do_exit(sym, "EXIT_REGIME")
+            return
 
         # Check exits on all positions
         for sym in list(self._positions.keys()):
@@ -143,14 +156,31 @@ class HydraAlgorithm(QCAlgorithm):
         golden_cross = sma50 > sma200
         above_both = price > sma50 and price > sma200
 
-        if golden_cross and above_both and ret_30d > 0.05 and ret_7d > 0.02:
+        # HMM overlay: 2-state regime from BTC return volatility
+        try:
+            from hmmlearn.hmm import GaussianHMM
+            if len(c) >= 200:
+                rets = np.diff(c[-200:]) / c[-200:-1]
+                hmm = GaussianHMM(n_components=2, covariance_type="diag", n_iter=50,
+                                   random_state=42)
+                hmm.fit(rets.reshape(-1, 1))
+                states = hmm.predict(rets.reshape(-1, 1))
+                # Identify which state is bullish (higher mean return)
+                mean0 = np.mean(rets[states == 0])
+                mean1 = np.mean(rets[states == 1])
+                bull_state = 0 if mean0 > mean1 else 1
+                self._hmm_bullish = (states[-1] == bull_state)
+        except Exception:
+            self._hmm_bullish = True  # default if HMM fails
+
+        if golden_cross and above_both and ret_30d > 0.05 and ret_7d > 0.02 and self._hmm_bullish:
             return "strong_bull"
-        elif golden_cross and above_both and ret_30d > 0:
+        elif golden_cross and above_both and ret_30d > 0 and self._hmm_bullish:
             return "bull"
-        elif price < sma200 or (price < sma50 and ret_30d < -0.05):
+        elif price < sma200 or (price < sma50 and ret_30d < -0.05) or not self._hmm_bullish:
             return "bear"
         else:
-            return "chop"  # chop = minimal exposure
+            return "chop"
 
     # ══════════════════════════════════════════════════════════════════════
     # SIGNAL DETECTION (3 strategies, regime-dependent)
@@ -371,9 +401,17 @@ class HydraAlgorithm(QCAlgorithm):
             self._do_exit(sym, "EXIT_SL")
             return
 
-        # ── EXIT 2: Trailing Stop ────────────────────────────────────────
-        trail_arm = 0.03 if pos["reason"] == "dip_buy" else 0.05
-        trail_pct = 0.03  # 3% trail — wide enough for hourly bars
+        # ── EXIT 2: ATR-Adaptive Trailing Stop ───────────────────────────
+        # Trail width = 2.5 × ATR → wide in pumps, tight in quiet
+        c = self._closes.get(sym)
+        if c and len(c) >= 15:
+            ca = np.array(list(c))
+            atr = np.mean(np.abs(np.diff(ca[-15:])))
+            atr_pct = atr / price if price > 0 else 0.03
+            trail_pct = max(0.02, min(atr_pct * 2.5, 0.08))  # floor 2%, cap 8%
+        else:
+            trail_pct = 0.03
+        trail_arm = trail_pct * 1.5  # arm at 1.5x the trail width
 
         if not pos["trail_active"] and max_ret >= trail_arm:
             pos["trail_active"] = True
