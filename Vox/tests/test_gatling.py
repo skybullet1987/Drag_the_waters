@@ -198,12 +198,12 @@ class TestGatlingProfile:
         assert algo._label_sl >= 0.015
         assert algo._label_horizon >= 72
 
-    def test_allocation_kelly(self):
+    def test_allocation_aggressive(self):
         from core import setup_risk_profile
         algo = MockAlgo("gatling")
         setup_risk_profile(algo)
-        assert algo._alloc >= 0.40
-        assert algo._use_kelly is True
+        assert algo._alloc >= 0.70
+        assert algo._use_kelly is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

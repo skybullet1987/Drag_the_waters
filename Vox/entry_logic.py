@@ -255,12 +255,13 @@ def try_enter(algo):
             highs = list(st.get("highs", closes))
 
             _fc = _fc_cache.get(sym, (0.0, 0.0))
+            _has_forecast = _fc[0] != 0.0 or _fc[1] != 0.0
             decision = momentum_entry_decision(
                 closes=closes, volumes=volumes, highs=highs,
                 chronos_forecast=_fc[0], wavelet_forecast=_fc[1],
                 btc_ret_4=_btc_ret4,
                 breakout_lookback=20, vol_mult=1.3, min_strength=0.2,
-                require_chronos_confirm=False,
+                require_chronos_confirm=_has_forecast,  # use Chronos when available
             )
             if decision["enter"]:
                 momentum_scores[sym] = (decision["strength"], decision["reason"], feat)

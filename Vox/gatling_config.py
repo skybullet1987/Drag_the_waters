@@ -24,19 +24,19 @@ GATLING_MIN_AGREE               = 0      # zero agreement gate (let voting decid
 GATLING_EV_GAP                  = 0.0    # no gap between candidates
 GATLING_COST_BPS                = 30     # realistic Kraken fee estimate
 
-# ── Position sizing (Kelly-adaptive — GBC-focused) ──────────────────────────
-GATLING_ALLOCATION              = 0.50   # 50% base — survive losing streaks
-GATLING_MAX_ALLOC               = 0.70   # cap at 70%
-GATLING_MIN_ALLOC               = 0.25   # at least 25%
-GATLING_USE_KELLY               = True   # Kelly sizes up when GBC is confident
+# ── Position sizing (aggressive compounding for 100x target) ────────────────
+GATLING_ALLOCATION              = 0.80   # 80% base — compound aggressively
+GATLING_MAX_ALLOC               = 0.95   # near-full
+GATLING_MIN_ALLOC               = 0.50   # minimum 50%
+GATLING_USE_KELLY               = False  # flat 80% — maximize compounding
 GATLING_KELLY_FRAC              = 1.00   # full-Kelly (unused when Kelly off)
 
 # ── Exit parameters (trend-following: wide TP, trailing stop) ────────────────
-GATLING_TAKE_PROFIT             = 0.10   # +10% TP — big trend target
-GATLING_STOP_LOSS               = 0.05   # -5% SL — crypto swings 3-4% normally
-GATLING_TIMEOUT_HOURS           = 72.0   # 72h hold — give trends 3 days
-GATLING_MIN_HOLD_MINUTES        = 120    # hold 2h minimum (avoid noise exits)
-GATLING_EMERGENCY_SL            = 0.08   # 8% emergency stop
+GATLING_TAKE_PROFIT             = 0.12   # +12% TP — big trend, trail captures
+GATLING_STOP_LOSS               = 0.025  # -2.5% SL — TIGHT (asymmetric: small loss, big win)
+GATLING_TIMEOUT_HOURS           = 48.0   # 48h hold
+GATLING_MIN_HOLD_MINUTES        = 45     # 45min min hold
+GATLING_EMERGENCY_SL            = 0.05   # 5% emergency stop
 
 # ── Cooldowns (short but present — avoid re-entering failed trades) ──────────
 GATLING_COOLDOWN_MINS           = 5      # 5min global cooldown
@@ -51,8 +51,8 @@ GATLING_DECISION_INTERVAL_MIN   = 15     # every 15-min bar
 
 # ── Runner mode ON (trailing stop — let winners run) ─────────────────────────
 GATLING_RUNNER_MODE             = True   # trailing stop instead of instant TP
-GATLING_TRAIL_AFTER_TP          = 0.06   # arm trailing at +6%
-GATLING_TRAIL_PCT               = 0.035  # trail 3.5% from high-water mark
+GATLING_TRAIL_AFTER_TP          = 0.03   # arm trailing early at +3%
+GATLING_TRAIL_PCT               = 0.02   # tight trail 2% — lock in profits fast
 
 # ── Anti-chop / loss-streak (active — protect from chop regimes) ─────────────
 GATLING_LOSS_WINDOW_HOURS       = 12     # 12h window for SL counting
@@ -70,9 +70,9 @@ GATLING_CONFIRM_RET16_MIN       = -1.0
 GATLING_CONFIRM_VOLR_MIN        = 0.0
 
 # ── Label parameters (WIDE labels — teach models to find real trends) ────────
-GATLING_LABEL_TP                = 0.08   # +8% — aligned with execution TP
-GATLING_LABEL_SL                = 0.04   # -4% — aligned with execution SL
-GATLING_LABEL_HORIZON_BARS      = 192    # 48h at 15-min bars (3-day trends)
+GATLING_LABEL_TP                = 0.06   # +6% — trend target for labels
+GATLING_LABEL_SL                = 0.025  # -2.5% — aligned with tight execution SL
+GATLING_LABEL_HORIZON_BARS      = 96     # 24h at 15-min bars
 
 # ── Profit-voting (active with moderate thresholds) ──────────────────────────
 GATLING_PROFIT_VOTING_MODE      = True
@@ -97,7 +97,7 @@ GATLING_ALLOWED_MODES           = ["risk_on_trend", "pump", "chop",
                                    "high_vol_reversal", "selloff"]  # all allowed
 
 # ── Breakeven (active — protect profitable trades) ───────────────────────────
-GATLING_BREAKEVEN_AFTER         = 0.05   # arm breakeven at +5%
+GATLING_BREAKEVEN_AFTER         = 0.015  # arm breakeven early at +1.5%
 GATLING_BREAKEVEN_BUFFER        = 0.005  # stop at entry + 0.5%
 GATLING_MOM_FAIL_ENABLED        = False  # disabled — was causing premature exits
 GATLING_MOM_FAIL_MIN_HOLD       = 999

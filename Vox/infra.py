@@ -19,10 +19,22 @@ from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════
 
 KRAKEN_PAIRS = [
-    # Top coins — removed SUI (-13.6% loss) and XRP (-6% loss, 0 wins)
-    "BTCUSD", "ETHUSD", "SOLUSD", "ADAUSD",           # mega cap proven
-    "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD", "NEARUSD",
-    "UNIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",       # mixed results
+    # Top 50 Kraken USD pairs by volume — more coins = more breakout opportunities
+    # Tier 1: mega cap
+    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
+    "XDGUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
+    # Tier 2: large cap
+    "NEARUSD", "SUIUSD", "TRXUSD", "BCHUSD", "TONUSD",
+    "TAOUSD", "FETUSD", "HBARUSD", "RENDERUSD", "ICPUSD",
+    # Tier 3: mid cap high volume
+    "ALGOUSD", "STXUSD", "AAVEUSD", "UNIUSD", "PEPEUSD",
+    "ONDOUSD", "KASUSD", "PENDLEUSD", "CRVUSD", "INJUSD",
+    # Tier 4: mid cap diversifiers
+    "JUPUSD", "TIAUSD", "EIGENUSD", "LDOUSD", "ARBUSD",
+    "BONKUSD", "SHIBUSD", "APTUSD", "FLRUSD", "ATOMUSD",
+    # Tier 5: volatile movers
+    "OPUSD", "SEIUSD", "GRTUSD", "WIFUSD", "POLUSD",
+    "GALAUSD", "ETCUSD", "STRKUSD", "WLDUSD", "QNTUSD",
 ]
 
 

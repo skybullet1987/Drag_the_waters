@@ -223,7 +223,7 @@ class VoxAlgorithm(QCAlgorithm):
         # ── Forecast feature cache (Chronos + Wavelet) ───────────────────────
         self._forecast_cache = {}    # symbol -> (chronos_ret, wavelet_ret)
         self._forecast_last_update = None  # datetime of last forecast refresh
-        self._forecast_interval_hours = 4  # update every 4h (too slow for every bar)
+        self._forecast_interval_hours = 1  # update every 1h
 
         # ── Ruthless v4 position state ────────────────────────────────────────
         self._max_return_seen     = 0.0
@@ -337,7 +337,8 @@ class VoxAlgorithm(QCAlgorithm):
                     if fallback_px > 0:
                         self._check_exit(fallback_px)
 
-        # ── Update forecast features periodically ─────────────────────────────
+        # ── Update forecast features (Chronos/Wavelet) on every bar ──────────
+        # Must run BEFORE entry logic so momentum_entry_decision has forecasts
         if getattr(self, "_risk_profile", "") == "gatling":
             self._update_forecasts()
 
