@@ -49,7 +49,7 @@ from Pulse.regime import (
     detect_market_mode, golden_cross_regime, btc_dominance_regime,
     compose_regime_size_multiplier,
 )
-from Pulse.alt_data import FGSignal
+from Pulse.alt_data import FGSignal, FundingSignal
 
 
 # ─── Default thresholds (will be walk-forward tuned in Phase 3) ─────────────
@@ -96,7 +96,8 @@ class ScalpScore:
     rv_size_mult:      float = 1.0
     regime_size_mult:  float = 1.0
     fg_size_mult:      float = 1.0
-    composed_size_mult: float = 1.0   # product of all four
+    funding_size_mult: float = 1.0   # Tier C.4 — Bybit funding rate signal
+    composed_size_mult: float = 1.0   # product of all five
 
     # Diagnostics
     rsi:               float = 50.0
@@ -106,6 +107,7 @@ class ScalpScore:
     realized_vol_bps:  float = 0.0
     market_mode:       str   = "chop"
     fg_regime:         str   = "neutral"
+    funding_regime:    str   = "balanced"
 
     def as_dict(self) -> dict:
         return {
@@ -127,6 +129,7 @@ class ScalpScore:
                 "rv":      round(self.rv_size_mult, 3),
                 "regime":  round(self.regime_size_mult, 3),
                 "fg":      round(self.fg_size_mult, 3),
+                "funding": round(self.funding_size_mult, 3),
                 "composed": round(self.composed_size_mult, 3),
             },
             "diag": {
@@ -137,6 +140,7 @@ class ScalpScore:
                 "realized_vol_bps": round(self.realized_vol_bps, 1),
                 "market_mode":      self.market_mode,
                 "fg_regime":        self.fg_regime,
+                "funding_regime":   self.funding_regime,
             },
         }
 
@@ -165,6 +169,7 @@ class MarketContext:
     alts_30d_returns:      Sequence[float] = field(default_factory=list)
     symbol_recent_returns: dict[str, float] = field(default_factory=dict)
     fg_value:              float | None = None
+    funding_rate:          float | None = None    # Tier C.4 — Bybit BTC perp
     kyle_lambda_history:   dict[str, list[float]] = field(default_factory=dict)
     rv_bps_history:        dict[str, list[float]] = field(default_factory=dict)
 
@@ -346,7 +351,7 @@ def compute_scalp_score(
     )
     out.regime_size_mult = composed["size_mult"]
 
-    # Fear & Greed
+        # Fear & Greed
     fg = FGSignal.from_value(ctx.fg_value)
     out.fg_size_mult = fg.size_multiplier
     out.fg_regime = fg.regime
@@ -354,9 +359,19 @@ def compute_scalp_score(
         out.enter = False
         out.high_conviction = False
 
+    # Tier C.4 — Bybit funding rate (positioning extremes)
+    funding = FundingSignal.from_rate(ctx.funding_rate)
+    out.funding_size_mult = funding.size_modifier
+    out.funding_regime = funding.regime
+    if funding.block_new_entries:
+        # Panic-positive funding (≥+0.10%/8h) → no new long entries
+        out.enter = False
+        out.high_conviction = False
+
     out.composed_size_mult = (
         out.kyle_size_mult * out.rv_size_mult
         * out.regime_size_mult * out.fg_size_mult
+        * out.funding_size_mult
     )
 
     # Diagnostics: volume z-score (always compute for logging)

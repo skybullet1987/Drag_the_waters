@@ -269,3 +269,65 @@ def test_high_conviction_flag_set_above_07():
         assert s.high_conviction
     else:
         assert not s.high_conviction
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Tier C.4 funding rate integration
+# ───────────────────────────────────────────────────────────────────────────────
+
+def test_scalp_default_funding_mult_is_one():
+    """No funding rate in context → funding mult = 1.0 (neutral)."""
+    bars = _flat_bars()
+    s = compute_scalp_score(bars)
+    assert s.funding_size_mult == 1.0
+    assert s.funding_regime == "balanced"
+
+
+def test_scalp_deep_short_squeeze_boosts_size():
+    """Funding -0.10% per 8h → 1.20× size boost."""
+    bars = _strong_uptrend_with_volume_burst()
+    ctx = MarketContext(funding_rate=-0.001)
+    s = compute_scalp_score(bars, ctx)
+    assert s.funding_regime == "deep_short_squeeze"
+    assert s.funding_size_mult == 1.20
+
+
+def test_scalp_deep_long_crowd_halves_size():
+    """Funding +0.06% per 8h → 0.50× size penalty."""
+    bars = _strong_uptrend_with_volume_burst()
+    ctx = MarketContext(funding_rate=0.0006)
+    s = compute_scalp_score(bars, ctx)
+    assert s.funding_regime == "deep_long_crowd"
+    assert s.funding_size_mult == 0.5
+
+
+def test_scalp_panic_funding_blocks_entry():
+    """Funding +0.15% per 8h → block new entries even on a perfect score."""
+    bars = _strong_uptrend_with_volume_burst()
+    ctx = MarketContext(funding_rate=0.0015)
+    s = compute_scalp_score(bars, ctx)
+    assert s.funding_regime == "deep_long_crowd"
+    assert not s.enter   # blocked
+
+
+def test_composed_size_mult_includes_funding():
+    """The composed multiplier is now the product of FIVE multipliers."""
+    bars = _flat_bars("INJUSD")
+    ctx = MarketContext(fg_value=20.0, funding_rate=-0.001)
+    s = compute_scalp_score(bars, ctx)
+    expected = (
+        s.kyle_size_mult * s.rv_size_mult
+        * s.regime_size_mult * s.fg_size_mult * s.funding_size_mult
+    )
+    assert s.composed_size_mult == pytest.approx(expected, rel=1e-9)
+
+
+def test_as_dict_includes_funding_fields():
+    bars = _strong_uptrend_with_volume_burst()
+    ctx = MarketContext(funding_rate=-0.001)
+    s = compute_scalp_score(bars, ctx)
+    d = s.as_dict()
+    assert "funding" in d["size_multipliers"]
+    assert "funding_regime" in d["diag"]
+    assert d["size_multipliers"]["funding"] == 1.20
+    assert d["diag"]["funding_regime"] == "deep_short_squeeze"
