@@ -212,3 +212,138 @@ def test_sizer_all_posteriors_returns_copy():
     # Modifying the snapshot doesn't affect the sizer's state
     snap.clear()
     assert sizer.posterior("X").n_observed == 1
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# PyramidSizer (Tier F.1)
+# ───────────────────────────────────────────────────────────────────────────────
+
+from Pulse.sizing import (
+    PyramidLadder, PyramidPositionState, PyramidDecision, PyramidSizer,
+)
+
+
+def test_pyramid_ladder_invalid_args():
+    with pytest.raises(ValueError):
+        PyramidLadder(rung_mfe_pcts=(0.03, 0.06), rung_add_fracs=(0.33,))
+    with pytest.raises(ValueError):
+        PyramidLadder(rung_mfe_pcts=(0,), rung_add_fracs=(0.33,))
+    with pytest.raises(ValueError):
+        PyramidLadder(rung_mfe_pcts=(0.03,), rung_add_fracs=(0,))
+    with pytest.raises(ValueError):
+        PyramidLadder(max_total_size_mult=1.0)
+
+
+def test_pyramid_state_seeds_current_size_to_initial():
+    s = PyramidPositionState(symbol="BTC", initial_size=500.0)
+    assert s.current_size == 500.0
+    assert s.rungs_fired == set()
+
+
+def test_pyramid_no_add_if_not_in_profit():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    d = sizer.evaluate(state, current_mfe_pct=0.0)
+    assert not d.should_add
+    assert d.reason == "not_in_profit"
+
+
+def test_pyramid_no_add_below_first_rung():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    d = sizer.evaluate(state, current_mfe_pct=0.02)   # below 3% rung
+    assert not d.should_add
+
+
+def test_pyramid_fires_first_rung_at_3pct():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    d = sizer.evaluate(state, current_mfe_pct=0.03)
+    assert d.should_add
+    assert d.rung_index == 0
+    assert d.add_size == pytest.approx(500 * 0.33)
+    assert d.new_total_size == pytest.approx(500 * 1.33)
+
+
+def test_pyramid_commit_add_updates_state():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    d = sizer.evaluate(state, current_mfe_pct=0.04)
+    sizer.commit_add(state, d)
+    assert 0 in state.rungs_fired
+    assert state.current_size == pytest.approx(500 * 1.33)
+
+
+def test_pyramid_does_not_refire_same_rung():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    d = sizer.evaluate(state, current_mfe_pct=0.04)
+    sizer.commit_add(state, d)
+    # Re-evaluate at same MFE: should NOT add again
+    d2 = sizer.evaluate(state, current_mfe_pct=0.04)
+    assert not d2.should_add
+    assert "all_rungs" in d2.reason or "below" in d2.reason
+
+
+def test_pyramid_fires_second_rung_at_6pct():
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 500.0)
+    # Fire first rung at +3%
+    d1 = sizer.evaluate(state, current_mfe_pct=0.04)
+    sizer.commit_add(state, d1)
+    # Fire second rung at +7%
+    d2 = sizer.evaluate(state, current_mfe_pct=0.07)
+    assert d2.should_add
+    assert d2.rung_index == 1
+    # Total size should now be 1 + 0.33 + 0.33 = 1.66× original
+    assert d2.new_total_size == pytest.approx(500 * 1.66)
+
+
+def test_pyramid_blocks_when_max_total_exceeded():
+    """A 3-rung ladder summing to 3.0 mult would exceed default 2.0 cap."""
+    ladder = PyramidLadder(
+        rung_mfe_pcts=(0.03, 0.06, 0.09),
+        rung_add_fracs=(0.50, 0.50, 0.50),
+        max_total_size_mult=2.0,
+    )
+    sizer = PyramidSizer(ladder)
+    state = PyramidPositionState("BTC", 100.0)
+    # Fire first two rungs (each adds 50%)
+    d1 = sizer.evaluate(state, current_mfe_pct=0.04)
+    sizer.commit_add(state, d1)
+    d2 = sizer.evaluate(state, current_mfe_pct=0.07)
+    sizer.commit_add(state, d2)
+    # Now state = 100 + 50 + 50 = 200; third add would push to 250 → cap
+    d3 = sizer.evaluate(state, current_mfe_pct=0.10)
+    assert not d3.should_add
+    assert "exceed_max_total_mult" in d3.reason
+
+
+def test_pyramid_jump_skips_first_rung_to_second():
+    """If a sudden gap to +7% happens before we fire rung 1, both rungs
+    fire across two ticks (the second has the same priority as the first)."""
+    sizer = PyramidSizer()
+    state = PyramidPositionState("BTC", 100.0)
+    # Big jump: go straight to +7%
+    d1 = sizer.evaluate(state, current_mfe_pct=0.07)
+    assert d1.should_add
+    # First rung fires first (lowest index)
+    assert d1.rung_index == 0
+    sizer.commit_add(state, d1)
+    # Next tick (still +7%) — second rung fires
+    d2 = sizer.evaluate(state, current_mfe_pct=0.07)
+    assert d2.should_add
+    assert d2.rung_index == 1
+
+
+def test_pyramid_independent_state_per_position():
+    """Two separate PyramidPositionState objects don't interfere."""
+    sizer = PyramidSizer()
+    btc = PyramidPositionState("BTC", 100.0)
+    eth = PyramidPositionState("ETH", 200.0)
+    d1 = sizer.evaluate(btc, current_mfe_pct=0.04)
+    sizer.commit_add(btc, d1)
+    # ETH still has both rungs available
+    d2 = sizer.evaluate(eth, current_mfe_pct=0.04)
+    assert d2.should_add
+    assert d2.rung_index == 0

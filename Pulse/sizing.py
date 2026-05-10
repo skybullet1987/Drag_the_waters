@@ -225,3 +225,110 @@ class BayesianSymbolSizer:
 
     def all_posteriors(self) -> dict[str, SymbolPosterior]:
         return dict(self._posteriors)
+
+
+# ─── PyramidSizer (Tier F.1, PLAN.md §6.F.1) ────────────────────────────────
+
+@dataclass
+class PyramidLadder:
+    """Ladder of incremental adds to a winning position.
+
+    PLAN.md §6.F.1: at +3% MFE add 33% to position; at +6% add another 33%.
+    Trail the whole stack at trail_pct from peak.
+
+    Defaults are conservative (3%/6% rungs, 33% adds) but tunable.
+    Each rung can fire at most once per position lifetime.
+    """
+    rung_mfe_pcts:   tuple = (0.03, 0.06)    # add at these MFE thresholds
+    rung_add_fracs:  tuple = (0.33, 0.33)    # how much to add (frac of original size)
+    max_total_size_mult: float = 2.0         # never exceed 2× original
+
+    def __post_init__(self):
+        if len(self.rung_mfe_pcts) != len(self.rung_add_fracs):
+            raise ValueError(
+                "rung_mfe_pcts and rung_add_fracs must be same length"
+            )
+        for p in self.rung_mfe_pcts:
+            if p <= 0:
+                raise ValueError("rung_mfe_pcts must be > 0")
+        for f in self.rung_add_fracs:
+            if f <= 0:
+                raise ValueError("rung_add_fracs must be > 0")
+        if self.max_total_size_mult <= 1.0:
+            raise ValueError("max_total_size_mult must be > 1.0")
+
+
+@dataclass
+class PyramidPositionState:
+    """Per-position state tracking which rungs have already fired."""
+    symbol:          str
+    initial_size:    float       # in dollars OR units; caller's choice
+    rungs_fired:     set = field(default_factory=set)  # set of rung indexes
+    current_size:    float = 0.0   # accumulated total
+
+    def __post_init__(self):
+        if self.current_size == 0.0:
+            self.current_size = self.initial_size
+
+
+@dataclass(frozen=True)
+class PyramidDecision:
+    """Per-tick decision for a position: should we add another tranche?"""
+    should_add:        bool
+    add_size:          float = 0.0
+    rung_index:        int = -1
+    new_total_size:    float = 0.0
+    reason:            str = ""
+
+
+class PyramidSizer:
+    """Decide when to add to a winning position based on MFE.
+
+    Usage::
+
+        sizer = PyramidSizer()
+        state = PyramidPositionState(symbol="BTC", initial_size=500.0)
+        # On every tick:
+        d = sizer.evaluate(state, current_mfe_pct=0.04)
+        if d.should_add:
+            broker.market_buy(state.symbol, d.add_size)
+            sizer.commit_add(state, d)
+    """
+
+    def __init__(self, ladder: PyramidLadder | None = None):
+        self.ladder = ladder or PyramidLadder()
+
+    def evaluate(self, state: PyramidPositionState,
+                 current_mfe_pct: float) -> PyramidDecision:
+        """Should we add at this MFE? Returns a PyramidDecision (does not mutate)."""
+        if current_mfe_pct <= 0:
+            return PyramidDecision(False, reason="not_in_profit")
+
+        for i, threshold in enumerate(self.ladder.rung_mfe_pcts):
+            if i in state.rungs_fired:
+                continue
+            if current_mfe_pct >= threshold:
+                add_frac = self.ladder.rung_add_fracs[i]
+                add_size = state.initial_size * add_frac
+                new_total = state.current_size + add_size
+                if new_total > state.initial_size * self.ladder.max_total_size_mult:
+                    return PyramidDecision(
+                        False,
+                        reason=f"rung_{i}_would_exceed_max_total_mult",
+                    )
+                return PyramidDecision(
+                    should_add=True,
+                    add_size=add_size,
+                    rung_index=i,
+                    new_total_size=new_total,
+                    reason=f"rung_{i}_mfe>={threshold}",
+                )
+        return PyramidDecision(False, reason="all_rungs_already_fired_or_below")
+
+    def commit_add(self, state: PyramidPositionState,
+                   decision: PyramidDecision) -> None:
+        """Apply the decision to the state (call after the broker fills the add)."""
+        if not decision.should_add:
+            return
+        state.rungs_fired.add(decision.rung_index)
+        state.current_size = decision.new_total_size
