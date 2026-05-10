@@ -43,6 +43,56 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
+# ─── Pure-Python override helpers (testable without QC) ────────────────────
+
+# Reserved keys the qc_sweep_runner may push to override per-window
+# backtest dates and other QC-parameter-style settings.
+SPECIAL_OVERRIDE_KEYS = (
+    "PULSE_OVERRIDE_START_YEAR",
+    "PULSE_OVERRIDE_START_MONTH",
+    "PULSE_OVERRIDE_START_DAY",
+    "PULSE_OVERRIDE_END_YEAR",
+    "PULSE_OVERRIDE_END_MONTH",
+    "PULSE_OVERRIDE_END_DAY",
+    "use_harsh_sim",
+    "start_year", "end_year", "initial_cash",
+    "decision_interval_min",
+)
+
+
+def split_runtime_overrides(overrides_dict, config_module):
+    """Split an overrides dict into (special_dict, config_assignments).
+
+    Special keys are stashed for later lookup; config keys are immediately
+    written into the supplied config_module. Returns the special dict.
+    """
+    special = {}
+    for k, v in (overrides_dict or {}).items():
+        if k in SPECIAL_OVERRIDE_KEYS:
+            special[k] = v
+        elif hasattr(config_module, k):
+            setattr(config_module, k, v)
+    return special
+
+
+def resolve_param(name, runtime_overrides, qc_get_param_fn, default=None):
+    """Read a parameter, preferring runtime_overrides over QC parameters.
+
+    Args:
+        name: parameter name
+        runtime_overrides: dict (may be None / empty)
+        qc_get_param_fn: callable(name) → str or None (e.g. self.GetParameter)
+        default: returned when both sources are missing/empty
+
+    Returns the resolved value (raw — caller casts to int/float/bool as needed).
+    """
+    ro = runtime_overrides or {}
+    if name in ro:
+        return ro[name]
+    qc_val = qc_get_param_fn(name) if qc_get_param_fn else None
+    return qc_val if qc_val not in (None, "") else default
+
+
 # Pulse imports
 from Pulse.config import (
     INITIAL_CASH_USD,
@@ -192,16 +242,27 @@ if HAS_QC:
             # re-uploading the whole codebase.
             self._apply_runtime_overrides()
 
-            # ── Parameters ────────────────────────────────────────────────
-            start_year = int(self.GetParameter("start_year") or 2025)
-            end_year   = int(self.GetParameter("end_year")   or 2026)
-            cash       = float(self.GetParameter("initial_cash") or INITIAL_CASH_USD)
-            self._decision_interval_min = int(
-                self.GetParameter("decision_interval_min") or 15
-            )
+            # ── Parameters (runtime_overrides win, then QC params, then defaults) ─
+            start_year = int(self._param("start_year", 2025))
+            end_year   = int(self._param("end_year",   2026))
+            cash       = float(self._param("initial_cash", INITIAL_CASH_USD))
+            self._decision_interval_min = int(self._param("decision_interval_min", 15))
+
+            # Per-window date overrides from Phase 3 sweep (month + day, not just year)
+            start_month = int(self._param("PULSE_OVERRIDE_START_MONTH", 1))
+            start_day   = int(self._param("PULSE_OVERRIDE_START_DAY", 1))
+            end_month   = int(self._param("PULSE_OVERRIDE_END_MONTH", 12))
+            end_day     = int(self._param("PULSE_OVERRIDE_END_DAY", 31))
+            # If the more granular override dates are present, use them
+            ovr_start_y = self._param("PULSE_OVERRIDE_START_YEAR")
+            ovr_end_y   = self._param("PULSE_OVERRIDE_END_YEAR")
+            if ovr_start_y is not None:
+                start_year = int(ovr_start_y)
+            if ovr_end_y is not None:
+                end_year = int(ovr_end_y)
 
             # ── Phase 2 harsh-sim flag (auto-applied if true) ─────────────
-            harsh_raw = self.GetParameter("use_harsh_sim")
+            harsh_raw = self._param("use_harsh_sim")
             self._use_harsh_sim = (
                 str(harsh_raw).lower() in ("true", "1", "yes")
                 if harsh_raw else False
@@ -209,8 +270,8 @@ if HAS_QC:
             if self._use_harsh_sim:
                 self.Log("[pulse] HARSH-SIM mode enabled — pessimistic slippage/fees")
 
-            self.SetStartDate(start_year, 1, 1)
-            self.SetEndDate(end_year, 12, 31)
+            self.SetStartDate(start_year, start_month, start_day)
+            self.SetEndDate(end_year, end_month, end_day)
             self.SetCash(cash)
             self.SetBrokerageModel(BrokerageName.Kraken, AccountType.Cash)
             self.UniverseSettings.Resolution = Resolution.Minute
@@ -293,35 +354,28 @@ if HAS_QC:
                 self.Debug(f"security init failed for {security.Symbol}: {exc}")
 
         def _apply_runtime_overrides(self):
-            """Apply per-backtest parameter overrides from runtime_overrides.py.
-
-            Convention: a Phase 3 sweep helper pushes a tiny `runtime_overrides.py`
-            to the project containing:
-                OVERRIDES = {
-                    "SCALP_ENTRY_THRESHOLD": 0.55,
-                    "QUICK_TAKE_PROFIT_PCT": 0.12,
-                    ...
-                }
-            We import it (gracefully no-op if missing) and assign each key
-            into the `config` module so subsequent imports pick up the new
-            values.
-
-            This sidesteps QC's per-backtest parameter API limitations while
-            keeping the override file small and easy to push.
-            """
+            """Load + apply runtime_overrides.py if present. See module-level
+            split_runtime_overrides() for the underlying logic."""
+            self._runtime_overrides: dict = {}
             try:
                 import config as _cfg
                 import runtime_overrides as _ro
             except Exception:
-                return   # No overrides file → use defaults
+                return
             overrides = getattr(_ro, "OVERRIDES", {}) or {}
-            applied = 0
-            for k, v in overrides.items():
-                if hasattr(_cfg, k):
-                    setattr(_cfg, k, v)
-                    applied += 1
-            if applied:
-                self.Log(f"[pulse] runtime_overrides applied: {applied} params")
+            self._runtime_overrides = split_runtime_overrides(overrides, _cfg)
+            if self._runtime_overrides or overrides:
+                self.Log(
+                    f"[pulse] runtime_overrides loaded: "
+                    f"{len(self._runtime_overrides)} special + "
+                    f"{len(overrides) - len(self._runtime_overrides)} config"
+                )
+
+        def _param(self, name: str, default=None):
+            return resolve_param(
+                name, getattr(self, "_runtime_overrides", None),
+                self.GetParameter, default,
+            )
 
         def _initial_universe(self) -> list[str]:
             """Curated 25-symbol Kraken Pro universe.
