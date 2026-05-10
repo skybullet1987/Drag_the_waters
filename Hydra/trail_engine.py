@@ -15,15 +15,15 @@ class TrailEngine:
 
     # Scalp mode: quick in-and-out, small profits
     SCALP_SL       = 0.012   # -1.2% stop
-    SCALP_BE       = 0.008   # breakeven at +0.8%
-    SCALP_TRAIL_ARM = 0.015  # arm trail at +1.5%
-    SCALP_TRAIL    = 0.012   # 1.2% trail — locks in small wins fast
+    SCALP_BE       = 0.015   # breakeven at +1.5% (was 0.8% — too early, caused BE losses)
+    SCALP_TRAIL_ARM = 0.018  # arm trail at +1.8%
+    SCALP_TRAIL    = 0.012   # 1.2% trail
 
     # Runner mode: ride the pump, capture big moves
-    RUNNER_SL      = 0.02    # -2% stop (wider — give room)
-    RUNNER_BE      = 0.015   # breakeven at +1.5%
-    RUNNER_TRAIL_ARM = 0.04  # arm trail at +4% (let it run!)
-    RUNNER_TRAIL   = 0.05    # 5% trail — holds through pullbacks
+    RUNNER_SL      = 0.018   # -1.8% stop (tighter — limit runner losses)
+    RUNNER_BE      = 0.02    # breakeven at +2%
+    RUNNER_TRAIL_ARM = 0.035 # arm trail at +3.5% (was 4%)
+    RUNNER_TRAIL   = 0.045   # 4.5% trail (was 5% — slightly tighter)
     RUNNER_BOOST_AT = 0.08   # at +8%: tighten trail to 3% to lock profits
     RUNNER_BOOST_TRAIL = 0.03
 
@@ -77,11 +77,10 @@ class TrailEngine:
         if not self._be_active and ret <= -self._sl:
             return "EXIT_SL"
 
-        # Breakeven
+        # Breakeven: move SL to entry (no exit, just tighten stop)
         if not self._be_active and max_ret >= self._be_at:
             self._be_active = True
-        if self._be_active and not self._trail_active and ret <= 0.001:
-            return "EXIT_BE"
+            self._sl = 0.002  # tighten SL to near-entry instead of exiting
 
         # Activate trail
         if not self._trail_active and max_ret >= self._trail_arm:
