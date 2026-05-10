@@ -67,17 +67,17 @@ class HydraAlgorithm(QCAlgorithm):
         # Holdings
         self._held = {}  # sym -> entry_price
 
-        # Weekly rebalance on Monday
+        # Weekly rebalance on Monday at noon UTC
         self.schedule.on(
             self.date_rules.every(DayOfWeek.MONDAY),
-            self.time_rules.after_market_open(self._btc, 60),
+            self.time_rules.at(12, 0),
             self._weekly_rebalance,
         )
 
-        # Daily regime check — emergency exit if bear
+        # Daily regime check at 8am UTC
         self.schedule.on(
-            self.date_rules.every_day(self._btc),
-            self.time_rules.after_market_open(self._btc, 30),
+            self.date_rules.every_day(),
+            self.time_rules.at(8, 0),
             self._daily_regime_check,
         )
 
