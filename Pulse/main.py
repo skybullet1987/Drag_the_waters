@@ -133,8 +133,11 @@ class SymbolBuffers:
     """Per-symbol OHLCV + VWAP rolling state.
 
     Kept as a plain class so it can be unit-tested without QC.
+
+    HISTORY_BARS sized for: 4h-sampled BTC context (240 bars/sample × 30
+    samples = 7200 bars), plus rolling 60-bar feature windows.
     """
-    HISTORY_BARS = 200    # enough for EMAs + Yang-Zhang vol + spread
+    HISTORY_BARS = 8_000   # ~5.5 days of 1-min bars; supports 4h sampling
 
     def __init__(self):
         self.opens   = deque(maxlen=self.HISTORY_BARS)
@@ -336,8 +339,11 @@ if HAS_QC:
             # ── Decision throttle ─────────────────────────────────────────
             self._last_decision_time: datetime | None = None
 
-            # Warmup — enough history for SMAs, Yang-Zhang, etc.
-            self.SetWarmup(timedelta(days=14))
+            # Warmup — only need enough for the rolling-window features
+            # (Yang-Zhang vol uses 20 bars, EMA20 uses 20 bars, vol z-score
+            # uses 60 bars). Keep this tight so the strategy starts trading
+            # within a few hours of backtest start, not 14 days later.
+            self.SetWarmup(timedelta(hours=6))
 
             self.Log(
                 f"[pulse] Initialize start={start_year}-01-01 end={end_year}-12-31 "
@@ -425,8 +431,14 @@ if HAS_QC:
                                   bar.Close, bar.Volume)
                 if slice.QuoteBars.ContainsKey(sym):
                     qb = slice.QuoteBars[sym]
-                    buf.update_quote(float(qb.Bid.Close or 0),
-                                    float(qb.Ask.Close or 0))
+                    # QC sometimes delivers QuoteBars with Bid or Ask = None
+                    # (one-sided quotes when only one side has a recent fill).
+                    bid_px = float(qb.Bid.Close) if (qb.Bid is not None
+                                                     and qb.Bid.Close) else 0.0
+                    ask_px = float(qb.Ask.Close) if (qb.Ask is not None
+                                                     and qb.Ask.Close) else 0.0
+                    if bid_px > 0 or ask_px > 0:
+                        buf.update_quote(bid_px, ask_px)
 
             # F&G value
             if slice.ContainsKey(self._fg_symbol):
@@ -530,31 +542,44 @@ if HAS_QC:
             return elapsed_min >= self._decision_interval_min
 
         def _refresh_market_context(self, now):
+            """Build cross-symbol context. Each block degrades gracefully
+            so the strategy keeps working when the rolling buffer is
+            shorter than the ideal lookback (e.g. early in a backtest)."""
             ctx = MarketContext()
             if self._btc_sym and self._buffers[self._btc_sym].closes:
                 btc_buf = self._buffers[self._btc_sym]
-                # Approximate 4h closes by sampling every 240th 1m bar
                 closes = list(btc_buf.closes)
-                ctx.btc_4h_closes  = closes[::240][-30:] or closes[-30:]
-                ctx.btc_4h_volumes = list(btc_buf.volumes)[::240][-30:] or list(btc_buf.volumes)[-30:]
-                ctx.btc_daily_closes = closes[::1440][-200:] or []
-                if len(closes) >= 1440 * 30:
+                vols   = list(btc_buf.volumes)
+                # Approximate 4h closes by sampling every 240th 1m bar
+                # (max 30 samples). When we have fewer than 240 bars,
+                # fall back to a coarser sampling so MarketModeDetector
+                # has SOMETHING to work with.
+                step_4h = max(1, len(closes) // 30)
+                ctx.btc_4h_closes  = closes[::step_4h][-30:]
+                ctx.btc_4h_volumes = vols[::step_4h][-30:]
+                # Daily sampling: every 1440 bars OR coarser fallback
+                step_d = max(1, len(closes) // 200)
+                ctx.btc_daily_closes = closes[::step_d][-200:]
+                # 30d return: prefer 30 days of bars; else use whatever we have
+                lookback_30d = min(1440 * 30, len(closes) - 1)
+                if lookback_30d >= 60 and closes[-lookback_30d] > 0:
                     ctx.btc_30d_return = (
-                        closes[-1] - closes[-1440 * 30]
-                    ) / closes[-1440 * 30]
+                        closes[-1] - closes[-lookback_30d]
+                    ) / closes[-lookback_30d]
             # Symbol recent returns (5min lookback for spillover)
             recent: dict[str, float] = {}
             for sym, buf in self._buffers.items():
                 if len(buf.closes) >= 5 and buf.closes[-5] > 0:
                     recent[sym.Value] = (buf.closes[-1] - buf.closes[-5]) / buf.closes[-5]
             ctx.symbol_recent_returns = recent
-            # Alt 30d returns
+            # Alt 30d returns — fall back to whatever lookback fits
             alt_returns = []
             for sym, buf in self._buffers.items():
-                if sym == self._btc_sym:
+                if sym == self._btc_sym or len(buf.closes) < 60:
                     continue
-                if len(buf.closes) >= 1440 * 30 and buf.closes[-1440 * 30] > 0:
-                    r = (buf.closes[-1] - buf.closes[-1440 * 30]) / buf.closes[-1440 * 30]
+                lb = min(1440 * 30, len(buf.closes) - 1)
+                if lb >= 60 and buf.closes[-lb] > 0:
+                    r = (buf.closes[-1] - buf.closes[-lb]) / buf.closes[-lb]
                     alt_returns.append(r)
             ctx.alts_30d_returns = alt_returns
             ctx.fg_value = self._fg_value
@@ -567,11 +592,16 @@ if HAS_QC:
                 if sym in self._open:
                     continue   # already holding
                 if len(buf.closes) < 60:
-                    continue   # not enough history
-                # Universe gate — drop polluted symbols
+                    continue   # not enough history for feature computation
+                # Universe gate — primarily catches FARTCOIN/PEAQ-style
+                # new-listing pollution. Our curated universe is all
+                # established multi-year symbols on Kraken, so we pass
+                # a safe high days_of_history value instead of computing
+                # it from buffer length (which is intentionally short
+                # for memory reasons).
                 stats = buf.stats_for_universe(
                     symbol=sym.Value,
-                    days_of_history=len(buf.closes) // 1440,
+                    days_of_history=9999,
                 )
                 if not self._gate.is_eligible(stats):
                     continue
