@@ -40,8 +40,13 @@ except Exception:
 
 # ─── Pure-Python types ───────────────────────────────────────────────────────
 
-class OrderStatusName(str, Enum):
-    """Local enum mirroring QC's OrderStatus values (for testing without QC)."""
+class OrderStatusName(Enum):
+    """Local enum mirroring QC's OrderStatus values (for testing without QC).
+
+    NOTE: NOT ``(str, Enum)`` because QC's Python.NET wrapper rejects
+    multiple inheritance with managed classes. Compare via
+    ``OrderStatusName.FILLED.value == "Filled"`` when string compare needed.
+    """
     SUBMITTED         = "Submitted"
     PARTIALLY_FILLED  = "PartiallyFilled"
     FILLED            = "Filled"

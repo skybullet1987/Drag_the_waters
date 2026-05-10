@@ -41,7 +41,15 @@ except Exception:
 
 # ─── Pure-Python core ────────────────────────────────────────────────────────
 
-class OrderIntent(str, Enum):
+class OrderIntent(Enum):
+    """Order intent enum.
+
+    NOTE: We DO NOT use ``str, Enum`` multiple inheritance because QC's
+    Python.NET wrapper cannot construct managed classes with multiple
+    inheritance ("cannot use multiple inheritance with managed classes").
+    Compare values via ``OrderIntent.ENTRY == OrderIntent.ENTRY`` or
+    ``intent.value == "entry"``.
+    """
     ENTRY      = "entry"
     EXIT       = "exit"
     PARTIAL_TP = "partial_tp"

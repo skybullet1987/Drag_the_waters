@@ -21,8 +21,14 @@ from Pulse.execution import (
 # ───────────────────────────────────────────────────────────────────────────────
 
 def test_order_intent_values():
-    assert OrderIntent.ENTRY == "entry"
-    assert OrderIntent.HARD_KILL == "hard_kill"
+    """OrderIntent is a plain Enum (not str+Enum) because QC's Python.NET
+    wrapper rejects multiple inheritance with managed classes. String
+    comparison must go through .value."""
+    assert OrderIntent.ENTRY.value == "entry"
+    assert OrderIntent.HARD_KILL.value == "hard_kill"
+    # Identity comparisons still work
+    assert OrderIntent.ENTRY == OrderIntent.ENTRY
+    assert OrderIntent.ENTRY != OrderIntent.EXIT
 
 
 # ───────────────────────────────────────────────────────────────────────────────
