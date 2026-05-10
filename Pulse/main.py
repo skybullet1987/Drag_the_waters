@@ -123,6 +123,8 @@ from Pulse.execution import OrderIntent
 from Pulse.alt_data import FearGreedData, FGSignal
 from Pulse.fees import KrakenTieredFeeModel
 from Pulse.slippage import RealisticCryptoSlippage
+from Pulse.online_learning import OnlineThresholdLearner
+from Pulse.optimal_execution import build_slice_plan, DEFAULT_LARGE_ORDER_THRESHOLD_BPS
 
 
 # ─── Per-symbol rolling state ────────────────────────────────────────────────
@@ -318,6 +320,13 @@ if HAS_QC:
             # ── Order audit state ─────────────────────────────────────────
             self._audit = OrderAuditState()
 
+            # ── Adaptive threshold learner (online learning) ──────────────
+            self._learner = OnlineThresholdLearner(
+                initial_entry_threshold=SCALP_ENTRY_THRESHOLD,
+                initial_high_conviction_thres=SCALP_HIGH_CONVICTION_THRES,
+            )
+            self._last_learner_tune_log: datetime | None = None
+
             # ── Open positions tracker ────────────────────────────────────
             self._open: dict[Any, OpenPosition] = {}
 
@@ -482,6 +491,24 @@ if HAS_QC:
                     )
                 elif res.action in ("exit_recorded", "exit_unpaired",
                                     "invalid_force_cleanup"):
+                    # Record trade outcome for the online learner
+                    if res.pnl_pct is not None:
+                        # Use the latest entry score as a heuristic (we don't
+                        # have per-trade score plumbing yet); pass 0.55 as a
+                        # neutral default.
+                        self._learner.record(
+                            timestamp=self.Time, pnl_pct=res.pnl_pct,
+                            score=0.55, high_conviction=False,
+                        )
+                        # Try a tune cycle (throttled to once per 12h internally)
+                        action = self._learner.tune(self.Time)
+                        if action.action in ("tightened", "loosened"):
+                            self.Log(
+                                f"[learner] {action.action} thresholds: "
+                                f"entry {action.old_entry:.3f}→{action.new_entry:.3f} "
+                                f"hc {action.old_hc:.3f}→{action.new_hc:.3f} "
+                                f"({action.reason})"
+                            )
                     self._open.pop(event.Symbol, None)
             except Exception as exc:
                 self.Debug(f"OnOrderEvent error: {exc}")
@@ -547,10 +574,11 @@ if HAS_QC:
                 candidates.append(buf.to_symbol_bars(sym.Value))
             if not candidates:
                 return []
+            # Live thresholds from the OnlineThresholdLearner (auto-adapt)
             return rank_candidates(
                 candidates, self._market_context,
-                entry_threshold=SCALP_ENTRY_THRESHOLD,
-                high_conviction_thres=SCALP_HIGH_CONVICTION_THRES,
+                entry_threshold=self._learner.entry_threshold,
+                high_conviction_thres=self._learner.high_conviction_thres,
             )
 
         def _try_enter(self, score, now):
@@ -577,12 +605,34 @@ if HAS_QC:
                 if price <= 0:
                     return
                 qty = size_usd / price
+                # Optional: slice large entries via Almgren-Chriss
+                # (only for high-conviction trades that would slip ≥25bp)
+                buf = self._buffers.get(sym)
+                avg_bar_vol = (sum(buf.volumes) / len(buf.volumes)
+                               if buf and buf.volumes else 0)
+                slice_plan = build_slice_plan(
+                    total_quantity=qty,
+                    bar_volume_estimate=avg_bar_vol,
+                    n_slices=5 if score.high_conviction else 1,
+                    large_order_threshold_bps=DEFAULT_LARGE_ORDER_THRESHOLD_BPS,
+                )
                 self.Log(
                     f"[pulse] SCALP ENTRY {sym.Value} score={score.score:.3f} "
                     f"hc={score.high_conviction} mode={score.market_mode} "
-                    f"tier={tier_lim['tier']} size_usd={size_usd:.2f} qty={qty:.6f}"
+                    f"tier={tier_lim['tier']} size_usd={size_usd:.2f} qty={qty:.6f} "
+                    f"slices={slice_plan.n_slices} "
+                    f"slip_est={slice_plan.expected_total_slip_bps:.1f}bp "
+                    f"saved={slice_plan.saved_bps:.1f}bp"
                 )
-                self.MarketOrder(sym, qty, tag="ENTRY")
+                if slice_plan.skipped_reason or slice_plan.n_slices == 1:
+                    self.MarketOrder(sym, qty, tag="ENTRY")
+                else:
+                    # Submit each child order back-to-back; in production
+                    # these would be spaced across bars by a queue manager.
+                    for step in slice_plan.steps:
+                        if step.quantity > 0:
+                            self.MarketOrder(sym, step.quantity,
+                                             tag=f"ENTRY_S{step.idx}")
             except Exception as exc:
                 self.Debug(f"_try_enter error {score.symbol}: {exc}")
 

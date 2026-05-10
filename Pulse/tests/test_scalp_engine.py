@@ -331,3 +331,39 @@ def test_as_dict_includes_funding_fields():
     assert "funding_regime" in d["diag"]
     assert d["size_multipliers"]["funding"] == 1.20
     assert d["diag"]["funding_regime"] == "deep_short_squeeze"
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Tier D.3 X mention boost integration
+# ───────────────────────────────────────────────────────────────────────────────
+
+def test_scalp_x_mention_burst_adds_boost():
+    """Symbol with X mention rate ≥ 3× baseline → +0.10 score boost."""
+    bars = _strong_uptrend_with_volume_burst("SOLUSD")
+    # Baseline mentions: 100/hr; recent: 350/hr → 3.5× = buzzy
+    ctx = MarketContext(x_mention_rates={"SOLUSD": (350.0, 100.0)})
+    s = compute_scalp_score(bars, ctx)
+    assert s.x_mention_boost == 0.10
+
+
+def test_scalp_x_mention_no_boost_below_threshold():
+    bars = _strong_uptrend_with_volume_burst("SOLUSD")
+    ctx = MarketContext(x_mention_rates={"SOLUSD": (200.0, 100.0)})  # 2× only
+    s = compute_scalp_score(bars, ctx)
+    assert s.x_mention_boost == 0.0
+
+
+def test_scalp_x_mention_default_no_data_no_boost():
+    bars = _strong_uptrend_with_volume_burst()
+    ctx = MarketContext()   # no X data at all
+    s = compute_scalp_score(bars, ctx)
+    assert s.x_mention_boost == 0.0
+
+
+def test_scalp_x_mention_appears_in_as_dict():
+    bars = _strong_uptrend_with_volume_burst("SOLUSD")
+    ctx = MarketContext(x_mention_rates={"SOLUSD": (350.0, 100.0)})
+    s = compute_scalp_score(bars, ctx)
+    d = s.as_dict()
+    assert "x_mention" in d["components"]
+    assert d["components"]["x_mention"] == 0.10

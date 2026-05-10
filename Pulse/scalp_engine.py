@@ -49,7 +49,7 @@ from Pulse.regime import (
     detect_market_mode, golden_cross_regime, btc_dominance_regime,
     compose_regime_size_multiplier,
 )
-from Pulse.alt_data import FGSignal, FundingSignal
+from Pulse.alt_data import FGSignal, FundingSignal, XMentionSignal
 
 
 # ─── Default thresholds (will be walk-forward tuned in Phase 3) ─────────────
@@ -84,6 +84,7 @@ class ScalpScore:
 
     # Boosts
     spillover_boost:  float = 0.0
+    x_mention_boost:  float = 0.0    # Tier D.3 — set when X mention rate ≥ 3× baseline
 
     # Final score
     raw_total:    float = 0.0   # sum of components + boosts (no caps applied)
@@ -123,6 +124,7 @@ class ScalpScore:
                 "rsi_filter":   round(self.rsi_filter, 4),
                 "vwap_signal":  round(self.vwap_signal, 4),
                 "spillover":    round(self.spillover_boost, 4),
+                "x_mention":    round(self.x_mention_boost, 4),
             },
             "size_multipliers": {
                 "kyle":    round(self.kyle_size_mult, 3),
@@ -170,6 +172,8 @@ class MarketContext:
     symbol_recent_returns: dict[str, float] = field(default_factory=dict)
     fg_value:              float | None = None
     funding_rate:          float | None = None    # Tier C.4 — Bybit BTC perp
+    # Tier D.3 — X mention rates: {symbol: (current_rate, baseline_rate)}
+    x_mention_rates:       dict[str, tuple[float, float]] = field(default_factory=dict)
     kyle_lambda_history:   dict[str, list[float]] = field(default_factory=dict)
     rv_bps_history:        dict[str, list[float]] = field(default_factory=dict)
 
@@ -316,10 +320,17 @@ def compute_scalp_score(
             boost=spillover_boost,
         )
 
+    # 7. X mention burst boost (Tier D.3)
+    if bars.symbol in ctx.x_mention_rates:
+        cur, base = ctx.x_mention_rates[bars.symbol]
+        x_sig = XMentionSignal.from_rates(bars.symbol, cur, base)
+        out.x_mention_boost = x_sig.score_boost
+
     # Total
     out.raw_total = (
         out.cvd_score + out.vol_ignition + out.micro_trend
-        + out.rsi_filter + out.vwap_signal + out.spillover_boost
+        + out.rsi_filter + out.vwap_signal
+        + out.spillover_boost + out.x_mention_boost
     )
     out.score = max(0.0, min(1.0, out.raw_total))
     out.enter           = out.score >= entry_threshold
