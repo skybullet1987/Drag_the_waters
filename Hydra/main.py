@@ -1,39 +1,29 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HYDRA v5 — "Whale Rider"
-# Position trading for 100x at 1x spot. NO leverage needed.
+# HYDRA v6 — "The Survivor"
+# Built to work LIVE, not just backtest.
 #
-# INSIGHT: stop scalping +2%. Catch +50-300% alt moves with wide trail.
-# Nov-Dec 2024: SOL +73%, XRP +316%, DOGE +350%. ONE trade = +60-250%.
+# Machine Gun did 75x in backtest then DIED live. Lesson learned.
+# This algo is designed for LIVE survival:
+#   - Hourly bars (not 1-min) — immune to execution/microstructure issues
+#   - Wide stops — survives slippage, spread, gaps
+#   - Trend following — doesn't need order book accuracy
+#   - Regime-aware — sits in cash during bear markets
+#   - Multi-strategy — dip buy + momentum + mean reversion rotation
+#   - Position trading — holds hours to days, not seconds
 #
-# STRATEGY:
-#   1. DAILY bars (not 5-min) — hold for DAYS/WEEKS, not hours
-#   2. BTC above 50-day SMA = BULL → trade. Below = CASH.
-#   3. Buy top 1-2 momentum alts (strongest 7-day return)
-#   4. Wide 10% trailing stop — ride the ENTIRE multi-week pump
-#   5. When trail fires → rotate into next hottest alt
-#   6. Compound: $100 → $160 → $480 → $1,680 → ...
-#
-# This is Turtle Trading for crypto. Original Turtles did 100x+.
+# Target: 100x at 1x spot over 6-12 months in a bull market
 # ══════════════════════════════════════════════════════════════════════════════
 
 from AlgorithmImports import *
 import numpy as np
 from collections import deque
+from datetime import timedelta
 
 COINS = [
     "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
     "XDGUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
     "NEARUSD", "SUIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",
 ]
-
-# ── Parameters ───────────────────────────────────────────────────────────────
-TRAIL_PCT            = 0.10    # 10% trail — ride massive moves
-SL_PCT               = 0.07    # 7% stop loss — give room for multi-day swings
-ALLOC                = 0.90    # 90% per position — aggressive compounding
-MOMENTUM_LOOKBACK    = 7       # 7-day momentum for ranking
-BTC_SMA_PERIOD       = 50      # 50-day SMA for regime
-REBALANCE_DAYS       = 3       # check for rotation every 3 days
-MIN_MOMENTUM         = 0.02    # minimum 2% weekly return to qualify
 
 
 class HydraAlgorithm(QCAlgorithm):
@@ -45,200 +35,350 @@ class HydraAlgorithm(QCAlgorithm):
         self.set_brokerage_model(BrokerageName.KRAKEN, AccountType.CASH)
         self.settings.free_portfolio_value_percentage = 0.01
 
-        # Daily resolution — no timeout issues, holds for days/weeks
         self._symbols = []
         for ticker in COINS:
             try:
-                sym = self.add_crypto(ticker, Resolution.DAILY, Market.KRAKEN).symbol
+                sym = self.add_crypto(ticker, Resolution.HOUR, Market.KRAKEN).symbol
                 self._symbols.append(sym)
             except Exception:
                 pass
-        self.log(f"[hydra] {len(self._symbols)} coins loaded (DAILY resolution)")
+        self.log(f"[hydra] {len(self._symbols)} coins on HOURLY bars")
 
-        # BTC reference
-        self._btc_sym = None
-        for sym in self._symbols:
-            if "BTC" in sym.value:
-                self._btc_sym = sym
+        self._btc = None
+        for s in self._symbols:
+            if "BTC" in s.value:
+                self._btc = s
                 break
 
-        # Position state
-        self._pos_sym = None
-        self._entry_px = 0.0
-        self._entry_time = None
-        self._high_water = 0.0
+        # State
+        self._closes = {s: deque(maxlen=500) for s in self._symbols}
+        self._volumes = {s: deque(maxlen=500) for s in self._symbols}
+        self._highs = {s: deque(maxlen=500) for s in self._symbols}
 
-        # Schedule: check every day
-        for sym in self._symbols:
-            if sym != self._btc_sym:
-                self.schedule.on(
-                    self.date_rules.every_day(sym),
-                    self.time_rules.after_market_open(sym, 1),
-                    self._daily_check,
-                )
-                break  # just need one schedule
+        # Positions: up to 3 concurrent
+        self._positions = {}  # sym -> {entry_px, entry_time, high_water, trail_active}
+        self.MAX_POSITIONS = 3
 
-        self.set_warmup(60)  # 60 days warmup for SMA50
+        # Risk
+        self._daily_sl = 0
+        self._last_exit = {}  # sym -> time
+        self._portfolio_high = 100.0
 
-    def _is_bull_market(self):
-        """BTC above 50-day SMA = bull market. Trade. Below = cash."""
-        if not self._btc_sym:
-            return False
-        hist = self.history(self._btc_sym, 55, Resolution.DAILY)
-        if hist.empty or len(hist) < 50:
-            return False
-        closes = hist["close"].values
-        sma50 = np.mean(closes[-50:])
-        current = closes[-1]
-        # Bull: BTC above SMA50 AND SMA trending up
-        sma50_prev = np.mean(closes[-55:-5]) if len(closes) >= 55 else sma50
-        trending_up = sma50 > sma50_prev
-        return current > sma50 and trending_up
+        self.set_warmup(timedelta(days=30))
+        self.schedule.on(self.date_rules.every_day(),
+                         self.time_rules.midnight, self._daily_reset)
 
-    def _rank_alts_by_momentum(self):
-        """Rank all alts by 7-day return. Strongest momentum = best trade."""
-        rankings = []
-        for sym in self._symbols:
-            if sym == self._btc_sym:
-                continue
-            hist = self.history(sym, MOMENTUM_LOOKBACK + 2, Resolution.DAILY)
-            if hist.empty or len(hist) < MOMENTUM_LOOKBACK:
-                continue
-            closes = hist["close"].values
-            volumes = hist["volume"].values
-            if closes[-1] <= 0 or closes[0] <= 0:
-                continue
-
-            ret_7d = (closes[-1] - closes[0]) / closes[0]
-            avg_vol = np.mean(volumes)
-
-            if ret_7d < MIN_MOMENTUM:
-                continue
-            if avg_vol <= 0:
-                continue
-
-            # Check trend: EMA8 > EMA21 on daily
-            hist_long = self.history(sym, 25, Resolution.DAILY)
-            if not hist_long.empty and len(hist_long) >= 21:
-                cl = hist_long["close"].values
-                ema8 = np.mean(cl[-8:])
-                ema21 = np.mean(cl[-21:])
-                if ema8 < ema21:
-                    continue  # downtrending, skip
-
-            rankings.append((sym, ret_7d, avg_vol))
-
-        rankings.sort(key=lambda x: x[1], reverse=True)
-        return rankings
-
-    def _daily_check(self):
-        """Main daily logic."""
+    def on_data(self, data):
         if self.is_warming_up:
             return
 
-        # ── Check exit on current position ───────────────────────────────
-        if self._pos_sym:
-            price = float(self.securities[self._pos_sym].price)
+        # Update state from hourly bars
+        for sym in self._symbols:
+            if sym in data.bars:
+                bar = data.bars[sym]
+                self._closes[sym].append(float(bar.close))
+                self._volumes[sym].append(float(bar.volume))
+                self._highs[sym].append(float(bar.high))
+
+        # Drawdown circuit breaker
+        pv = float(self.portfolio.total_portfolio_value)
+        if pv > self._portfolio_high:
+            self._portfolio_high = pv
+        if self._portfolio_high > 0 and (self._portfolio_high - pv) / self._portfolio_high > 0.20:
+            return
+
+        # Check exits on all positions
+        for sym in list(self._positions.keys()):
+            if sym in data.bars:
+                self._check_exit(sym, float(data.bars[sym].close))
+
+        # Only scan for new entries every 4 hours
+        if self.time.hour % 4 != 0:
+            return
+        if self._daily_sl >= 4:
+            return
+
+        self._scan_entries()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # REGIME DETECTION
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _get_regime(self):
+        """Detect market regime from BTC.
+
+        Returns: "bull", "strong_bull", "bear", "chop"
+        """
+        if not self._btc or len(self._closes[self._btc]) < 200:
+            return "chop"
+
+        c = np.array(list(self._closes[self._btc]))
+        price = c[-1]
+        sma50 = np.mean(c[-50:])
+        sma200 = np.mean(c[-200:]) if len(c) >= 200 else np.mean(c)
+        ret_24h = (c[-1] - c[-25]) / c[-25] if len(c) >= 25 else 0
+        ret_7d = (c[-1] - c[-168]) / c[-168] if len(c) >= 168 else 0
+
+        if price > sma50 and sma50 > sma200 and ret_7d > 0.05:
+            return "strong_bull"
+        elif price > sma50 and sma50 > sma200:
+            return "bull"
+        elif price < sma50 and price < sma200:
+            return "bear"
+        else:
+            return "chop"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SIGNAL DETECTION (3 strategies, regime-dependent)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _scan_entries(self):
+        regime = self._get_regime()
+
+        # BEAR: no new entries
+        if regime == "bear":
+            return
+
+        open_count = len(self._positions)
+        if open_count >= self.MAX_POSITIONS:
+            return
+
+        candidates = []
+
+        for sym in self._symbols:
+            if sym == self._btc:
+                continue
+            if sym in self._positions:
+                continue
+            if sym in self._last_exit:
+                if (self.time - self._last_exit[sym]).total_seconds() < 7200:
+                    continue
+
+            c = self._closes[sym]
+            v = self._volumes[sym]
+            if len(c) < 100:
+                continue
+
+            ca = np.array(list(c))
+            va = np.array(list(v))
+            price = ca[-1]
             if price <= 0:
-                return
+                continue
 
-            if price > self._high_water:
-                self._high_water = price
+            result = self._score_coin(ca, va, regime)
+            if result and result[0] > 0:
+                candidates.append((sym, result[0], result[1], result[2]))
 
-            ret = (price - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
-            max_ret = (self._high_water - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
-
-            # Stop loss
-            if ret <= -SL_PCT:
-                self._exit("EXIT_SL")
-                return
-
-            # Trailing stop
-            if max_ret >= 0.03:  # arm trail after +3%
-                trail_stop = self._high_water * (1 - TRAIL_PCT)
-                if price <= trail_stop:
-                    self._exit("EXIT_TRAIL")
-                    return
-
-            # Regime change: BTC turned bearish → exit everything
-            if not self._is_bull_market():
-                if ret > 0:
-                    self._exit("EXIT_REGIME_BULL")
-                elif ret < -0.03:
-                    self._exit("EXIT_REGIME_CUT")
-                return
-
-            # Check if we should rotate to a stronger coin
-            days_held = (self.time - self._entry_time).days if self._entry_time else 0
-            if days_held >= REBALANCE_DAYS:
-                rankings = self._rank_alts_by_momentum()
-                if rankings and rankings[0][0] != self._pos_sym:
-                    top_sym, top_ret, _ = rankings[0]
-                    current_ret = ret
-                    # Only rotate if new coin has 2x the momentum
-                    if top_ret > current_ret * 2 and top_ret > 0.05:
-                        self._exit("EXIT_ROTATE")
-                        return
-
-            return  # holding position, no action needed
-
-        # ── No position: look for entry ──────────────────────────────────
-
-        # RULE 1: Bull market only
-        if not self._is_bull_market():
+        if not candidates:
             return
 
-        # RULE 2: Find strongest momentum alt
-        rankings = self._rank_alts_by_momentum()
-        if not rankings:
-            return
+        # Sort by score, take best available
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        slots = self.MAX_POSITIONS - open_count
 
-        sym, ret_7d, vol = rankings[0]
+        for sym, score, reason, alloc in candidates[:slots]:
+            self._enter(sym, score, reason, alloc)
+
+    def _score_coin(self, c, v, regime):
+        """Score a coin across 3 strategies. Returns (score, reason, alloc) or None."""
+        price = c[-1]
+
+        # Common indicators
+        sma20 = np.mean(c[-20:])
+        sma50 = np.mean(c[-50:]) if len(c) >= 50 else sma20
+        ret_4h = (c[-1] - c[-5]) / c[-5] if len(c) >= 5 else 0
+        ret_24h = (c[-1] - c[-25]) / c[-25] if len(c) >= 25 else 0
+        ret_7d = (c[-1] - c[-168]) / c[-168] if len(c) >= 168 else 0
+        vol_avg = np.mean(v[-20:]) if len(v) >= 20 else 1
+        vol_ratio = v[-1] / max(vol_avg, 1e-9)
+
+        # RSI
+        diffs = np.diff(c[-15:])
+        gains = np.mean(np.where(diffs > 0, diffs, 0))
+        loss_avg = np.mean(np.where(diffs < 0, -diffs, 0))
+        rsi = 100 - 100 / (1 + gains / max(loss_avg, 1e-9))
+
+        # ADX proxy (trend strength via directional movement)
+        if len(c) >= 15:
+            ups = np.diff(np.array(list(self._highs.get(list(self._highs.keys())[0], c)))[-15:])
+            downs = -np.diff(c[-15:])
+            dm_plus = np.mean(np.where(ups > downs, ups, 0))
+            dm_minus = np.mean(np.where(downs > ups, downs, 0))
+            dx = abs(dm_plus - dm_minus) / max(dm_plus + dm_minus, 1e-9) * 100
+        else:
+            dx = 0
+
+        # EMA alignment
+        ema8 = np.mean(c[-8:])
+        ema21 = np.mean(c[-21:]) if len(c) >= 21 else ema8
+        trend_aligned = ema8 > ema21
+
+        # VWAP
+        if len(c) >= 20 and len(v) >= 20:
+            vwap = np.sum(c[-20:] * v[-20:]) / max(np.sum(v[-20:]), 1e-9)
+            above_vwap = price > vwap
+        else:
+            above_vwap = True
+
+        best_score = 0
+        best_reason = ""
+        best_alloc = 0
+
+        # ── STRATEGY 1: DIP BUY (bull + strong_bull) ────────────────────
+        if regime in ("bull", "strong_bull") and price > sma50:
+            dip_from_high = (max(c[-20:]) - price) / max(c[-20:])
+            if 0.02 <= dip_from_high <= 0.10 and rsi < 45 and trend_aligned:
+                score = (
+                    0.30 * min(dip_from_high / 0.06, 1) +
+                    0.25 * max(0, (45 - rsi) / 25) +
+                    0.20 * (1 if above_vwap else 0.3) +
+                    0.15 * min(max(ret_7d, 0) / 0.10, 1) +
+                    0.10 * (1 if regime == "strong_bull" else 0.5)
+                )
+                if score > best_score:
+                    best_score = score
+                    best_reason = "dip_buy"
+                    best_alloc = 0.40 if regime == "strong_bull" else 0.30
+
+        # ── STRATEGY 2: MOMENTUM CONTINUATION (strong_bull) ─────────────
+        if regime == "strong_bull":
+            if ret_24h > 0.03 and vol_ratio > 1.5 and trend_aligned and rsi < 75:
+                score = (
+                    0.30 * min(ret_24h / 0.08, 1) +
+                    0.25 * min((vol_ratio - 1) / 2, 1) +
+                    0.20 * min(dx / 30, 1) +
+                    0.15 * (1 if rsi > 50 and rsi < 70 else 0.5) +
+                    0.10 * min(max(ret_7d, 0) / 0.15, 1)
+                )
+                if score > best_score:
+                    best_score = score
+                    best_reason = "momentum"
+                    best_alloc = 0.35
+
+        # ── STRATEGY 3: MEAN REVERSION (bull + chop) ────────────────────
+        if regime in ("bull", "chop") and price > sma50:
+            bb_mean = np.mean(c[-20:])
+            bb_std = np.std(c[-20:])
+            bb_lower = bb_mean - 2 * bb_std
+            near_bb_lower = price < bb_lower * 1.01
+            if near_bb_lower and rsi < 35 and vol_ratio < 2:
+                score = (
+                    0.35 * max(0, (35 - rsi) / 20) +
+                    0.30 * min((bb_mean - price) / max(bb_std, 1e-9) / 2, 1) +
+                    0.20 * (1 if trend_aligned else 0.3) +
+                    0.15 * (1 if above_vwap else 0.5)
+                )
+                if score > best_score:
+                    best_score = score
+                    best_reason = "mean_revert"
+                    best_alloc = 0.25
+
+        if best_score < 0.35:
+            return None
+
+        return (best_score, best_reason, best_alloc)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ENTRY
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _enter(self, sym, score, reason, alloc):
         price = float(self.securities[sym].price)
         if price <= 0:
             return
 
-        # RULE 3: Size based on momentum strength
-        if ret_7d > 0.15:
-            alloc = 0.95   # exceptional: near-full
-        elif ret_7d > 0.08:
-            alloc = 0.85   # strong
-        elif ret_7d > 0.04:
-            alloc = 0.70   # moderate
-        else:
-            alloc = 0.50   # base
-
         pv = float(self.portfolio.total_portfolio_value)
         qty = (pv * alloc * 0.99) / price
+
         lot = self.securities[sym].symbol_properties.lot_size
         min_order = self.securities[sym].symbol_properties.minimum_order_size
         qty = max(0, (qty // lot) * lot)
         if qty < min_order:
             return
 
-        self.log(
-            f"[hydra] ENTRY {sym.value} ret7d={ret_7d:.1%} alloc={alloc:.0%}"
-            f" px={price:.4f} qty={qty:.6f} pv=${pv:.2f}"
-        )
+        self._positions[sym] = {
+            "entry_px": price,
+            "entry_time": self.time,
+            "high_water": price,
+            "trail_active": False,
+            "reason": reason,
+            "alloc": alloc,
+        }
 
-        self._pos_sym = sym
-        self._entry_px = price
-        self._entry_time = self.time
-        self._high_water = price
-        self.market_order(sym, qty, tag="ENTRY")
+        self.log(f"[hydra] ENTRY {sym.value} reason={reason} score={score:.2f}"
+                 f" alloc={alloc:.0%} px={price:.4f} regime={self._get_regime()}"
+                 f" positions={len(self._positions)}/{self.MAX_POSITIONS}")
 
-    def _exit(self, tag):
-        """Exit current position."""
-        sym = self._pos_sym
-        if not sym:
+        self.market_order(sym, qty, tag=f"ENTRY_{reason}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ADAPTIVE EXIT SYSTEM
+    # 4 exit types: SL, trail, momentum fail, time decay
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _check_exit(self, sym, price):
+        pos = self._positions.get(sym)
+        if not pos:
             return
 
+        entry_px = pos["entry_px"]
+        if entry_px <= 0:
+            return
+
+        ret = (price - entry_px) / entry_px
+        elapsed_h = (self.time - pos["entry_time"]).total_seconds() / 3600
+
+        # Update high water
+        if price > pos["high_water"]:
+            pos["high_water"] = price
+        max_ret = (pos["high_water"] - entry_px) / entry_px
+
+        # ── EXIT 1: Stop Loss (adaptive by reason) ──────────────────────
+        sl = 0.04 if pos["reason"] == "momentum" else 0.035
+        if ret <= -sl:
+            self._do_exit(sym, "EXIT_SL")
+            return
+
+        # ── EXIT 2: Trailing Stop ────────────────────────────────────────
+        trail_arm = 0.03 if pos["reason"] == "dip_buy" else 0.05
+        trail_pct = 0.03  # 3% trail — wide enough for hourly bars
+
+        if not pos["trail_active"] and max_ret >= trail_arm:
+            pos["trail_active"] = True
+
+        if pos["trail_active"]:
+            trail_stop = pos["high_water"] * (1 - trail_pct)
+            if price <= trail_stop:
+                self._do_exit(sym, "EXIT_TRAIL")
+                return
+
+        # ── EXIT 3: Momentum Failure ─────────────────────────────────────
+        if elapsed_h >= 6 and ret < -0.01:
+            c = self._closes.get(sym)
+            if c and len(c) >= 5:
+                ret_4h = (list(c)[-1] - list(c)[-5]) / list(c)[-5]
+                if ret_4h < -0.02:
+                    self._do_exit(sym, "EXIT_MOM_FAIL")
+                    return
+
+        # ── EXIT 4: Time Decay ───────────────────────────────────────────
+        if elapsed_h >= 48:
+            self._do_exit(sym, "EXIT_TIMEOUT")
+            return
+        if elapsed_h >= 24 and ret < 0.005:
+            self._do_exit(sym, "EXIT_TIMEOUT")
+            return
+
+        # ── EXIT 5: Regime Change ────────────────────────────────────────
+        if self._get_regime() == "bear" and ret < 0:
+            self._do_exit(sym, "EXIT_REGIME")
+
+    def _do_exit(self, sym, tag):
         qty = float(self.portfolio[sym].quantity)
         if qty <= 0:
-            self._clear()
+            self._positions.pop(sym, None)
             return
 
-        # Safe sell: check CashBook
         try:
             quote = self.securities[sym].symbol_properties.quote_currency
             base = sym.value.replace(quote, "")
@@ -250,34 +390,37 @@ class HydraAlgorithm(QCAlgorithm):
         lot = self.securities[sym].symbol_properties.lot_size
         qty = max(0, (qty // lot) * lot - lot)
         if qty <= 0:
-            self._clear()
+            self._positions.pop(sym, None)
             return
 
-        ret = (float(self.securities[sym].price) - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
-        held_days = (self.time - self._entry_time).days if self._entry_time else 0
-        self.log(
-            f"[hydra] {tag} {sym.value} ret={ret:+.1%} held={held_days}d"
-            f" hw={self._high_water:.4f} pv=${float(self.portfolio.total_portfolio_value):.2f}"
-        )
+        pos = self._positions.get(sym, {})
+        ret = (float(self.securities[sym].price) - pos.get("entry_px", 0)) / pos.get("entry_px", 1) if pos.get("entry_px", 0) > 0 else 0
+
+        self.log(f"[hydra] {tag} {sym.value} ret={ret:+.1%}"
+                 f" reason={pos.get('reason','?')} held={((self.time-pos.get('entry_time',self.time)).total_seconds()/3600):.1f}h"
+                 f" pv=${float(self.portfolio.total_portfolio_value):.2f}")
 
         self.market_order(sym, -qty, tag=tag)
-        self._clear()
-
-    def _clear(self):
-        self._pos_sym = None
-        self._entry_px = 0.0
-        self._entry_time = None
-        self._high_water = 0.0
+        self._positions.pop(sym, None)
+        self._last_exit[sym] = self.time
+        if "SL" in tag:
+            self._daily_sl += 1
 
     def on_order_event(self, order_event):
         if order_event.status == OrderStatus.INVALID:
-            self._clear()
+            sym = order_event.symbol
+            self._positions.pop(sym, None)
         elif order_event.status == OrderStatus.FILLED:
             tag = ""
             try:
                 tag = self.transactions.get_order_by_id(order_event.order_id).tag
             except Exception:
                 pass
-            if tag == "ENTRY":
-                self._entry_px = float(order_event.fill_price)
-                self._high_water = self._entry_px
+            if tag.startswith("ENTRY"):
+                sym = order_event.symbol
+                if sym in self._positions:
+                    self._positions[sym]["entry_px"] = float(order_event.fill_price)
+                    self._positions[sym]["high_water"] = float(order_event.fill_price)
+
+    def _daily_reset(self):
+        self._daily_sl = 0
