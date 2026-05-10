@@ -347,3 +347,94 @@ def test_pyramid_independent_state_per_position():
     d2 = sizer.evaluate(eth, current_mfe_pct=0.04)
     assert d2.should_add
     assert d2.rung_index == 0
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# WinStreakSizer (Tier F.3)
+# ───────────────────────────────────────────────────────────────────────────────
+
+from Pulse.sizing import WinStreakConfig, WinStreakSizer
+
+
+def test_streak_config_invalid_args():
+    with pytest.raises(ValueError):
+        WinStreakConfig(bonus_per_win=0)
+    with pytest.raises(ValueError):
+        WinStreakConfig(max_multiplier=0.5, base_multiplier=1.0)
+    with pytest.raises(ValueError):
+        WinStreakConfig(base_multiplier=0)
+
+
+def test_streak_starts_at_baseline():
+    s = WinStreakSizer()
+    assert s.size_multiplier() == 1.0
+    assert s.consecutive_wins == 0
+
+
+def test_streak_first_win_adds_20_percent():
+    s = WinStreakSizer()
+    s.record_outcome(won=True)
+    assert s.consecutive_wins == 1
+    assert s.size_multiplier() == pytest.approx(1.2)
+
+
+def test_streak_5_wins_caps_at_2x():
+    """5 wins × 0.20 = 1.0 over base = 2.0 multiplier (at the cap)."""
+    s = WinStreakSizer()
+    for _ in range(5):
+        s.record_outcome(won=True)
+    assert s.size_multiplier() == 2.0
+
+
+def test_streak_10_wins_still_capped_at_2x():
+    s = WinStreakSizer()
+    for _ in range(10):
+        s.record_outcome(won=True)
+    assert s.size_multiplier() == 2.0
+    # But the underlying counter still rose
+    assert s.consecutive_wins == 10
+
+
+def test_streak_resets_on_first_loss():
+    s = WinStreakSizer()
+    for _ in range(4):
+        s.record_outcome(won=True)
+    assert s.size_multiplier() == pytest.approx(1.8)
+    s.record_outcome(won=False)
+    assert s.consecutive_wins == 0
+    assert s.size_multiplier() == 1.0
+
+
+def test_streak_record_returns_new_length():
+    s = WinStreakSizer()
+    assert s.record_outcome(True) == 1
+    assert s.record_outcome(True) == 2
+    assert s.record_outcome(False) == 0
+    assert s.record_outcome(True) == 1
+
+
+def test_streak_manual_reset():
+    s = WinStreakSizer()
+    for _ in range(3):
+        s.record_outcome(True)
+    s.reset()
+    assert s.consecutive_wins == 0
+    assert s.size_multiplier() == 1.0
+
+
+def test_streak_custom_config():
+    cfg = WinStreakConfig(bonus_per_win=0.10, max_multiplier=1.5)
+    s = WinStreakSizer(cfg)
+    for _ in range(10):
+        s.record_outcome(True)
+    assert s.size_multiplier() == 1.5     # capped
+
+
+def test_streak_progressive_sizing():
+    """Verify the exact ramp curve: 1.0 → 1.2 → 1.4 → 1.6 → 1.8 → 2.0."""
+    s = WinStreakSizer()
+    expected = [1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
+    assert s.size_multiplier() == expected[0]
+    for i in range(1, 6):
+        s.record_outcome(True)
+        assert s.size_multiplier() == pytest.approx(expected[i])

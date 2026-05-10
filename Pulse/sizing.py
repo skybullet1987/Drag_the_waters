@@ -332,3 +332,74 @@ class PyramidSizer:
             return
         state.rungs_fired.add(decision.rung_index)
         state.current_size = decision.new_total_size
+
+
+# ─── WinStreakSizer (Tier F.3, PLAN.md §6.F.3) ──────────────────────────────
+
+@dataclass
+class WinStreakConfig:
+    """Anti-Martingale win-streak parameters.
+
+    PLAN.md §6.F.3:
+      +20% size after each consecutive win, up to 2× base
+      Reset on first loss
+    """
+    bonus_per_win:        float = 0.20    # add 20% per consecutive win
+    max_multiplier:       float = 2.0     # cap at 2× base size
+    base_multiplier:      float = 1.0     # baseline before any wins
+
+    def __post_init__(self):
+        if self.bonus_per_win <= 0:
+            raise ValueError("bonus_per_win must be > 0")
+        if self.max_multiplier < self.base_multiplier:
+            raise ValueError("max_multiplier must be >= base_multiplier")
+        if self.base_multiplier <= 0:
+            raise ValueError("base_multiplier must be > 0")
+
+
+class WinStreakSizer:
+    """Anti-Martingale: scale up size during win streaks; reset on any loss.
+
+    Usage::
+
+        streak = WinStreakSizer()
+        # After every closed trade:
+        streak.record_outcome(won=True_or_False)
+        # When sizing a new entry:
+        mult = streak.size_multiplier()    # in [base, max]
+        size = base_size * mult
+    """
+
+    def __init__(self, config: WinStreakConfig | None = None):
+        self.cfg = config or WinStreakConfig()
+        self._consecutive_wins = 0
+
+    def record_outcome(self, won: bool) -> int:
+        """Record one closed trade outcome. Returns the new streak length."""
+        if won:
+            self._consecutive_wins += 1
+        else:
+            self._consecutive_wins = 0
+        return self._consecutive_wins
+
+    def size_multiplier(self) -> float:
+        """Current size multiplier given the streak state.
+
+        Examples (with defaults bonus=0.20, max=2.0, base=1.0):
+          0 wins → 1.0
+          1 win  → 1.2
+          2 wins → 1.4
+          3 wins → 1.6
+          4 wins → 1.8
+          5+ wins → 2.0 (capped)
+        """
+        mult = self.cfg.base_multiplier + self._consecutive_wins * self.cfg.bonus_per_win
+        return min(self.cfg.max_multiplier, mult)
+
+    @property
+    def consecutive_wins(self) -> int:
+        return self._consecutive_wins
+
+    def reset(self) -> None:
+        """Manually reset the streak (e.g. after a circuit-breaker pause)."""
+        self._consecutive_wins = 0
