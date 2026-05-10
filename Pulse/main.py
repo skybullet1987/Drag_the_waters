@@ -401,21 +401,30 @@ if HAS_QC:
             )
 
         def _initial_universe(self) -> list[str]:
-            """Curated 25-symbol Kraken Pro universe.
+            """Curated Kraken Pro universe known to exist in QC's crypto data.
 
             Phase 0a's UniverseGate filters dynamically each cycle, but we
             still need a static subscription list to tell QC what to pull.
+
+            Excluded:
+              - DOGEUSD: Kraken QC data doesn't have this symbol (verified
+                from live error: 'Crypto DOGEUSD symbol could not be found')
+              - MATICUSD: rebranded to POLUSD; symbol may not be in QC data
+              - RENDERUSD: newer; QC data coverage uncertain
+            Add removed ones back ONLY after verifying via:
+              algo.AddCrypto(ticker, Resolution.Minute, Market.Kraken)
+            doesn't raise.
             """
             return [
                 # Major
                 "BTCUSD", "ETHUSD",
                 # Large
-                "SOLUSD", "XRPUSD", "ADAUSD", "DOGEUSD",
+                "SOLUSD", "XRPUSD", "ADAUSD",
                 "LINKUSD", "AVAXUSD", "DOTUSD",
                 # Mid
-                "LTCUSD", "MATICUSD", "ATOMUSD", "UNIUSD", "AAVEUSD",
+                "LTCUSD", "ATOMUSD", "UNIUSD", "AAVEUSD",
                 "NEARUSD", "INJUSD", "OPUSD", "ARBUSD", "BCHUSD",
-                "TRXUSD", "FETUSD", "ICPUSD", "RENDERUSD", "HBARUSD",
+                "TRXUSD", "FETUSD", "ICPUSD", "HBARUSD",
             ]
 
         # ── OnData ─────────────────────────────────────────────────────────
@@ -628,17 +637,44 @@ if HAS_QC:
                     return
                 tier_lim = self._tiers.limits_for(sym.Value, now=now)
                 max_pos_usd = tier_lim["max_pos_usd"]
-                # Apply size multipliers
-                size_usd = max_pos_usd * score.composed_size_mult
+
+                # ── Equity-aware fair-share cap ────────────────────────────
+                # The tier max (e.g. $5K major / $1.5K large) is a CEILING.
+                # The actual size must also fit within the strategy's
+                # current capital. We allocate by fair-share:
+                #   per_position_share = total_equity / max_positions
+                # so MAX_POSITIONS concurrent trades can all fit.
+                total_equity = float(self.Portfolio.TotalPortfolioValue)
+                fair_share = total_equity / max(MAX_POSITIONS, 1)
+                size_usd = min(max_pos_usd, fair_share)
+
+                # Apply score multipliers
+                size_usd *= score.composed_size_mult
                 if score.high_conviction:
-                    size_usd *= 1.0   # full tier max for high conviction
+                    size_usd *= 1.0
                 else:
-                    size_usd *= 0.7   # 70% for normal conviction
-                # Cap at 80% of available cash
-                cash = float(self.Portfolio.Cash) * 0.8
-                size_usd = min(size_usd, cash)
+                    size_usd *= 0.7
+
+                # ── Hard cap by available BUYING POWER (not total NAV) ─────
+                # Use MarginRemaining: this accounts for held positions AND
+                # any open buy orders, so we don't over-commit.
+                # Fall back to CashBook[USD] if MarginRemaining is unavailable.
+                try:
+                    available = float(self.Portfolio.MarginRemaining)
+                except Exception:
+                    try:
+                        available = float(self.Portfolio.CashBook["USD"].Amount)
+                    except Exception:
+                        available = float(self.Portfolio.Cash)
+                # 95% of available — leave 5% headroom for fees/slippage
+                size_usd = min(size_usd, available * 0.95)
+
                 if size_usd < 5.0:
-                    return   # below Kraken min notional
+                    self.Debug(
+                        f"[pulse] skip {sym.Value}: size_usd={size_usd:.2f} "
+                        f"< 5.0 (avail={available:.2f}, equity={total_equity:.2f})"
+                    )
+                    return
                 price = float(self.Securities[sym].Price)
                 if price <= 0:
                     return
