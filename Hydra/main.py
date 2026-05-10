@@ -111,11 +111,7 @@ class HydraAlgorithm(QCAlgorithm):
             self.subscription_manager.add_consolidator(sym, consolidator)
 
         # Position state
-        self._trail = TrailEngine(
-            sl_pct=SL_PCT, breakeven_at=BREAKEVEN_AT,
-            trail_arm_pct=TRAIL_ARM_PCT, trail_pct=TRAIL_PCT,
-            emergency_sl=EMERGENCY_SL,
-        )
+        self._trail = TrailEngine(mode="scalp")
         self._pos_sym = None
         self._entry_px = 0.0
         self._entry_time = None
@@ -186,10 +182,12 @@ class HydraAlgorithm(QCAlgorithm):
         if self._daily_sl_count >= MAX_DAILY_SL:
             return
 
-        # Cooldown check
+        # Cooldown: shorter after TRAIL exit (momentum might continue)
         if self._exit_time:
             elapsed = (self.time - self._exit_time).total_seconds() / 60
-            if elapsed < COOLDOWN_MIN:
+            _last_exit_was_trail = getattr(self, "_last_exit_tag", "") == "EXIT_TRAIL"
+            _cooldown = 5 if _last_exit_was_trail else COOLDOWN_MIN
+            if elapsed < _cooldown:
                 return
 
         # Update Chronos forecasts periodically
@@ -274,15 +272,19 @@ class HydraAlgorithm(QCAlgorithm):
         if qty < min_order:
             return
 
+        # Choose trail mode: RUNNER for strong signals, SCALP for weak
+        n_signals = details.get("details", {}).get("n_signals", 1)
+        _mode = "runner" if (strength >= 0.6 or n_signals >= 2) else "scalp"
+
         self.log(
             f"[hydra] ENTRY {sym.value} reason={reason} strength={strength:.3f}"
-            f" px={price:.4f} qty={qty:.6f} alloc={alloc:.0%}"
+            f" mode={_mode} px={price:.4f} qty={qty:.6f} alloc={alloc:.0%}"
             f" chronos={self._forecast_cache.get(sym, 0):.4f} btc4h={btc_ret4:.3f}"
         )
 
         # Enter
         self._pending_sym = sym
-        self._trail.reset(price)
+        self._trail.reset(price, mode=_mode)
         self._pyramid_level = 0
         order = self.market_order(sym, qty, tag="ENTRY")
         self._pending_oid = order.order_id
@@ -422,6 +424,7 @@ class HydraAlgorithm(QCAlgorithm):
                 self._daily_sl_count += 1
                 self._last_sl_time[sym] = self.time
             self._exit_time = self.time
+            self._last_exit_tag = tag
             self._clear_state()
 
     def _clear_state(self):
