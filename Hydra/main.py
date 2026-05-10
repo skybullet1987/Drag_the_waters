@@ -13,7 +13,7 @@ from AlgorithmImports import *
 import numpy as np
 from collections import deque
 from datetime import timedelta
-from signals import detect_all_signals
+from signals import detect_regime, scan_all_coins
 from trail_engine import TrailEngine
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -196,63 +196,40 @@ class HydraAlgorithm(QCAlgorithm):
         self._scan_and_enter()
 
     def _scan_and_enter(self):
-        """Scan all coins for momentum signals and enter the strongest."""
-        # BTC crash filter
-        btc_ret4 = 0.0
-        if self._btc_sym:
-            bc = self._state[self._btc_sym]["closes"]
-            if len(bc) >= 49:  # 4h at 5-min = 48 bars
-                btc_ret4 = (bc[-1] - bc[-49]) / bc[-49]
-        if btc_ret4 < BTC_CRASH_THRESHOLD:
+        """Regime-aware scan: different strategies for bull/pump/bear."""
+        # Detect regime from BTC
+        btc_closes = list(self._state[self._btc_sym]["closes"]) if self._btc_sym else []
+        regime = detect_regime(btc_closes)
+
+        # Log regime changes
+        if regime != getattr(self, "_last_regime", None):
+            self.log(f"[hydra] REGIME: {regime}")
+            self._last_regime = regime
+
+        # BEAR = NO TRADES. This is the #1 rule.
+        if regime == "bear":
             return
 
-        signals = []
+        # Apply SL cooldown filter
+        _filtered_syms = []
         for sym in self._symbols:
-            st = self._state[sym]
-            if len(st["closes"]) < 50:
-                continue
-
-            # SL cooldown per coin
             if sym in self._last_sl_time:
                 elapsed = (self.time - self._last_sl_time[sym]).total_seconds() / 60
                 if elapsed < SL_COOLDOWN_MIN:
                     continue
+            _filtered_syms.append(sym)
 
-            closes = list(st["closes"])
-            highs = list(st["highs"])
-            lows = list(st["lows"])
-            volumes = list(st["volumes"])
-
-            # Get Chronos forecast
-            chronos_ret = self._forecast_cache.get(sym, 0.0)
-
-            result = detect_all_signals(
-                closes=closes, highs=highs, lows=lows, volumes=volumes,
-                chronos_forecast=chronos_ret,
-                pump_ret_min=PUMP_RET_1H_MIN, pump_vol_mult=PUMP_VOL_MULT,
-                breakout_lookback=BREAKOUT_LOOKBACK, breakout_vol_mult=BREAKOUT_VOL_MULT,
-                squeeze_lookback=SQUEEZE_LOOKBACK, squeeze_threshold=SQUEEZE_THRESHOLD,
-                vol_anomaly_mult=VOL_ANOMALY_MULT,
-            )
-            if result["enter"]:
-                # Cross-coin correlation boost
-                corr = self._get_btc_alt_correlation(sym)
-                if corr < 0.3:
-                    # Low BTC correlation + independent pump = stronger
-                    result["strength"] = min(result["strength"] + 0.1, 1.0)
-
-                # Chronos hard filter: if forecast is strongly negative, skip
-                if chronos_ret < -0.01:
-                    continue  # Chronos says DOWN → don't enter
-
-                signals.append((sym, result["strength"], result["reason"], result))
+        # Scan with regime-appropriate strategies
+        signals = scan_all_coins(
+            symbols=_filtered_syms, state=self._state,
+            btc_closes=btc_closes, forecast_cache=self._forecast_cache,
+            regime=regime,
+        )
 
         if not signals:
             return
 
-        # Pick strongest signal
-        signals.sort(key=lambda x: x[1], reverse=True)
-        sym, strength, reason, details = signals[0]
+        sym, strength, reason, mode = signals[0]
         price = float(self.securities[sym].price)
         if price <= 0:
             return
@@ -272,19 +249,15 @@ class HydraAlgorithm(QCAlgorithm):
         if qty < min_order:
             return
 
-        # Choose trail mode: RUNNER for strong signals, SCALP for weak
-        n_signals = details.get("details", {}).get("n_signals", 1)
-        _mode = "runner" if (strength >= 0.6 or n_signals >= 2) else "scalp"
-
         self.log(
             f"[hydra] ENTRY {sym.value} reason={reason} strength={strength:.3f}"
-            f" mode={_mode} px={price:.4f} qty={qty:.6f} alloc={alloc:.0%}"
-            f" chronos={self._forecast_cache.get(sym, 0):.4f} btc4h={btc_ret4:.3f}"
+            f" mode={mode} regime={getattr(self, '_last_regime', '?')}"
+            f" px={price:.4f} qty={qty:.6f} alloc={alloc:.0%}"
         )
 
         # Enter
         self._pending_sym = sym
-        self._trail.reset(price, mode=_mode)
+        self._trail.reset(price, mode=mode)
         self._pyramid_level = 0
         order = self.market_order(sym, qty, tag="ENTRY")
         self._pending_oid = order.order_id
