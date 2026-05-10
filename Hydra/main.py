@@ -36,7 +36,7 @@ COINS = [
 # ── Parameters ───────────────────────────────────────────────────────────────
 BTC_HIGH_LOOKBACK    = 20 * 288  # 20 days at 5-min bars = 5760 bars
 ALT_MOMENTUM_BARS    = 48       # 4h at 5-min = which alt is hottest
-SCAN_INTERVAL        = 15       # check every 15 min
+SCAN_INTERVAL        = 5        # check every 5 min — more opportunities
 SL_PCT               = 0.015    # -1.5% stop loss
 TRAIL_ARM_PCT        = 0.015    # arm trail at +1.5%
 TRAIL_PCT            = 0.025    # trail 2.5% from high water mark
@@ -146,45 +146,82 @@ class HydraAlgorithm(QCAlgorithm):
         # BTC within 2% of 20-day high = bullish
         return current >= high_20d * 0.98
 
-    def _find_hottest_alt(self):
-        """Find the alt with the strongest 4h momentum."""
-        best_sym = None
-        best_ret = -999
+    def _find_best_asymmetric_trade(self):
+        """Find the alt where +1.5% up is more likely than -0.5% down.
+
+        Key insight: don't predict direction. Predict ASYMMETRY.
+        The best trade is where the upside/downside ratio is highest.
+        """
+        candidates = []
 
         for sym in self._symbols:
             if sym == self._btc_sym:
                 continue
             closes = self._state[sym]["closes"]
             volumes = self._state[sym]["volumes"]
-            if len(closes) < ALT_MOMENTUM_BARS + 1:
+            if len(closes) < 100:
                 continue
 
-            c = list(closes)
-            v = list(volumes)
-            ret_4h = (c[-1] - c[-(ALT_MOMENTUM_BARS+1)]) / c[-(ALT_MOMENTUM_BARS+1)]
-            vol_avg = np.mean(v[-ALT_MOMENTUM_BARS:])
-            vol_now = v[-1]
-
-            # Must be positive momentum with some volume
-            if ret_4h <= 0.005:
-                continue
-            if vol_now < vol_avg * 0.5:
+            c = np.asarray(list(closes), dtype=float)
+            v = np.asarray(list(volumes), dtype=float)
+            price = c[-1]
+            if price <= 0:
                 continue
 
-            # RSI not overbought
-            if len(c) >= 15:
-                diffs = np.diff(c[-15:])
-                gains = np.mean(np.where(diffs > 0, diffs, 0))
-                losses = np.mean(np.where(diffs < 0, -diffs, 0))
-                rsi = 100 - 100 / (1 + gains / max(losses, 1e-9))
-                if rsi > 80:
-                    continue
+            # ── Momentum (trend strength) ────────────────────────────────
+            ret_1h = (c[-1] - c[-13]) / c[-13] if len(c) >= 13 else 0
+            ret_4h = (c[-1] - c[-49]) / c[-49] if len(c) >= 49 else 0
 
-            if ret_4h > best_ret:
-                best_ret = ret_4h
-                best_sym = sym
+            # Must have positive momentum
+            if ret_4h <= 0.003:
+                continue
 
-        return best_sym, best_ret
+            # ── Volume acceleration (institutional interest) ─────────────
+            vol_avg = np.mean(v[-20:])
+            vol_ratio = v[-1] / max(vol_avg, 1e-9)
+
+            # ── Volatility compression → expansion (breakout quality) ────
+            atr_recent = np.mean(np.abs(np.diff(c[-10:])))
+            atr_older = np.mean(np.abs(np.diff(c[-30:-10]))) if len(c) >= 30 else atr_recent
+            vol_expansion = atr_recent / max(atr_older, 1e-9)
+
+            # ── RSI filter ───────────────────────────────────────────────
+            diffs = np.diff(c[-15:])
+            gains = np.mean(np.where(diffs > 0, diffs, 0))
+            loss_avg = np.mean(np.where(diffs < 0, -diffs, 0))
+            rsi = 100 - 100 / (1 + gains / max(loss_avg, 1e-9))
+            if rsi > 78:
+                continue
+
+            # ── Trend alignment (EMA 8 > 21) ────────────────────────────
+            if len(c) >= 22:
+                ema8 = c[-8:].mean()
+                ema21 = c[-21:].mean()
+                trend_aligned = ema8 > ema21
+            else:
+                trend_aligned = ret_4h > 0
+
+            if not trend_aligned:
+                continue
+
+            # ── ASYMMETRY SCORE: probability of +1.5% before -0.5% ──────
+            # Higher momentum + volume + expansion + trend = more asymmetric
+            score = (
+                0.30 * min(ret_4h / 0.04, 1.0) +          # 4h momentum
+                0.20 * min(max(ret_1h, 0) / 0.02, 1.0) +  # 1h momentum
+                0.20 * min(max(vol_ratio - 1, 0) / 2, 1.0) + # volume
+                0.15 * min(max(vol_expansion - 1, 0) / 1, 1.0) + # expansion
+                0.15 * (1.0 if 40 < rsi < 70 else 0.5)     # sweet spot RSI
+            )
+
+            candidates.append((sym, score, ret_4h))
+
+        if not candidates:
+            return None, 0
+
+        # Return the best asymmetric candidate
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0], candidates[0][2]
 
     def _scan(self):
         """The entire strategy in 3 lines of logic."""
@@ -192,8 +229,8 @@ class HydraAlgorithm(QCAlgorithm):
         if not self._is_btc_bullish():
             return  # NO → do nothing. Cash is a position.
 
-        # RULE 2: Find the hottest alt
-        sym, ret = self._find_hottest_alt()
+        # RULE 2: Find the best asymmetric trade
+        sym, ret = self._find_best_asymmetric_trade()
         if sym is None:
             return
 
@@ -203,7 +240,17 @@ class HydraAlgorithm(QCAlgorithm):
             return
 
         pv = float(self.portfolio.total_portfolio_value)
-        qty = (pv * ALLOC * 0.99) / price
+        # DYNAMIC SIZING: this is where 100x happens
+        # Strong momentum → big position, weak → small
+        if ret > 0.05:
+            alloc = 0.90   # exceptional: 90%
+        elif ret > 0.03:
+            alloc = 0.70   # strong: 70%
+        elif ret > 0.015:
+            alloc = 0.50   # moderate: 50%
+        else:
+            alloc = 0.30   # weak: 30%
+        qty = (pv * alloc * 0.99) / price
         lot = self.securities[sym].symbol_properties.lot_size
         min_order = self.securities[sym].symbol_properties.minimum_order_size
         qty = max(0, (qty // lot) * lot)
