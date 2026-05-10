@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MG36 Phase 0 Audit — Live-Only View</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       max-width: 1200px; margin: 1.5em auto; color: #222; }
+h1 { border-bottom: 3px solid #333; padding-bottom: 8px; }
+h2 { color: #2c4e7a; margin-top: 2em; }
+h3 { color: #555; }
+.section { background: #f7f7f9; padding: 1em 1.5em; border-radius: 6px;
+           margin: 1em 0; border-left: 4px solid #2c4e7a; }
+.kv { display: grid; grid-template-columns: 280px 1fr; gap: 4px 12px; }
+.kv .k { color: #666; }
+.kv .v { font-family: 'SF Mono', Menlo, monospace; }
+.bad { color: #c0392b; font-weight: bold; }
+.good { color: #27ae60; font-weight: bold; }
+.warn { color: #c87f0a; font-weight: bold; }
+table { border-collapse: collapse; width: 100%; margin: 0.5em 0;
+        font-family: 'SF Mono', Menlo, monospace; font-size: 13px; }
+th, td { border: 1px solid #ddd; padding: 5px 8px; text-align: left; }
+th { background: #eef; }
+tr:nth-child(even) { background: #fafafc; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px;
+       font-size: 11px; font-weight: bold; }
+.tag-blessed { background: #27ae60; color: white; }
+.tag-rejected { background: #c0392b; color: white; }
+.tag-warn { background: #c87f0a; color: white; }
+.footer { color: #999; font-size: 11px; margin-top: 3em; text-align: right; }
+</style>
+</head>
+<body>
+<h1>MG36 Phase 0 Audit — Live-Only View</h1>
+
+    <div class="section">
+      <h2>Live log summary</h2>
+      <div class="kv"><div class="k">first_ts</div><div class="v">2026-03-17T12:13:43</div><div class="k">last_ts</div><div class="v">2026-03-18T22:17:46</div><div class="k">raw_line_count</div><div class="v">4003</div><div class="k">parse_error_count</div><div class="v">0</div><div class="k">scalp_entries</div><div class="v">4</div><div class="k">orders_total</div><div class="v">14</div><div class="k">orders_filled</div><div class="v">4</div><div class="k">orders_canceled</div><div class="v">2</div><div class="k">orders_invalid</div><div class="v">0</div><div class="k">orders_partial</div><div class="v">0</div><div class="k">exits</div><div class="v">2</div><div class="k">slippage_warnings</div><div class="v">4</div><div class="k">mean_slippage_bps</div><div class="v">111.14</div><div class="k">max_slippage_bps</div><div class="v">197.16</div><div class="k">maker_limits</div><div class="v">4</div><div class="k">snapshots</div><div class="v">5</div><div class="k">final_trades</div><div class="v">219</div><div class="k">final_win_rate</div><div class="v">38.1</div><div class="k">final_equity</div><div class="v">119.14</div><div class="k">final_pnl_pct</div><div class="v">-5.24</div></div>
+    </div>
+    
+    <div class="section">
+      <h2>Backtest-vs-Live Gap</h2>
+      <div class="kv"><div class="k">live trades</div><div class="v">2</div><div class="k">backtest trades</div><div class="v">0</div><div class="k">matched</div><div class="v">0</div><div class="k">live-only</div><div class="v"><span class="warn">2</span></div><div class="k">backtest-only</div><div class="v"><span class="warn">0</span></div><div class="k">mean per-trade return gap</div><div class="v"><span class="">+0.000%</span></div><div class="k">sum return gap</div><div class="v"><span class="">+0.000%</span></div></div>
+      
+    <h3>Fill price gap (positive = live paid worse)</h3>
+    <table>
+      <tr><th></th><th>mean</th><th>median</th><th>p90</th><th>p99</th></tr>
+      <tr><td>entry</td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+      </tr>
+      <tr><td>exit</td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+        <td><span class="">+0.0bp</span></td>
+      </tr>
+    </table>
+    
+      
+    <h3>Mean slippage</h3>
+    <table>
+      <tr><th></th><th>entry (bps)</th><th>exit (bps)</th></tr>
+      <tr><td>live</td>
+        <td>91.3</td>
+        <td>130.9</td>
+      </tr>
+      <tr><td>backtest</td>
+        <td>0.0</td>
+        <td>0.0</td>
+      </tr>
+    </table>
+    
+      
+        <h3>Gap attribution (% of NAV per trade)</h3>
+        <table>
+          <tr><th>source</th><th>contribution</th></tr>
+          <tr><td>bad_extra_live</td><td><span class="bad">-2.319%</span></td></tr><tr><td>residual_unexplained</td><td><span class="bad">-2.319%</span></td></tr><tr><td>slippage_excess</td><td><span class="">+0.000%</span></td></tr><tr><td>missed_profit_bt</td><td><span class="">+0.000%</span></td></tr><tr><td>total_observed_gap</td><td><span class="">+0.000%</span></td></tr>
+        </table>
+        
+      
+    </div>
+    <div class="section"><h2>Notes</h2><pre>Phase 0 audit anchored to MG36 paper-trade evidence (see PLAN.md §0.A).
+
+Findings (verified):
+  - Mean per-fill slippage (live): 111.14bp
+  - Max per-fill slippage (live):  197.16bp
+  - Live trades:    4 fills / 2 round trips
+  - Maker limits:   4 created, 2 canceled (timed out)
+  - Final equity:   $119.14 (PnL -5.24%)
+  - Win rate:       38.1% (vs backtest 74%)
+
+Smoking-gun trade: KASUSD score=0.95 max-conviction entry held 60s,
+  +0.07% gross move, but 304bp round-trip slippage = -2.29% net loss.
+
+Next: backtest the same period in QC under the harsh simulator,
+fetch backtest orders via QC API, then re-run this audit with both
+sides populated to produce the full attribution table.</pre></div>
+<div class="footer">
+  Generated 2026-05-10T16:26:08.638990+00:00 by backtest_audit.report
+</div>
+</body>
+</html>
