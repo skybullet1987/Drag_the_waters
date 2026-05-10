@@ -1,0 +1,71 @@
+Algorithm Initialization: Paper Brokerage account base currency: USD
+Launching analysis for L-synthetic-winner-fixture with LEAN Engine v2.5
+2026-05-01 12:00:00 Loaded persisted state: blacklist 0, trades W:0/L:0
+2026-05-01 12:00:00 === LIVE TRADING (PULSE) v8.0.0 ===
+2026-05-01 12:00:00 Capital: $120.00 | Max pos: 6 | Size: 80%
+2026-05-01 12:00:10 Algorithm starting warm up...
+2026-05-01 12:00:20 Algorithm finished warming up.
+2026-05-01 12:05:00 SCALP ENTRY: BTCUSD | score=0.6 | $50000.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 12:05:00 ORDER: BTCUSD Submitted Buy qty=0.001 price=0.0 id=1
+2026-05-01 12:06:00 ORDER: BTCUSD Filled Buy qty=0.001 price=50000.0 id=1
+2026-05-01 12:31:00 TP: BTCUSD | PnL:+2.50% | Held:0.4h
+2026-05-01 12:31:00 ORDER: BTCUSD Submitted Sell qty=-0.001 price=0.0 id=2
+2026-05-01 12:32:00 ORDER: BTCUSD Filled Sell qty=-0.001 price=51250.0000 id=2
+2026-05-01 12:42:00 SCALP ENTRY: ETHUSD | score=0.75 | $3200.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 12:42:00 ORDER: ETHUSD Submitted Buy qty=0.012 price=0.0 id=3
+2026-05-01 12:43:00 ORDER: ETHUSD Filled Buy qty=0.012 price=3200.0 id=3
+2026-05-01 12:43:00 ⚠️ HIGH SLIPPAGE: ETHUSD | 0.08% | dir=Buy
+2026-05-01 12:55:00 TP: ETHUSD | PnL:+1.80% | Held:0.2h
+2026-05-01 12:55:00 ORDER: ETHUSD Submitted Sell qty=-0.012 price=0.0 id=4
+2026-05-01 12:56:00 ORDER: ETHUSD Filled Sell qty=-0.012 price=3257.6000 id=4
+2026-05-01 13:06:00 SCALP ENTRY: SOLUSD | score=0.75 | $175.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 13:06:00 ORDER: SOLUSD Submitted Buy qty=0.2 price=0.0 id=5
+2026-05-01 13:07:00 ORDER: SOLUSD Filled Buy qty=0.2 price=175.0 id=5
+2026-05-01 13:07:00 ⚠️ HIGH SLIPPAGE: SOLUSD | 0.18% | dir=Buy
+2026-05-01 13:37:00 STOP_LOSS: SOLUSD | PnL:-1.20% | Held:0.5h
+2026-05-01 13:37:00 ORDER: SOLUSD Submitted Sell qty=-0.2 price=0.0 id=6
+2026-05-01 13:38:00 ORDER: SOLUSD Filled Sell qty=-0.2 price=172.9000 id=6
+2026-05-01 13:38:00 ⚠️ HIGH SLIPPAGE: SOLUSD | 0.22% | dir=Sell
+2026-05-01 13:48:00 SCALP ENTRY: LINKUSD | score=0.89 | $18.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 13:48:00 ORDER: LINKUSD Submitted Buy qty=2.0 price=0.0 id=7
+2026-05-01 13:49:00 ORDER: LINKUSD Filled Buy qty=2.0 price=18.0 id=7
+2026-05-01 13:49:00 ⚠️ HIGH SLIPPAGE: LINKUSD | 0.09% | dir=Buy
+2026-05-01 14:49:00 TRAIL_STOP: LINKUSD | PnL:+4.50% | Held:1.0h
+2026-05-01 14:49:00 ORDER: LINKUSD Submitted Sell qty=-2.0 price=0.0 id=8
+2026-05-01 14:50:00 ORDER: LINKUSD Filled Sell qty=-2.0 price=18.8100 id=8
+2026-05-01 14:50:00 ⚠️ HIGH SLIPPAGE: LINKUSD | 0.06% | dir=Sell
+2026-05-01 15:00:00 SCALP ENTRY: AVAXUSD | score=0.59 | $35.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 15:00:00 ORDER: AVAXUSD Submitted Buy qty=1.0 price=0.0 id=9
+2026-05-01 15:01:00 ORDER: AVAXUSD Filled Buy qty=1.0 price=35.0 id=9
+2026-05-01 15:01:00 ⚠️ HIGH SLIPPAGE: AVAXUSD | 0.11% | dir=Buy
+2026-05-01 15:19:00 TP: AVAXUSD | PnL:+2.00% | Held:0.3h
+2026-05-01 15:19:00 ORDER: AVAXUSD Submitted Sell qty=-1.0 price=0.0 id=10
+2026-05-01 15:20:00 ORDER: AVAXUSD Filled Sell qty=-1.0 price=35.7000 id=10
+2026-05-01 15:30:00 SCALP ENTRY: DOTUSD | score=0.64 | $7.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 15:30:00 ORDER: DOTUSD Submitted Buy qty=5.0 price=0.0 id=11
+2026-05-01 15:31:00 ORDER: DOTUSD Filled Buy qty=5.0 price=7.0 id=11
+2026-05-01 15:31:00 ⚠️ HIGH SLIPPAGE: DOTUSD | 0.06% | dir=Buy
+2026-05-01 15:45:00 TP: DOTUSD | PnL:+1.20% | Held:0.2h
+2026-05-01 15:45:00 ORDER: DOTUSD Submitted Sell qty=-5.0 price=0.0 id=12
+2026-05-01 15:46:00 ORDER: DOTUSD Filled Sell qty=-5.0 price=7.0840 id=12
+2026-05-01 15:56:00 SCALP ENTRY: ADAUSD | score=0.79 | $0.55 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 15:56:00 ORDER: ADAUSD Submitted Buy qty=65.0 price=0.0 id=13
+2026-05-01 15:57:00 ORDER: ADAUSD Filled Buy qty=65.0 price=0.55 id=13
+2026-05-01 15:57:00 ⚠️ HIGH SLIPPAGE: ADAUSD | 0.12% | dir=Buy
+2026-05-01 16:32:00 STOP_LOSS: ADAUSD | PnL:-1.80% | Held:0.6h
+2026-05-01 16:32:00 ORDER: ADAUSD Submitted Sell qty=-65.0 price=0.0 id=14
+2026-05-01 16:33:00 ORDER: ADAUSD Filled Sell qty=-65.0 price=0.5401 id=14
+2026-05-01 16:33:00 ⚠️ HIGH SLIPPAGE: ADAUSD | 0.08% | dir=Sell
+2026-05-01 16:43:00 SCALP ENTRY: INJUSD | score=0.77 | $22.0 | obi=0.20 vol=0.20 trend=0.20 adx=0.15 mean_rev=0.00 vwap=0.20
+2026-05-01 16:43:00 ORDER: INJUSD Submitted Buy qty=1.5 price=0.0 id=15
+2026-05-01 16:44:00 ORDER: INJUSD Filled Buy qty=1.5 price=22.0 id=15
+2026-05-01 16:44:00 ⚠️ HIGH SLIPPAGE: INJUSD | 0.15% | dir=Buy
+2026-05-01 17:06:00 TP: INJUSD | PnL:+3.00% | Held:0.4h
+2026-05-01 17:06:00 ORDER: INJUSD Submitted Sell qty=-1.5 price=0.0 id=16
+2026-05-01 17:07:00 ORDER: INJUSD Filled Sell qty=-1.5 price=22.6600 id=16
+2026-05-01 17:07:00 ⚠️ HIGH SLIPPAGE: INJUSD | 0.07% | dir=Sell
+2026-05-01 17:17:00 === FINAL ===
+2026-05-01 17:17:00 Trades: 8 | WR: 75.0%
+2026-05-01 17:17:00 Final: $134.40
+2026-05-01 17:17:00 PnL: +12.00%
+Algorithm Liquidated

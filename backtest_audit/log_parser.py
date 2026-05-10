@@ -155,11 +155,13 @@ RE_ORDER = re.compile(
     r"qty=(?P<qty>-?[\d.]+) price=(?P<price>-?[\d.]+) id=(?P<oid>\S+)"
 )
 
-# ATR Trail: SYMBOL | PnL:-2.29% | Held:0.0h
-# Also matches: 'Take Profit', 'Stop Loss', 'Time Stop', etc.
+# MG36 format: 'ATR Trail: SYMBOL | PnL:-2.29% | Held:0.0h'
+# Pulse format: 'STOP_LOSS: SYMBOL | PnL:+1.50% | Held:0.5h'
+# Tag is anything that looks like an exit reason: words/spaces/underscores
+# followed by ': SYMBOL | PnL:N% | Held:N h'.
 RE_EXIT = re.compile(
-    _TS + r" (?P<reason>(?:ATR Trail|Take Profit|Stop Loss|Time Stop|Trail|EXIT_\w+|"
-    r"Hard Kill|Trailing Stop)): (?P<sym>\S+) \| PnL:(?P<pnl>-?[\d.]+)% \| Held:(?P<held>[\d.]+)h"
+    _TS + r" (?P<reason>[A-Za-z][A-Za-z _]+): "
+    r"(?P<sym>[A-Z][A-Z0-9]*) \| PnL:(?P<pnl>[+-]?[\d.]+)% \| Held:(?P<held>[\d.]+)h"
 )
 
 # ⚠️ HIGH SLIPPAGE: SYMBOL | 1.0713% | dir=Buy
@@ -182,7 +184,7 @@ RE_TRADES = re.compile(
 
 # Final: $119.14   AND   PnL: -5.24%   appear on separate lines
 RE_FINAL_EQUITY = re.compile(_TS + r" Final: \$(?P<eq>[\d.]+)")
-RE_PNL_LINE     = re.compile(_TS + r" PnL: (?P<pnl>-?[\d.]+)%")
+RE_PNL_LINE     = re.compile(_TS + r" PnL: (?P<pnl>[+-]?[\d.]+)%")
 
 # Components within SCALP ENTRY: "obi=0.20 vol=0.00 trend=0.00 adx=0.00 mean_rev=0.00 vwap=0.15"
 RE_COMPONENT = re.compile(r"(\w+)=([\d.]+)")

@@ -261,3 +261,71 @@ def test_pair_trades_akt_held_longer_than_kas(mg36):
     by_sym = {t.symbol: t for t in trades}
     assert by_sym["AKTUSD"].held_seconds > by_sym["KASUSD"].held_seconds
     assert by_sym["AKTUSD"].held_seconds > 600  # >10 min
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Synthetic winner fixture — positive-edge case
+# ───────────────────────────────────────────────────────────────────────────────
+
+WINNER_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "..", "fixtures", "synthetic_winner_paper.txt"
+)
+
+
+@pytest.fixture(scope="module")
+def winner_log() -> ParsedLog:
+    return parse_log_file(WINNER_FIXTURE)
+
+
+def test_winner_fixture_loads():
+    if not os.path.exists(WINNER_FIXTURE):
+        pytest.skip("Winner fixture not generated yet")
+    p = parse_log_file(WINNER_FIXTURE)
+    assert p.parse_errors == []
+    assert p.raw_line_count > 60
+
+
+def test_winner_fixture_has_8_round_trips(winner_log):
+    """The synthetic log has 8 entries and 8 exits (16 fills total)."""
+    fills = [o for o in winner_log.orders if o.status == "Filled"]
+    assert len(fills) == 16
+    buys  = [o for o in fills if o.side == "Buy"]
+    sells = [o for o in fills if o.side == "Sell"]
+    assert len(buys) == 8
+    assert len(sells) == 8
+
+
+def test_winner_fixture_pulse_exit_tags_parsed(winner_log):
+    """The new regex should parse Pulse's STOP_LOSS / TAKE_PROFIT / TRAIL_STOP."""
+    reasons = {x.reason for x in winner_log.exits}
+    assert "TP" in reasons or "STOP_LOSS" in reasons or "TRAIL_STOP" in reasons
+
+
+def test_winner_fixture_pair_trades_emits_8(winner_log):
+    trades = pair_trades(winner_log)
+    assert len(trades) == 8
+
+
+def test_winner_fixture_more_winners_than_losers(winner_log):
+    trades = pair_trades(winner_log)
+    winners = sum(1 for t in trades if t.gross_pct > 0)
+    losers  = sum(1 for t in trades if t.gross_pct <= 0)
+    # Synthetic plays: 6 winners, 2 losers
+    assert winners == 6
+    assert losers == 2
+
+
+def test_winner_fixture_final_pnl_positive(winner_log):
+    """Synthetic winner fixture should end with positive PnL."""
+    final = winner_log.snapshots[-1]
+    assert final.pnl_pct > 0    # final PnL is positive
+    assert final.equity > 120.0  # ended above the start
+
+
+def test_winner_fixture_summary_proves_positive_case(winner_log):
+    """Top-level invariants for the winner fixture (mirrors MG36 summary tests)."""
+    s = winner_log.summary()
+    assert s["scalp_entries"] == 8
+    assert s["orders_filled"] == 16
+    assert s["exits"] == 8
+    assert s["final_pnl_pct"] > 0
