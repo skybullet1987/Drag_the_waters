@@ -5,14 +5,32 @@ Auth: HMAC-SHA256(token + ":" + timestamp), Basic Auth(uid:digest).
 Credentials are read from the QC_USER_ID and QC_API_TOKEN environment
 variables. NEVER hard-code credentials in source.
 
-This wrapper is intentionally minimal: only the endpoints we actually use
-for the backtest-vs-live audit. Read-only operations only.
+Two surfaces:
+  - **Read-only methods** (used by the audit harness):
+      authenticate, list_projects, read_project,
+      list_files, read_file,
+      list_backtests, read_backtest, read_backtest_orders,
+      list_live_algorithms, read_live, read_live_orders, read_live_logs
 
-Usage:
+  - **Write methods** (used by qc_runner.py to deploy Pulse):
+      create_project, delete_project,
+      create_file, update_file, delete_file,
+      create_compile, read_compile,
+      create_backtest, delete_backtest
+
+  Write methods are kept on the same client class but are clearly named.
+  Caller is responsible for passing the right project IDs.
+
+Usage (read):
     client = QCClient.from_env()
     projects = client.list_projects()
-    backtests = client.list_backtests(project_id=31410009)
-    bt = client.read_backtest(project_id=31410009, backtest_id="b18bc60...")
+
+Usage (write):
+    client = QCClient.from_env()
+    pid = client.create_project(name="Pulse-2026", language="Py")["projects"][0]["projectId"]
+    client.update_file(pid, "main.py", contents="...")
+    cid = client.create_compile(pid)["compileId"]
+    bt = client.create_backtest(pid, cid, name="harsh-sim-2025")
 """
 
 from __future__ import annotations
@@ -166,3 +184,123 @@ class QCClient:
             f"&startLine={start_line}&endLine={end_line}"
         )
         return self._call(path).get("LiveLogs", []) or []
+
+    # ───────────────────────────────────────────────────────────────────────
+    # WRITE METHODS — project / file / compile / backtest creation
+    # ───────────────────────────────────────────────────────────────────────
+
+    def create_project(self, name: str, language: str = "Py") -> dict[str, Any]:
+        """Create a new QC project.
+
+        Returns the full response including {projects: [{projectId: int, ...}]}.
+        Use ``r["projects"][0]["projectId"]`` to extract the new ID.
+        """
+        return self._call("/projects/create", data={
+            "name": name,
+            "language": language,
+        })
+
+    def delete_project(self, project_id: int) -> dict[str, Any]:
+        return self._call("/projects/delete", data={"projectId": project_id})
+
+    def create_file(self, project_id: int, name: str, contents: str) -> dict[str, Any]:
+        return self._call("/files/create", data={
+            "projectId": project_id,
+            "name": name,
+            "content": contents,
+        })
+
+    def update_file(self, project_id: int, name: str,
+                    contents: str) -> dict[str, Any]:
+        """Update an existing file. Falls back to create on 'file not found'."""
+        try:
+            return self._call("/files/update", data={
+                "projectId": project_id,
+                "name": name,
+                "content": contents,
+            })
+        except QCError as exc:
+            if "not found" in str(exc).lower() or "does not exist" in str(exc).lower():
+                return self.create_file(project_id, name, contents)
+            raise
+
+    def delete_file(self, project_id: int, name: str) -> dict[str, Any]:
+        return self._call("/files/delete", data={
+            "projectId": project_id, "name": name,
+        })
+
+    def upsert_files(self, project_id: int,
+                     files: dict[str, str]) -> list[dict[str, Any]]:
+        """Convenience: push a dict of {filename: contents} to a project.
+
+        Tries update first; falls back to create on 'not found'. Returns the
+        list of per-file API responses.
+        """
+        results = []
+        for name, contents in files.items():
+            results.append(self.update_file(project_id, name, contents))
+        return results
+
+    # ── Compile ────────────────────────────────────────────────────────────
+
+    def create_compile(self, project_id: int) -> dict[str, Any]:
+        """Submit a compile job; returns ``{compileId: ...}``.
+
+        Caller must poll ``read_compile`` until state == "BuildSuccess" or
+        "BuildError" before calling create_backtest.
+        """
+        return self._call("/compile/create", data={"projectId": project_id})
+
+    def read_compile(self, project_id: int, compile_id: str) -> dict[str, Any]:
+        return self._call(
+            f"/compile/read?projectId={project_id}&compileId={compile_id}"
+        )
+
+    def wait_for_compile(self, project_id: int, compile_id: str,
+                          timeout_s: int = 120, poll_s: int = 2) -> dict[str, Any]:
+        """Poll read_compile until terminal state or timeout.
+
+        Returns the final compile payload (including state == "BuildSuccess"
+        or "BuildError"). Raises QCError on timeout.
+        """
+        start = time.time()
+        while time.time() - start < timeout_s:
+            r = self.read_compile(project_id, compile_id)
+            state = r.get("state") or r.get("State")
+            if state in ("BuildSuccess", "BuildError"):
+                return r
+            time.sleep(poll_s)
+        raise QCError(f"compile {compile_id} timed out after {timeout_s}s")
+
+    # ── Backtest creation ──────────────────────────────────────────────────
+
+    def create_backtest(self, project_id: int, compile_id: str,
+                        name: str) -> dict[str, Any]:
+        """Submit a backtest using the compiled artifact."""
+        return self._call("/backtests/create", data={
+            "projectId":   project_id,
+            "compileId":   compile_id,
+            "backtestName": name,
+        })
+
+    def delete_backtest(self, project_id: int, backtest_id: str) -> dict[str, Any]:
+        return self._call("/backtests/delete", data={
+            "projectId": project_id, "backtestId": backtest_id,
+        })
+
+    def wait_for_backtest(self, project_id: int, backtest_id: str,
+                          timeout_s: int = 1800, poll_s: int = 10) -> dict[str, Any]:
+        """Poll until backtest.completed=True; returns final read_backtest payload.
+
+        Defaults to 30-min timeout (typical 1-year crypto backtest takes 5-15
+        cloud-minutes). Raises QCError on timeout.
+        """
+        start = time.time()
+        while time.time() - start < timeout_s:
+            r = self.read_backtest(project_id, backtest_id)
+            if r.get("completed") or r.get("Completed"):
+                return r
+            time.sleep(poll_s)
+        raise QCError(
+            f"backtest {backtest_id} timed out after {timeout_s}s"
+        )
