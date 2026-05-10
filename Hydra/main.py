@@ -87,13 +87,32 @@ class HydraAlgorithm(QCAlgorithm):
         if self._portfolio_high > 0 and (self._portfolio_high - pv) / self._portfolio_high > 0.20:
             return
 
+        # FAST REGIME KILL SWITCH: exit ALL when BTC turns weak
+        regime = self._get_regime()
+        if regime == "bear" and self._positions:
+            for sym in list(self._positions.keys()):
+                pos = self._positions[sym]
+                ret = (float(self.securities[sym].price) - pos["entry_px"]) / pos["entry_px"] if pos["entry_px"] > 0 else 0
+                if ret < 0.01:  # exit anything not solidly profitable
+                    self._do_exit(sym, "EXIT_REGIME_KILL")
+            return  # don't scan for entries in bear
+
+        # BTC momentum deterioration: exit if BTC drops 2%+ in 24h
+        if self._btc and len(self._closes[self._btc]) >= 25:
+            btc_c = list(self._closes[self._btc])
+            btc_ret24h = (btc_c[-1] - btc_c[-25]) / btc_c[-25]
+            if btc_ret24h < -0.03 and self._positions:
+                for sym in list(self._positions.keys()):
+                    self._do_exit(sym, "EXIT_BTC_WEAK")
+                return
+
         # Check exits on all positions
         for sym in list(self._positions.keys()):
             if sym in data.bars:
                 self._check_exit(sym, float(data.bars[sym].close))
 
-        # Only scan for new entries every 4 hours
-        if self.time.hour % 4 != 0:
+        # Scan every 4 hours — fewer trades, bigger size, less fees
+        if self.time.hour % 4 != 0 or self.time.minute != 0:
             return
         if self._daily_sl >= 4:
             return
@@ -238,7 +257,7 @@ class HydraAlgorithm(QCAlgorithm):
                 if score > best_score:
                     best_score = score
                     best_reason = "dip_buy"
-                    best_alloc = 0.40 if regime == "strong_bull" else 0.30
+                    best_alloc = 0.55 if regime == "strong_bull" else 0.40
 
         # ── STRATEGY 2: MOMENTUM CONTINUATION (strong_bull) ─────────────
         if regime == "strong_bull":
@@ -253,7 +272,7 @@ class HydraAlgorithm(QCAlgorithm):
                 if score > best_score:
                     best_score = score
                     best_reason = "momentum"
-                    best_alloc = 0.35
+                    best_alloc = 0.50
 
         # ── STRATEGY 3: MEAN REVERSION (bull + chop) ────────────────────
         if regime in ("bull", "chop") and price > sma50:
@@ -271,10 +290,10 @@ class HydraAlgorithm(QCAlgorithm):
                 if score > best_score:
                     best_score = score
                     best_reason = "mean_revert"
-                    best_alloc = 0.25
+                    best_alloc = 0.35
 
-        if best_score < 0.35:
-            return None
+        if best_score < 0.55:
+            return None  # ONLY top-quality trades. Fewer trades = less fees = more profit
 
         return (best_score, best_reason, best_alloc)
 
