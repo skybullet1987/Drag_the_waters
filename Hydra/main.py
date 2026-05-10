@@ -26,9 +26,20 @@ from AlgorithmImports import *
 import numpy as np
 
 ALTS = [
+    # Mega cap
     "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD", "XDGUSD",
-    "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD", "NEARUSD",
-    "SUIUSD", "RENDERUSD", "PEPEUSD", "ONDOUSD",
+    "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
+    # Large cap
+    "NEARUSD", "SUIUSD", "TRXUSD", "BCHUSD", "TONUSD",
+    "TAOUSD", "FETUSD", "HBARUSD", "RENDERUSD", "ICPUSD",
+    # Mid cap movers
+    "ALGOUSD", "STXUSD", "AAVEUSD", "UNIUSD", "PEPEUSD",
+    "ONDOUSD", "KASUSD", "PENDLEUSD", "CRVUSD", "INJUSD",
+    # High beta
+    "JUPUSD", "TIAUSD", "EIGENUSD", "LDOUSD", "ARBUSD",
+    "BONKUSD", "SHIBUSD", "APTUSD", "FLRUSD", "ATOMUSD",
+    "OPUSD", "SEIUSD", "GRTUSD", "WIFUSD", "POLUSD",
+    "GALAUSD", "ETCUSD", "STRKUSD", "WLDUSD", "QNTUSD",
 ]
 
 
