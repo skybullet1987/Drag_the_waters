@@ -1,22 +1,25 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# HYDRA — Multi-Signal Pump Hunter
-# $100 → $10,000 through asymmetric momentum capture
+# HYDRA v4 — "Turtle Crypto"
+# The simplest possible strategy that could produce 100x.
 #
-# Architecture: REACT, don't predict.
-#   4 signal detectors scan 50 coins every 5 min
-#   Tiny SL (1.5%) + trailing stop (1.5% adaptive) = asymmetric risk
-#   Pyramiding into winners compounds aggressively
-#   Even at 35% WR: profitable due to 3:1+ win/loss ratio
+# RULES:
+#   1. BTC at new 20-day high → BUY the hottest alt
+#   2. BTC NOT at 20-day high → DO NOTHING (cash)
+#   3. Trail at 3% from high → captures pumps
+#   4. SL at -1.5% → tiny losses when wrong
+#   5. That's it. No ML, no ensemble, no indicators.
+#
+# WHY: every complex iteration lost money. The ONLY edge proven across
+# 10+ backtests is the trailing stop. The simplest entry that ONLY
+# fires during bull markets + trailing stop = the highest probability
+# path to profit.
 # ══════════════════════════════════════════════════════════════════════════════
 
 from AlgorithmImports import *
 import numpy as np
 from collections import deque
 from datetime import timedelta
-from signals import detect_regime, scan_all_coins
-from trail_engine import TrailEngine
 
-# ── Configuration ────────────────────────────────────────────────────────────
 COINS = [
     "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD",
     "XDGUSD", "AVAXUSD", "LINKUSD", "DOTUSD", "LTCUSD",
@@ -30,42 +33,18 @@ COINS = [
     "GALAUSD", "ETCUSD", "STRKUSD", "WLDUSD", "QNTUSD",
 ]
 
-# Entry
-SCAN_INTERVAL_MIN     = 5     # scan every 5 min
-PUMP_RET_1H_MIN       = 0.02  # +2% in 1h = pump starting
-PUMP_VOL_MULT         = 2.0   # 2x volume = real pump
-BREAKOUT_LOOKBACK     = 20    # 20-bar high for breakout
-BREAKOUT_VOL_MULT     = 1.5   # 1.5x volume for breakout
-SQUEEZE_LOOKBACK      = 20    # Bollinger period
-SQUEEZE_THRESHOLD     = 0.3   # bandwidth percentile for squeeze
-VOL_ANOMALY_MULT      = 3.0   # 3x volume = institutional
-
-# Execution — ASYMMETRIC RISK
-SL_PCT                = 0.015  # -1.5% stop loss (TINY)
-BREAKEVEN_AT          = 0.01   # move stop to entry at +1%
-TRAIL_ARM_PCT         = 0.02   # arm trailing at +2%
-TRAIL_PCT             = 0.015  # trail 1.5% from high (adaptive via ATR)
-EMERGENCY_SL          = 0.04   # -4% hard stop
-MIN_HOLD_MIN          = 15     # hold at least 15 min
-TIMEOUT_HOURS         = 36     # max hold 36h
-
-# Sizing
-INITIAL_ALLOC         = 0.50   # 50% initial entry
-PYRAMID_1_AT          = 0.015  # add at +1.5%
-PYRAMID_1_SIZE        = 0.25   # add 25%
-PYRAMID_2_AT          = 0.03   # add at +3%
-PYRAMID_2_SIZE        = 0.20   # add 20%
-
-# Risk
-MAX_DAILY_SL          = 5      # pause after 5 SL per day
-COOLDOWN_MIN          = 10     # 10 min after any exit
-SL_COOLDOWN_MIN       = 30     # 30 min per-coin after SL
-MAX_DD_PCT            = 0.25   # 25% drawdown circuit breaker
-
-# BTC filter
-BTC_CRASH_THRESHOLD   = -0.02  # skip entries if BTC ret_4h < -2%
-
-WARMUP_DAYS           = 30
+# ── Parameters ───────────────────────────────────────────────────────────────
+BTC_HIGH_LOOKBACK    = 20 * 288  # 20 days at 5-min bars = 5760 bars
+ALT_MOMENTUM_BARS    = 48       # 4h at 5-min = which alt is hottest
+SCAN_INTERVAL        = 15       # check every 15 min
+SL_PCT               = 0.015    # -1.5% stop loss
+TRAIL_ARM_PCT        = 0.015    # arm trail at +1.5%
+TRAIL_PCT            = 0.025    # trail 2.5% from high water mark
+EMERGENCY_SL         = 0.04     # -4% hard stop
+ALLOC                = 0.85     # 85% per trade
+COOLDOWN_MIN         = 15       # 15 min after any exit
+MAX_DAILY_SL         = 4
+WARMUP_DAYS          = 25
 
 
 class HydraAlgorithm(QCAlgorithm):
@@ -77,7 +56,6 @@ class HydraAlgorithm(QCAlgorithm):
         self.set_brokerage_model(BrokerageName.KRAKEN, AccountType.CASH)
         self.settings.free_portfolio_value_percentage = 0.02
 
-        # Add all coins
         self._symbols = []
         for ticker in COINS:
             try:
@@ -87,67 +65,44 @@ class HydraAlgorithm(QCAlgorithm):
                 pass
         self.log(f"[hydra] {len(self._symbols)} coins loaded")
 
-        # State: per-symbol OHLCV deques
         self._state = {}
         for sym in self._symbols:
-            self._state[sym] = {
-                "closes": deque(maxlen=500),
-                "highs": deque(maxlen=500),
-                "lows": deque(maxlen=500),
-                "volumes": deque(maxlen=500),
-            }
+            self._state[sym] = {"closes": deque(maxlen=6000), "volumes": deque(maxlen=6000)}
 
-        # BTC reference
         self._btc_sym = None
         for sym in self._symbols:
             if "BTC" in sym.value:
                 self._btc_sym = sym
                 break
 
-        # Consolidators: 5-min bars
         for sym in self._symbols:
-            consolidator = TradeBarConsolidator(timedelta(minutes=5))
-            consolidator.data_consolidated += self._on_5m
-            self.subscription_manager.add_consolidator(sym, consolidator)
+            c = TradeBarConsolidator(timedelta(minutes=5))
+            c.data_consolidated += self._on_bar
+            self.subscription_manager.add_consolidator(sym, c)
 
         # Position state
-        self._trail = TrailEngine(mode="scalp")
         self._pos_sym = None
         self._entry_px = 0.0
         self._entry_time = None
+        self._high_water = 0.0
+        self._trail_active = False
         self._pending_sym = None
         self._pending_oid = None
         self._exiting = False
-        self._pyramid_level = 0  # 0=initial, 1=first add, 2=second add
         self._exit_time = None
+        self._exit_retry = 0
+        self._daily_sl = 0
 
-        # Risk tracking
-        self._daily_sl_count = 0
-        self._last_sl_time = {}   # sym -> datetime
-        self._high_water = 100.0
-        self._dd_halt = False
+        # Tracking
+        self._portfolio_high = 100.0
 
-        # Warmup
         self.set_warmup(timedelta(days=WARMUP_DAYS))
+        self.schedule.on(self.date_rules.every_day(), self.time_rules.midnight, self._daily_reset)
 
-        # Chronos forecast cache
-        self._forecast_cache = {}
-        self._forecast_last = None
-
-        # Schedule daily reset
-        self.schedule.on(
-            self.date_rules.every_day(),
-            self.time_rules.midnight,
-            self._daily_reset,
-        )
-
-    def _on_5m(self, sender, bar):
+    def _on_bar(self, sender, bar):
         sym = bar.symbol
-        st = self._state[sym]
-        st["closes"].append(float(bar.close))
-        st["highs"].append(float(bar.high))
-        st["lows"].append(float(bar.low))
-        st["volumes"].append(float(bar.volume))
+        self._state[sym]["closes"].append(float(bar.close))
+        self._state[sym]["volumes"].append(float(bar.volume))
 
     def on_data(self, data):
         if self.is_warming_up:
@@ -155,222 +110,190 @@ class HydraAlgorithm(QCAlgorithm):
 
         # Drawdown circuit breaker
         pv = float(self.portfolio.total_portfolio_value)
-        if pv > self._high_water:
-            self._high_water = pv
-        dd = (self._high_water - pv) / self._high_water if self._high_water > 0 else 0
-        if dd > MAX_DD_PCT:
-            if not self._dd_halt:
-                self.log(f"[hydra] DRAWDOWN HALT: {dd:.1%} > {MAX_DD_PCT:.0%}")
-                self._dd_halt = True
+        if pv > self._portfolio_high:
+            self._portfolio_high = pv
+        if self._portfolio_high > 0 and (self._portfolio_high - pv) / self._portfolio_high > 0.25:
             return
-        self._dd_halt = False
 
-        # Check exit on current position
+        # Check exit
         if self._pos_sym and not self._exiting:
             if self._pos_sym in data.bars:
-                self._check_exit(data.bars[self._pos_sym])
+                self._check_exit(float(data.bars[self._pos_sym].close))
 
-        # Check pyramiding
-        if self._pos_sym and not self._exiting and self._pyramid_level < 2:
-            self._check_pyramid()
-
-        # Scan for entries every SCAN_INTERVAL_MIN
-        if self.time.minute % SCAN_INTERVAL_MIN != 0:
+        # Scan for entries
+        if self.time.minute % SCAN_INTERVAL != 0:
             return
         if self._pos_sym or self._pending_sym or self._exiting:
             return
-        if self._daily_sl_count >= MAX_DAILY_SL:
+        if self._daily_sl >= MAX_DAILY_SL:
+            return
+        if self._exit_time and (self.time - self._exit_time).total_seconds() / 60 < COOLDOWN_MIN:
             return
 
-        # Cooldown: shorter after TRAIL exit (momentum might continue)
-        if self._exit_time:
-            elapsed = (self.time - self._exit_time).total_seconds() / 60
-            _last_exit_was_trail = getattr(self, "_last_exit_tag", "") == "EXIT_TRAIL"
-            _cooldown = 5 if _last_exit_was_trail else COOLDOWN_MIN
-            if elapsed < _cooldown:
-                return
+        self._scan()
 
-        # Update Chronos forecasts periodically
-        self._update_forecasts()
+    def _is_btc_bullish(self):
+        """THE core rule: is BTC at or near its 20-day high?"""
+        if not self._btc_sym:
+            return False
+        bc = self._state[self._btc_sym]["closes"]
+        if len(bc) < min(BTC_HIGH_LOOKBACK, 2000):
+            return False
+        c = list(bc)
+        lookback = min(BTC_HIGH_LOOKBACK, len(c))
+        high_20d = max(c[-lookback:])
+        current = c[-1]
+        # BTC within 2% of 20-day high = bullish
+        return current >= high_20d * 0.98
 
-        self._scan_and_enter()
+    def _find_hottest_alt(self):
+        """Find the alt with the strongest 4h momentum."""
+        best_sym = None
+        best_ret = -999
 
-    def _scan_and_enter(self):
-        """Regime-aware scan: different strategies for bull/pump/bear."""
-        # Detect regime from BTC
-        btc_closes = list(self._state[self._btc_sym]["closes"]) if self._btc_sym else []
-        regime = detect_regime(btc_closes)
-
-        # Log regime changes
-        if regime != getattr(self, "_last_regime", None):
-            self.log(f"[hydra] REGIME: {regime}")
-            self._last_regime = regime
-
-        # BEAR = NO TRADES. This is the #1 rule.
-        if regime == "bear":
-            return
-
-        # Apply SL cooldown filter
-        _filtered_syms = []
         for sym in self._symbols:
-            if sym in self._last_sl_time:
-                elapsed = (self.time - self._last_sl_time[sym]).total_seconds() / 60
-                if elapsed < SL_COOLDOWN_MIN:
+            if sym == self._btc_sym:
+                continue
+            closes = self._state[sym]["closes"]
+            volumes = self._state[sym]["volumes"]
+            if len(closes) < ALT_MOMENTUM_BARS + 1:
+                continue
+
+            c = list(closes)
+            v = list(volumes)
+            ret_4h = (c[-1] - c[-(ALT_MOMENTUM_BARS+1)]) / c[-(ALT_MOMENTUM_BARS+1)]
+            vol_avg = np.mean(v[-ALT_MOMENTUM_BARS:])
+            vol_now = v[-1]
+
+            # Must be positive momentum with some volume
+            if ret_4h <= 0.005:
+                continue
+            if vol_now < vol_avg * 0.5:
+                continue
+
+            # RSI not overbought
+            if len(c) >= 15:
+                diffs = np.diff(c[-15:])
+                gains = np.mean(np.where(diffs > 0, diffs, 0))
+                losses = np.mean(np.where(diffs < 0, -diffs, 0))
+                rsi = 100 - 100 / (1 + gains / max(losses, 1e-9))
+                if rsi > 80:
                     continue
-            _filtered_syms.append(sym)
 
-        # Scan with regime-appropriate strategies
-        signals = scan_all_coins(
-            symbols=_filtered_syms, state=self._state,
-            btc_closes=btc_closes, forecast_cache=self._forecast_cache,
-            regime=regime,
-        )
+            if ret_4h > best_ret:
+                best_ret = ret_4h
+                best_sym = sym
 
-        if not signals:
+        return best_sym, best_ret
+
+    def _scan(self):
+        """The entire strategy in 3 lines of logic."""
+        # RULE 1: Is BTC bullish?
+        if not self._is_btc_bullish():
+            return  # NO → do nothing. Cash is a position.
+
+        # RULE 2: Find the hottest alt
+        sym, ret = self._find_hottest_alt()
+        if sym is None:
             return
 
-        sym, strength, reason, mode = signals[0]
+        # RULE 3: Buy it
         price = float(self.securities[sym].price)
         if price <= 0:
             return
 
-        # Size: initial allocation
         pv = float(self.portfolio.total_portfolio_value)
-        alloc = INITIAL_ALLOC
-        cash = pv * alloc * 0.99
-        qty = cash / price
-        if qty <= 0:
-            return
-
-        # Validate lot size
+        qty = (pv * ALLOC * 0.99) / price
         lot = self.securities[sym].symbol_properties.lot_size
         min_order = self.securities[sym].symbol_properties.minimum_order_size
         qty = max(0, (qty // lot) * lot)
         if qty < min_order:
             return
 
-        self.log(
-            f"[hydra] ENTRY {sym.value} reason={reason} strength={strength:.3f}"
-            f" mode={mode} regime={getattr(self, '_last_regime', '?')}"
-            f" px={price:.4f} qty={qty:.6f} alloc={alloc:.0%}"
-        )
+        self.log(f"[hydra] ENTRY {sym.value} ret4h={ret:.2%} px={price:.4f} qty={qty:.6f}")
 
-        # Enter
         self._pending_sym = sym
-        self._trail.reset(price, mode=mode)
-        self._pyramid_level = 0
+        self._high_water = price
+        self._trail_active = False
         order = self.market_order(sym, qty, tag="ENTRY")
         self._pending_oid = order.order_id
 
-    def _check_exit(self, bar):
-        """Check trail/SL/timeout exits with ATR-adaptive trailing."""
-        price = float(bar.close)
-        elapsed_min = (self.time - self._entry_time).total_seconds() / 60
-
-        # Min hold
-        if elapsed_min < MIN_HOLD_MIN:
-            ret = (price - self._entry_px) / self._entry_px
-            if ret <= -EMERGENCY_SL:
-                self._exit("EXIT_EMERGENCY_SL", price)
+    def _check_exit(self, price):
+        """Trail / SL / timeout."""
+        if not self._entry_px or self._entry_px <= 0:
             return
 
-        # ATR-adaptive trail: wide in pumps, tight in quiet
-        st = self._state.get(self._pos_sym)
-        if st and len(st["closes"]) >= 15:
-            c = list(st["closes"])
-            atr = np.mean(np.abs(np.diff(c[-15:])))
-            atr_pct = atr / price if price > 0 else 0.015
-            adaptive_trail = max(0.01, min(atr_pct * 1.5, 0.04))
-            self._trail._trail_pct = adaptive_trail
+        ret = (price - self._entry_px) / self._entry_px
+        elapsed_h = (self.time - self._entry_time).total_seconds() / 3600
 
-        action = self._trail.check(price, elapsed_min / 60.0, TIMEOUT_HOURS)
-        if action:
-            self._exit(action, price)
+        # Update high water
+        if price > self._high_water:
+            self._high_water = price
+        max_ret = (self._high_water - self._entry_px) / self._entry_px
 
-    def _safe_sell_qty(self, sym):
-        """Get safe sell quantity respecting CashBook balance."""
-        port_qty = float(self.portfolio[sym].quantity)
-        if port_qty <= 0:
-            return 0.0
-        lot = self.securities[sym].symbol_properties.lot_size
-        min_order = self.securities[sym].symbol_properties.minimum_order_size
-        # Check CashBook for actual base currency balance
-        try:
-            quote_ccy = self.securities[sym].symbol_properties.quote_currency
-            base_ccy = sym.value.replace(quote_ccy, "")
-            if base_ccy in self.portfolio.cash_book:
-                cash_qty = float(self.portfolio.cash_book[base_ccy].amount)
-                port_qty = min(port_qty, cash_qty)
-        except Exception:
-            pass
-        qty = max(0, (port_qty // lot) * lot - lot)  # subtract 1 lot buffer
-        return qty if qty >= min_order else 0.0
+        # Min hold: 10 min (only emergency SL)
+        if elapsed_h < 10/60:
+            if ret <= -EMERGENCY_SL:
+                self._do_exit("EXIT_EMERGENCY_SL")
+            return
 
-    def _exit(self, tag, price):
-        """Submit exit order."""
+        # SL
+        if ret <= -SL_PCT:
+            self._do_exit("EXIT_SL")
+            return
+
+        # Arm trail
+        if not self._trail_active and max_ret >= TRAIL_ARM_PCT:
+            self._trail_active = True
+
+        # Trail stop
+        if self._trail_active:
+            trail_stop = self._high_water * (1 - TRAIL_PCT)
+            if price <= trail_stop:
+                self._do_exit("EXIT_TRAIL")
+                return
+
+        # Timeout: 48h
+        if elapsed_h >= 48:
+            self._do_exit("EXIT_TIMEOUT")
+
+    def _do_exit(self, tag):
         if self._exiting:
             return
-        qty = self._safe_sell_qty(self._pos_sym)
+        sym = self._pos_sym
+        if not sym:
+            return
+
+        # Safe sell qty
+        qty = float(self.portfolio[sym].quantity)
+        try:
+            quote = self.securities[sym].symbol_properties.quote_currency
+            base = sym.value.replace(quote, "")
+            if base in self.portfolio.cash_book:
+                qty = min(qty, float(self.portfolio.cash_book[base].amount))
+        except Exception:
+            pass
+
+        lot = self.securities[sym].symbol_properties.lot_size
+        qty = max(0, (qty // lot) * lot - lot)
         if qty <= 0:
-            self._clear_state()
+            self._clear()
             return
 
-        ret = (price - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
-        self.log(
-            f"[hydra] {tag} {self._pos_sym.value} ret={ret:+.2%}"
-            f" px={price:.4f} entry={self._entry_px:.4f}"
-            f" pyramid={self._pyramid_level}"
-        )
-
+        ret = (float(self.securities[sym].price) - self._entry_px) / self._entry_px if self._entry_px > 0 else 0
+        self.log(f"[hydra] {tag} {sym.value} ret={ret:+.2%} hw={self._high_water:.4f}")
         self._exiting = True
-        self.market_order(self._pos_sym, -qty, tag=tag)
-
-    def _check_pyramid(self):
-        """Add to winning position at predefined levels."""
-        if not self._pos_sym or self._entry_px <= 0:
-            return
-        price = float(self.securities[self._pos_sym].price)
-        ret = (price - self._entry_px) / self._entry_px
-
-        target = PYRAMID_1_AT if self._pyramid_level == 0 else PYRAMID_2_AT
-        size = PYRAMID_1_SIZE if self._pyramid_level == 0 else PYRAMID_2_SIZE
-
-        if ret >= target:
-            pv = float(self.portfolio.total_portfolio_value)
-            cash = pv * size * 0.99
-            qty = cash / price
-            lot = self.securities[self._pos_sym].symbol_properties.lot_size
-            min_order = self.securities[self._pos_sym].symbol_properties.minimum_order_size
-            qty = max(0, (qty // lot) * lot)
-            if qty >= min_order:
-                self._pyramid_level += 1
-                self.market_order(self._pos_sym, qty, tag=f"PYRAMID_{self._pyramid_level}")
-                self.log(
-                    f"[hydra] PYRAMID_{self._pyramid_level} {self._pos_sym.value}"
-                    f" ret={ret:+.2%} add_qty={qty:.6f}"
-                )
+        self.market_order(sym, -qty, tag=tag)
 
     def on_order_event(self, order_event):
         if order_event.status == OrderStatus.INVALID:
-            tag = ""
-            try:
-                tag = self.transactions.get_order_by_id(order_event.order_id).tag
-            except Exception:
-                pass
-            if tag.startswith("EXIT"):
-                self._exit_retry_count = getattr(self, "_exit_retry_count", 0) + 1
-                if self._exit_retry_count >= 3:
-                    self.log(f"[hydra] EXIT INVALID 3x — clearing state for {self._pos_sym}")
-                    sym = self._pos_sym
-                    if sym:
-                        self._last_sl_time[sym] = self.time
-                        self._daily_sl_count += 1
-                    self._exit_time = self.time
-                    self._clear_state()
-                else:
-                    self._exiting = False  # allow retry
+            self._exit_retry += 1
+            if self._exit_retry >= 3:
+                if self._pos_sym:
+                    self._daily_sl += 1
+                self._exit_time = self.time
+                self._clear()
             else:
-                self._pending_sym = None
                 self._exiting = False
             return
 
@@ -378,74 +301,35 @@ class HydraAlgorithm(QCAlgorithm):
             return
 
         sym = order_event.symbol
-        tag = self.transactions.get_order_by_id(order_event.order_id).tag
+        tag = ""
+        try:
+            tag = self.transactions.get_order_by_id(order_event.order_id).tag
+        except Exception:
+            pass
 
         if tag == "ENTRY":
             self._pos_sym = sym
             self._entry_px = float(order_event.fill_price)
             self._entry_time = self.time
+            self._high_water = self._entry_px
+            self._trail_active = False
             self._pending_sym = None
-            self._exit_retry_count = 0
-            self._trail.reset(self._entry_px)
-
-        elif tag.startswith("PYRAMID"):
-            pass
-
+            self._exit_retry = 0
         elif tag.startswith("EXIT"):
-            is_sl = "SL" in tag
-            if is_sl:
-                self._daily_sl_count += 1
-                self._last_sl_time[sym] = self.time
+            if "SL" in tag:
+                self._daily_sl += 1
             self._exit_time = self.time
-            self._last_exit_tag = tag
-            self._clear_state()
+            self._clear()
 
-    def _clear_state(self):
+    def _clear(self):
         self._pos_sym = None
         self._entry_px = 0.0
         self._entry_time = None
+        self._high_water = 0.0
+        self._trail_active = False
         self._pending_sym = None
         self._exiting = False
-        self._pyramid_level = 0
-        self._trail.reset(0)
+        self._exit_retry = 0
 
     def _daily_reset(self):
-        self._daily_sl_count = 0
-
-    def _update_forecasts(self):
-        """Update Chronos + Wavelet forecasts for all symbols."""
-        if self._forecast_last and (self.time - self._forecast_last).total_seconds() < 1800:
-            return  # update every 30 min
-        n_ok = 0
-        try:
-            from forecast_features import chronos_forecast_return, wavelet_forecast_return
-            for sym in self._symbols:
-                closes = list(self._state[sym]["closes"])
-                if len(closes) >= 64:
-                    c_ret = chronos_forecast_return(closes)
-                    w_ret = wavelet_forecast_return(closes)
-                    combined = 0.6 * c_ret + 0.4 * w_ret  # Chronos weighted higher
-                    self._forecast_cache[sym] = combined
-                    n_ok += 1
-            self._forecast_last = self.time
-            if n_ok > 0 and self.time.minute == 0:
-                self.debug(f"[hydra] Forecasts updated: {n_ok} coins")
-        except Exception as exc:
-            self.debug(f"[hydra] Forecast update failed: {exc}")
-
-    def _get_btc_alt_correlation(self, sym):
-        """Cross-coin correlation: how much does this coin follow BTC?
-        Low correlation + independent pump = stronger signal."""
-        if not self._btc_sym or self._btc_sym == sym:
-            return 0.5
-        bc = list(self._state[self._btc_sym]["closes"])
-        sc = list(self._state[sym]["closes"])
-        if len(bc) < 50 or len(sc) < 50:
-            return 0.5
-        btc_rets = np.diff(bc[-50:]) / np.array(bc[-50:])[:-1]
-        sym_rets = np.diff(sc[-50:]) / np.array(sc[-50:])[:-1]
-        try:
-            corr = float(np.corrcoef(btc_rets, sym_rets)[0, 1])
-            return corr
-        except Exception:
-            return 0.5
+        self._daily_sl = 0
