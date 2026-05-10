@@ -237,6 +237,16 @@ class HydraAlgorithm(QCAlgorithm):
                 vol_anomaly_mult=VOL_ANOMALY_MULT,
             )
             if result["enter"]:
+                # Cross-coin correlation boost
+                corr = self._get_btc_alt_correlation(sym)
+                if corr < 0.3:
+                    # Low BTC correlation + independent pump = stronger
+                    result["strength"] = min(result["strength"] + 0.1, 1.0)
+
+                # Chronos hard filter: if forecast is strongly negative, skip
+                if chronos_ret < -0.01:
+                    continue  # Chronos says DOWN → don't enter
+
                 signals.append((sym, result["strength"], result["reason"], result))
 
         if not signals:
@@ -278,17 +288,25 @@ class HydraAlgorithm(QCAlgorithm):
         self._pending_oid = order.order_id
 
     def _check_exit(self, bar):
-        """Check trail/SL/timeout exits."""
+        """Check trail/SL/timeout exits with ATR-adaptive trailing."""
         price = float(bar.close)
         elapsed_min = (self.time - self._entry_time).total_seconds() / 60
 
         # Min hold
         if elapsed_min < MIN_HOLD_MIN:
-            # Only emergency SL during min hold
             ret = (price - self._entry_px) / self._entry_px
             if ret <= -EMERGENCY_SL:
                 self._exit("EXIT_EMERGENCY_SL", price)
             return
+
+        # ATR-adaptive trail: wide in pumps, tight in quiet
+        st = self._state.get(self._pos_sym)
+        if st and len(st["closes"]) >= 15:
+            c = list(st["closes"])
+            atr = np.mean(np.abs(np.diff(c[-15:])))
+            atr_pct = atr / price if price > 0 else 0.015
+            adaptive_trail = max(0.01, min(atr_pct * 1.5, 0.04))
+            self._trail._trail_pct = adaptive_trail
 
         action = self._trail.check(price, elapsed_min / 60.0, TIMEOUT_HOURS)
         if action:
@@ -419,9 +437,10 @@ class HydraAlgorithm(QCAlgorithm):
         self._daily_sl_count = 0
 
     def _update_forecasts(self):
-        """Update Chronos forecasts for all symbols."""
-        if self._forecast_last and (self.time - self._forecast_last).total_seconds() < 3600:
-            return
+        """Update Chronos + Wavelet forecasts for all symbols."""
+        if self._forecast_last and (self.time - self._forecast_last).total_seconds() < 1800:
+            return  # update every 30 min
+        n_ok = 0
         try:
             from forecast_features import chronos_forecast_return, wavelet_forecast_return
             for sym in self._symbols:
@@ -429,7 +448,28 @@ class HydraAlgorithm(QCAlgorithm):
                 if len(closes) >= 64:
                     c_ret = chronos_forecast_return(closes)
                     w_ret = wavelet_forecast_return(closes)
-                    self._forecast_cache[sym] = c_ret + w_ret  # combined forecast
+                    combined = 0.6 * c_ret + 0.4 * w_ret  # Chronos weighted higher
+                    self._forecast_cache[sym] = combined
+                    n_ok += 1
             self._forecast_last = self.time
+            if n_ok > 0 and self.time.minute == 0:
+                self.debug(f"[hydra] Forecasts updated: {n_ok} coins")
+        except Exception as exc:
+            self.debug(f"[hydra] Forecast update failed: {exc}")
+
+    def _get_btc_alt_correlation(self, sym):
+        """Cross-coin correlation: how much does this coin follow BTC?
+        Low correlation + independent pump = stronger signal."""
+        if not self._btc_sym or self._btc_sym == sym:
+            return 0.5
+        bc = list(self._state[self._btc_sym]["closes"])
+        sc = list(self._state[sym]["closes"])
+        if len(bc) < 50 or len(sc) < 50:
+            return 0.5
+        btc_rets = np.diff(bc[-50:]) / np.array(bc[-50:])[:-1]
+        sym_rets = np.diff(sc[-50:]) / np.array(sc[-50:])[:-1]
+        try:
+            corr = float(np.corrcoef(btc_rets, sym_rets)[0, 1])
+            return corr
         except Exception:
-            pass
+            return 0.5
