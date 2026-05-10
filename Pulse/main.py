@@ -125,6 +125,7 @@ from Pulse.fees import KrakenTieredFeeModel
 from Pulse.slippage import RealisticCryptoSlippage
 from Pulse.online_learning import OnlineThresholdLearner
 from Pulse.optimal_execution import build_slice_plan, DEFAULT_LARGE_ORDER_THRESHOLD_BPS
+from Pulse.execution import min_quantity_fallback, KRAKEN_MIN_QTY_FALLBACK
 
 
 # ─── Per-symbol rolling state ────────────────────────────────────────────────
@@ -502,6 +503,17 @@ if HAS_QC:
             base_max = MAX_POSITIONS
             effective_max = max(1, round(base_max * fg_signal.max_positions_multiplier))
 
+            # ── Capital-aware position cap ─────────────────────────────────
+            # On Kraken, min order USD is ~$5 + the per-symbol min-qty
+            # constraint (e.g. BTC needs ≥0.0001 = ~$10 at $100k BTC).
+            # If equity is too small to fit `effective_max` positions
+            # of meaningful size, REDUCE the cap. Otherwise we open
+            # positions too small to ever sell → INVALID exit spiral.
+            equity = float(self.Portfolio.TotalPortfolioValue)
+            min_pos_usd_floor = 12.0   # safe-above-Kraken-min for major
+            capital_max = max(1, int(equity / min_pos_usd_floor))
+            effective_max = min(effective_max, capital_max)
+
             # ── Submit entries up to effective_max ────────────────────────
             # Match by symbol VALUE (string), not by Symbol object —
             # self._open keys are QC Symbol objects, score.symbol is a string,
@@ -727,6 +739,33 @@ if HAS_QC:
                 if price <= 0:
                     return
                 qty = size_usd / price
+
+                # ── CRITICAL: validate vs Kraken min order quantity ────────
+                # If qty < Kraken min-qty, the buy might fill but the SELL
+                # will be rejected as INVALID — leading to stuck positions
+                # and the cascade we saw in 'Emotional Light Brown Sardine'
+                # backtest. Reject the entry now, log the reason.
+                min_qty = min_quantity_fallback(sym.Value)
+                if qty < min_qty:
+                    # Try to scale up to the min if cash allows; if not,
+                    # skip and put the symbol in a 30-min cooldown so we
+                    # don't repeatedly evaluate it.
+                    needed_usd = min_qty * price * 1.05   # 5% buffer for fees
+                    if needed_usd <= available * 0.95:
+                        # Scale up to exactly min_qty
+                        qty = min_qty * 1.001    # tiny safety margin above
+                        size_usd = qty * price
+                    else:
+                        self._symbol_cooldown_until[sym.Value] = (
+                            now + timedelta(minutes=30)
+                        )
+                        self.Debug(
+                            f"[pulse] skip {sym.Value}: qty={qty:.8f} "
+                            f"below Kraken min {min_qty:.8f} "
+                            f"(would need ${needed_usd:.2f}, have ${available:.2f})"
+                        )
+                        return
+
                 # Optional: slice large entries via Almgren-Chriss
                 # (only for high-conviction trades that would slip ≥25bp)
                 buf = self._buffers.get(sym)
