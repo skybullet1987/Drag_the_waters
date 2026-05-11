@@ -319,6 +319,12 @@ if HAS_QC:
             # ── Binance funding rate subscriptions (for Apex) ─────────────
             # Native QC dataset — replays correctly in backtest. Subscribed
             # only for the perp tickers that map to our Kraken universe.
+            #
+            # NOTE: BinanceFundingRate is a SEPARATE QC dataset that requires
+            # a subscription on the user's QC account. If unavailable, the
+            # import fails — we use BaseException because QC's Python.NET
+            # hosted runtime raises non-Exception subclasses on missing
+            # imports (same fix applied earlier to runtime_overrides).
             self._binance_funding_symbols: dict[str, Any] = {}
             try:
                 from QuantConnect.DataSource import BinanceFundingRate  # type: ignore
@@ -332,13 +338,20 @@ if HAS_QC:
                             BinanceFundingRate, perp, Resolution.Hour,
                         )
                         self._binance_funding_symbols[perp] = sub.Symbol
-                    except Exception as exc:
+                    except BaseException as exc:
                         self.Debug(f"Binance funding sub failed for {perp}: {exc}")
                 if self._binance_funding_symbols:
                     self.Log(f"[pulse] Binance funding subscribed: "
                              f"{len(self._binance_funding_symbols)} pairs")
-            except Exception as exc:
-                self.Debug(f"BinanceFundingRate import failed: {exc}")
+                else:
+                    self.Log("[pulse] Binance funding: no pairs subscribed "
+                             "(dataset may not be available)")
+            except BaseException as exc:
+                # Most common case: dataset not subscribed on this QC account
+                # → ImportError is wrapped as ModuleNotFoundError and surfaces
+                # via Python.NET as a non-Exception subclass.
+                self.Log(f"[pulse] BinanceFundingRate unavailable: "
+                         f"{type(exc).__name__}: {exc}")
 
             # ── Custom slippage + fee per security ────────────────────────
             self.SetSecurityInitializer(self._on_security_added)
