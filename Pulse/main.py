@@ -1132,18 +1132,29 @@ if HAS_QC:
                 ("apex_news_sentiment_data",
                  self._apex.news_store.load_csv),
             ):
+                # BaseException because QC's Python.NET hosted runtime
+                # propagates ModuleNotFoundError as a non-Exception
+                # subclass on missing imports (same pattern as the
+                # runtime_overrides + BinanceFundingRate fixes).
                 try:
                     mod = __import__(module_name)
+                except BaseException as exc:
+                    msg = str(exc)
+                    if "No module named" not in msg and \
+                       "cannot import" not in msg:
+                        self.Debug(f"[apex] import {module_name} "
+                                   f"failed: {type(exc).__name__}: {msg}")
+                    continue
+                try:
                     content = getattr(mod, "CONTENT", "") or ""
                     if not content:
                         continue
                     loader(content)
                     self.Log(f"[apex] loaded {module_name} "
                              f"({len(content)} bytes)")
-                except Exception as exc:
-                    # Module not present is normal — log only on parse error
-                    if "No module named" not in str(exc):
-                        self.Debug(f"[apex] {module_name} parse failed: {exc}")
+                except BaseException as exc:
+                    self.Debug(f"[apex] {module_name} parse failed: "
+                               f"{type(exc).__name__}: {exc}")
 
         # ── Apex callbacks ─────────────────────────────────────────────────
         def _apex_place_order(self, sym_str: str, qty: float,
