@@ -94,6 +94,13 @@ def resolve_param(name, runtime_overrides, qc_get_param_fn, default=None):
 
 
 # Pulse imports
+# Read overridable values via the config MODULE at use-time so
+# runtime_overrides take effect. Specifically: TIME_STOP_HOURS,
+# MAX_POSITIONS, SCALP_ENTRY_THRESHOLD, SCALP_HIGH_CONVICTION_THRES.
+# The bare names below are bound at IMPORT time and therefore reflect
+# only the original config defaults — do NOT use them where overrides
+# might apply at runtime.
+import Pulse.config as _cfg
 from Pulse.config import (
     INITIAL_CASH_USD,
     MAX_DRAWDOWN_TRIP_PCT, MAX_DRAWDOWN_HALT_PCT, MAX_DD_RECOVERY_PCT,
@@ -338,13 +345,17 @@ if HAS_QC:
             # than the learner's defaults (e.g. diagnostic backtest with
             # SCALP_ENTRY_THRESHOLD=0.35). Otherwise the learner's __init__
             # validation rejects the initial value.
-            entry_min = min(_LRN_ENTRY_MIN, SCALP_ENTRY_THRESHOLD)
-            entry_max = max(_LRN_ENTRY_MAX, SCALP_ENTRY_THRESHOLD)
-            hc_min    = min(_LRN_HC_MIN,    SCALP_HIGH_CONVICTION_THRES)
-            hc_max    = max(_LRN_HC_MAX,    SCALP_HIGH_CONVICTION_THRES)
+            # Read via _cfg so runtime_overrides take effect (the bare names
+            # bound at import time would still show the unmodified defaults).
+            _cfg_entry = float(_cfg.SCALP_ENTRY_THRESHOLD)
+            _cfg_hc    = float(_cfg.SCALP_HIGH_CONVICTION_THRES)
+            entry_min = min(_LRN_ENTRY_MIN, _cfg_entry)
+            entry_max = max(_LRN_ENTRY_MAX, _cfg_entry)
+            hc_min    = min(_LRN_HC_MIN,    _cfg_hc)
+            hc_max    = max(_LRN_HC_MAX,    _cfg_hc)
             self._learner = OnlineThresholdLearner(
-                initial_entry_threshold=SCALP_ENTRY_THRESHOLD,
-                initial_high_conviction_thres=SCALP_HIGH_CONVICTION_THRES,
+                initial_entry_threshold=_cfg_entry,
+                initial_high_conviction_thres=_cfg_hc,
                 entry_min=entry_min, entry_max=entry_max,
                 hc_min=hc_min, hc_max=hc_max,
             )
@@ -532,7 +543,7 @@ if HAS_QC:
                 self.Debug(f"[pulse] FG panic-greed: blocking new entries "
                           f"(value={self._fg_value})")
                 return
-            base_max = MAX_POSITIONS
+            base_max = _cfg.MAX_POSITIONS
             effective_max = max(1, round(base_max * fg_signal.max_positions_multiplier))
 
             # ── Capital-aware position cap ─────────────────────────────────
@@ -748,7 +759,7 @@ if HAS_QC:
                 #   per_position_share = total_equity / max_positions
                 # so MAX_POSITIONS concurrent trades can all fit.
                 total_equity = float(self.Portfolio.TotalPortfolioValue)
-                fair_share = total_equity / max(MAX_POSITIONS, 1)
+                fair_share = total_equity / max(_cfg.MAX_POSITIONS, 1)
                 size_usd = min(max_pos_usd, fair_share)
 
                 # Apply score multipliers
@@ -894,7 +905,7 @@ if HAS_QC:
                 elif ret <= -TIGHT_STOP_LOSS_PCT:
                     exit_tag = "STOP_LOSS"
                 # 3. Time stop
-                elif pos.held_hours(now) >= TIME_STOP_HOURS:
+                elif pos.held_hours(now) >= _cfg.TIME_STOP_HOURS:
                     exit_tag = "TIME_STOP"
                 else:
                     # 4. Trail (arm at +4%, trail 2.5% from high)
