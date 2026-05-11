@@ -383,6 +383,42 @@ if HAS_QC:
             # ── Cross-symbol context (filled each cycle) ──────────────────
             self._market_context = MarketContext()
 
+            # ── Apex engine (gated by runtime override `apex_enabled`) ────
+            # When enabled, runs every 4h alongside the existing scalp
+            # engine. ML model is loaded from `apex_model_v1.joblib` if
+            # present; otherwise Apex runs in fallback (rule-based) mode.
+            self._apex = None
+            self._apex_last_tick: datetime | None = None
+            apex_raw = self._param("apex_enabled", False)
+            self._apex_enabled = (
+                str(apex_raw).lower() in ("true", "1", "yes")
+                if apex_raw else False
+            )
+            if self._apex_enabled:
+                try:
+                    from Pulse.apex.integration import (
+                        bootstrap_apex, attach_callbacks,
+                    )
+                    self._apex = bootstrap_apex(
+                        model_path="apex_model_v1.joblib",
+                        fallback_only=False,
+                    )
+                    attach_callbacks(
+                        self._apex,
+                        place_order=self._apex_place_order,
+                        place_exit=self._apex_place_exit,
+                        context_provider=lambda s: {"now": self.Time},
+                    )
+                    self.Log(
+                        f"[pulse] APEX enabled — "
+                        f"signals={self._apex.signal_count()} "
+                        f"fallback={self._apex.inference.in_fallback_mode}"
+                    )
+                except Exception as exc:
+                    self.Debug(f"[pulse] APEX bootstrap failed: {exc}")
+                    self._apex = None
+                    self._apex_enabled = False
+
             # ── Decision throttle ─────────────────────────────────────────
             self._last_decision_time: datetime | None = None
 
@@ -517,6 +553,29 @@ if HAS_QC:
                 self.Log(f"[pulse] CIRCUIT HALT — liquidating all positions")
                 self._liquidate_all_open()
                 return
+
+            # ── Apex 4h scoring tick (gated) ──────────────────────────────
+            if self._apex is not None and self._apex_should_run_4h_tick(now):
+                self._apex_run_4h_tick(now, slice)
+
+            # ── Apex per-minute exit pass (gated) ─────────────────────────
+            if self._apex is not None and self._apex.engine.open_positions:
+                cur_prices: dict[str, float] = {}
+                for sym_str in list(self._apex.engine.open_positions.keys()):
+                    try:
+                        sym = self.Symbol(sym_str)
+                        cur_prices[sym_str] = float(self.Securities[sym].Price)
+                    except Exception:
+                        cur_prices[sym_str] = 0.0
+                try:
+                    self._apex.engine.on_minute_tick(
+                        now=now,
+                        current_prices=cur_prices,
+                        latest_probs={},   # only flip on next 4h re-score
+                        place_exit_fn=self._apex_place_exit,
+                    )
+                except Exception as exc:
+                    self.Debug(f"[apex] minute exit pass failed: {exc}")
 
             # ── Per-position management ───────────────────────────────────
             self._manage_open_positions(now)
@@ -986,6 +1045,97 @@ if HAS_QC:
             for sym in list(self._open.keys()):
                 self._submit_safe_exit(sym, tag="CIRCUIT_HALT")
             self._open.clear()
+            # Also liquidate any Apex-managed positions
+            if self._apex is not None:
+                for sym_str in list(self._apex.engine.open_positions.keys()):
+                    try:
+                        sym = self.Symbol(sym_str)
+                        self._submit_safe_exit(sym, tag="APEX_CIRCUIT_HALT")
+                    except Exception:
+                        pass
+                self._apex.engine.reset()
+
+        # ── Apex callbacks ─────────────────────────────────────────────────
+        def _apex_place_order(self, sym_str: str, qty: float,
+                               tag: str, price: float) -> None:
+            """Apex entry callback — places a market buy on Kraken."""
+            try:
+                sym = self.Symbol(sym_str)
+                if qty <= 0:
+                    return
+                self.MarketOrder(sym, qty, tag=tag)
+                self.Log(f"[apex] ENTRY {sym_str} qty={qty:.6f} "
+                         f"~${qty*price:.0f} tag={tag}")
+            except Exception as exc:
+                self.Debug(f"[apex] order failed for {sym_str}: {exc}")
+
+        def _apex_place_exit(self, sym_str: str, qty: float,
+                              reason: str) -> None:
+            """Apex exit callback — uses safe_sell_quantity-based path."""
+            try:
+                sym = self.Symbol(sym_str)
+                self._submit_safe_exit(sym, tag=f"APEX_{reason}")
+                self.Log(f"[apex] EXIT  {sym_str} qty={qty:.6f} reason={reason}")
+            except Exception as exc:
+                self.Debug(f"[apex] exit failed for {sym_str}: {exc}")
+
+        def _apex_should_run_4h_tick(self, now: datetime) -> bool:
+            """True if it's been ≥ APEX_REBALANCE_HOURS since the last tick."""
+            from Pulse.apex.config import APEX_REBALANCE_HOURS
+            if self._apex_last_tick is None:
+                return True
+            elapsed = (now - self._apex_last_tick).total_seconds() / 3600
+            return elapsed >= APEX_REBALANCE_HOURS
+
+        def _apex_run_4h_tick(self, now: datetime, slice_) -> None:
+            """Score the universe with Apex; place entries via callbacks."""
+            if self._apex is None:
+                return
+            # Best-effort: feed BTCUSD price into the on-chain valuation store
+            # (we don't have BitcoinMetadata or CoinGecko subscribed yet,
+            # but the price feed is always available).
+            try:
+                btc_sym = self.Symbol("BTCUSD")
+                btc_price = float(self.Securities[btc_sym].Price)
+                if btc_price > 0:
+                    # Placeholder volume = 1 (we lack on-chain volume here)
+                    self._apex.onchain_val_store.record(btc_price, 1.0)
+            except Exception:
+                pass
+
+            # Build tier-cap helper from existing tier classifier
+            def _tier_cap(sym_str: str) -> float:
+                try:
+                    sym = self.Symbol(sym_str)
+                    lim = self._tiers.limits_for(sym.Value, now=now)
+                    return float(lim["max_pos_usd"])
+                except Exception:
+                    return 500.0
+
+            def _price_for(sym_str: str) -> float:
+                try:
+                    sym = self.Symbol(sym_str)
+                    return float(self.Securities[sym].Price)
+                except Exception:
+                    return 0.0
+
+            equity = float(self.Portfolio.TotalPortfolioValue)
+            universe = [s.Value for s in self._symbols]
+
+            try:
+                self._apex.engine.on_4h_tick(
+                    now=now, universe=universe,
+                    market_context_provider=self._apex.context_provider,
+                    equity=equity,
+                    place_order_fn=self._apex_place_order,
+                    tier_max_pos_usd_provider=_tier_cap,
+                    regime_mult_provider=lambda s: 1.0,
+                    current_price_provider=_price_for,
+                    current_atr_provider=lambda s: max(_price_for(s) * 0.02, 0.0),
+                )
+            except Exception as exc:
+                self.Debug(f"[apex] 4h tick failed: {exc}")
+            self._apex_last_tick = now
 
         def OnEndOfAlgorithm(self):
             wr = rolling_win_rate(self._audit)

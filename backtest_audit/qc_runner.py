@@ -72,6 +72,30 @@ PULSE_FILES = (
     "online_learning.py",   # imported by main.py
     "optimal_execution.py", # imported by main.py
     "runtime_overrides.py", # default empty; replaced per-backtest by sweep runner
+    # ── APEX (Phase 1-6) ──────────────────────────────────────────────────
+    "apex/__init__.py",
+    "apex/config.py",
+    "apex/registry.py",
+    "apex/feature_vector.py",
+    "apex/sizing.py",
+    "apex/exits.py",
+    "apex/apex_engine.py",
+    "apex/integration.py",
+    "apex/signals/__init__.py",
+    "apex/signals/btc_onchain.py",
+    "apex/signals/btc_dominance.py",
+    "apex/signals/funding_native.py",
+    "apex/signals/cross_asset.py",
+    "apex/data/__init__.py",
+    "apex/data/etf_flows.py",
+    "apex/data/stablecoin_supply.py",
+    "apex/data/token_unlocks.py",
+    "apex/data/news_sentiment.py",
+    "apex/data/onchain_valuation.py",
+    "apex/ml/__init__.py",
+    "apex/ml/dataset.py",
+    "apex/ml/predict.py",
+    "apex/ml/train.py",
     "main.py",              # entry point — keep last
 )
 
