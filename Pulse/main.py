@@ -57,6 +57,7 @@ SPECIAL_OVERRIDE_KEYS = (
     "use_harsh_sim",
     "start_year", "end_year", "initial_cash",
     "decision_interval_min",
+    "apex_enabled",
 )
 
 
