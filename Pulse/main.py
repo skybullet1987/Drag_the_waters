@@ -316,6 +316,30 @@ if HAS_QC:
             self._fg_symbol = self.AddData(FearGreedData, "FNG", Resolution.Daily).Symbol
             self._fg_value: float | None = None
 
+            # ── Binance funding rate subscriptions (for Apex) ─────────────
+            # Native QC dataset — replays correctly in backtest. Subscribed
+            # only for the perp tickers that map to our Kraken universe.
+            self._binance_funding_symbols: dict[str, Any] = {}
+            try:
+                from QuantConnect.DataSource import BinanceFundingRate  # type: ignore
+                from Pulse.apex.signals.funding_native import KRAKEN_TO_BINANCE_PERP
+                for kraken_sym in [s.Value for s in self._symbols]:
+                    perp = KRAKEN_TO_BINANCE_PERP.get(kraken_sym.upper())
+                    if perp is None:
+                        continue
+                    try:
+                        sub = self.AddData(
+                            BinanceFundingRate, perp, Resolution.Hour,
+                        )
+                        self._binance_funding_symbols[perp] = sub.Symbol
+                    except Exception as exc:
+                        self.Debug(f"Binance funding sub failed for {perp}: {exc}")
+                if self._binance_funding_symbols:
+                    self.Log(f"[pulse] Binance funding subscribed: "
+                             f"{len(self._binance_funding_symbols)} pairs")
+            except Exception as exc:
+                self.Debug(f"BinanceFundingRate import failed: {exc}")
+
             # ── Custom slippage + fee per security ────────────────────────
             self.SetSecurityInitializer(self._on_security_added)
 
@@ -409,9 +433,16 @@ if HAS_QC:
                         place_exit=self._apex_place_exit,
                         context_provider=lambda s: {"now": self.Time},
                     )
+                    # Bulk-load any bundled CSVs (ETF flows, unlocks).
+                    # These are STATIC data refreshed offline — they don't
+                    # need a live subscription. The Reader-based PythonData
+                    # adapters are still available for live mode.
+                    self._apex_load_static_csvs()
                     self.Log(
                         f"[pulse] APEX enabled — "
                         f"signals={self._apex.signal_count()} "
+                        f"etf_days={len(self._apex.etf_flow_store.get())} "
+                        f"unlocks={len(self._apex.unlock_store.events)} "
                         f"fallback={self._apex.inference.in_fallback_mode}"
                     )
                 except Exception as exc:
@@ -540,6 +571,19 @@ if HAS_QC:
                 fg = slice[self._fg_symbol]
                 if fg is not None:
                     self._fg_value = float(fg.Value)
+
+            # Apex: feed Binance funding rate ticks into the store
+            if self._apex is not None and self._binance_funding_symbols:
+                for perp, fund_sym in self._binance_funding_symbols.items():
+                    try:
+                        if slice.ContainsKey(fund_sym):
+                            tick = slice[fund_sym]
+                            if tick is not None and tick.Value is not None:
+                                self._apex.funding_store.record(
+                                    perp, float(tick.Value),
+                                )
+                    except Exception:
+                        pass
 
             if self.IsWarmingUp:
                 return
@@ -1054,6 +1098,57 @@ if HAS_QC:
                     except Exception:
                         pass
                 self._apex.engine.reset()
+
+        # ── Apex CSV loaders ───────────────────────────────────────────────
+        def _apex_load_static_csvs(self) -> None:
+            """Read any bundled static CSVs and seed the Apex stores.
+
+            Tries QC's ObjectStore first (where files are mounted at
+            runtime), then a few common path candidates. Silently skips
+            missing files — Apex still runs (just with fewer signals).
+            """
+            for fname, loader in (
+                ("apex_etf_flows.csv",
+                 self._apex.etf_flow_store.load_csv),
+                ("apex_token_unlocks.csv",
+                 self._apex.unlock_store.load_csv),
+                ("apex_stablecoin_supply.csv",
+                 self._apex.stablecoin_store.load_csv),
+                ("apex_news_sentiment.csv",
+                 self._apex.news_store.load_csv),
+            ):
+                content = self._apex_read_static_file(fname)
+                if not content:
+                    continue
+                try:
+                    loader(content)
+                    self.Log(f"[apex] loaded {fname} ({len(content)} bytes)")
+                except Exception as exc:
+                    self.Debug(f"[apex] {fname} parse failed: {exc}")
+
+        def _apex_read_static_file(self, name: str) -> str:
+            """Try several locations to find a bundled CSV."""
+            # 1) QC ObjectStore (most reliable in cloud)
+            try:
+                if hasattr(self, "ObjectStore") and self.ObjectStore is not None:
+                    if self.ObjectStore.ContainsKey(name):
+                        return self.ObjectStore.Read(name) or ""
+            except Exception:
+                pass
+            # 2) Common project-relative paths
+            import os
+            for path in (
+                name,
+                os.path.join("project", name),
+                os.path.join("data", name),
+            ):
+                try:
+                    if os.path.isfile(path):
+                        with open(path, "r", encoding="utf-8") as f:
+                            return f.read()
+                except Exception:
+                    continue
+            return ""
 
         # ── Apex callbacks ─────────────────────────────────────────────────
         def _apex_place_order(self, sym_str: str, qty: float,
