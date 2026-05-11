@@ -123,7 +123,13 @@ from Pulse.execution import OrderIntent
 from Pulse.alt_data import FearGreedData, FGSignal
 from Pulse.fees import KrakenTieredFeeModel
 from Pulse.slippage import RealisticCryptoSlippage
-from Pulse.online_learning import OnlineThresholdLearner
+from Pulse.online_learning import (
+    OnlineThresholdLearner,
+    ENTRY_THRESHOLD_MIN as _LRN_ENTRY_MIN,
+    ENTRY_THRESHOLD_MAX as _LRN_ENTRY_MAX,
+    HC_THRESHOLD_MIN    as _LRN_HC_MIN,
+    HC_THRESHOLD_MAX    as _LRN_HC_MAX,
+)
 from Pulse.optimal_execution import build_slice_plan, DEFAULT_LARGE_ORDER_THRESHOLD_BPS
 from Pulse.execution import (
     min_quantity_fallback, KRAKEN_MIN_QTY_FALLBACK,
@@ -328,9 +334,19 @@ if HAS_QC:
             self._audit = OrderAuditState()
 
             # ── Adaptive threshold learner (online learning) ──────────────
+            # Auto-relax learner bounds if config thresholds are set lower
+            # than the learner's defaults (e.g. diagnostic backtest with
+            # SCALP_ENTRY_THRESHOLD=0.35). Otherwise the learner's __init__
+            # validation rejects the initial value.
+            entry_min = min(_LRN_ENTRY_MIN, SCALP_ENTRY_THRESHOLD)
+            entry_max = max(_LRN_ENTRY_MAX, SCALP_ENTRY_THRESHOLD)
+            hc_min    = min(_LRN_HC_MIN,    SCALP_HIGH_CONVICTION_THRES)
+            hc_max    = max(_LRN_HC_MAX,    SCALP_HIGH_CONVICTION_THRES)
             self._learner = OnlineThresholdLearner(
                 initial_entry_threshold=SCALP_ENTRY_THRESHOLD,
                 initial_high_conviction_thres=SCALP_HIGH_CONVICTION_THRES,
+                entry_min=entry_min, entry_max=entry_max,
+                hc_min=hc_min, hc_max=hc_max,
             )
             self._last_learner_tune_log: datetime | None = None
 
