@@ -1101,54 +1101,35 @@ if HAS_QC:
 
         # ── Apex CSV loaders ───────────────────────────────────────────────
         def _apex_load_static_csvs(self) -> None:
-            """Read any bundled static CSVs and seed the Apex stores.
+            """Seed the Apex stores from bundled .py-module data sources.
 
-            Tries QC's ObjectStore first (where files are mounted at
-            runtime), then a few common path candidates. Silently skips
-            missing files — Apex still runs (just with fewer signals).
+            QC's project file API rejects .csv extensions, so each data
+            CSV is wrapped in a Python module that exposes its content
+            as a CONTENT string constant. Missing modules are skipped
+            silently — Apex still runs (just with fewer live signals).
             """
-            for fname, loader in (
-                ("apex_etf_flows.csv",
+            for module_name, loader in (
+                ("apex_etf_flows_data",
                  self._apex.etf_flow_store.load_csv),
-                ("apex_token_unlocks.csv",
+                ("apex_token_unlocks_data",
                  self._apex.unlock_store.load_csv),
-                ("apex_stablecoin_supply.csv",
+                ("apex_stablecoin_supply_data",
                  self._apex.stablecoin_store.load_csv),
-                ("apex_news_sentiment.csv",
+                ("apex_news_sentiment_data",
                  self._apex.news_store.load_csv),
             ):
-                content = self._apex_read_static_file(fname)
-                if not content:
-                    continue
                 try:
+                    mod = __import__(module_name)
+                    content = getattr(mod, "CONTENT", "") or ""
+                    if not content:
+                        continue
                     loader(content)
-                    self.Log(f"[apex] loaded {fname} ({len(content)} bytes)")
+                    self.Log(f"[apex] loaded {module_name} "
+                             f"({len(content)} bytes)")
                 except Exception as exc:
-                    self.Debug(f"[apex] {fname} parse failed: {exc}")
-
-        def _apex_read_static_file(self, name: str) -> str:
-            """Try several locations to find a bundled CSV."""
-            # 1) QC ObjectStore (most reliable in cloud)
-            try:
-                if hasattr(self, "ObjectStore") and self.ObjectStore is not None:
-                    if self.ObjectStore.ContainsKey(name):
-                        return self.ObjectStore.Read(name) or ""
-            except Exception:
-                pass
-            # 2) Common project-relative paths
-            import os
-            for path in (
-                name,
-                os.path.join("project", name),
-                os.path.join("data", name),
-            ):
-                try:
-                    if os.path.isfile(path):
-                        with open(path, "r", encoding="utf-8") as f:
-                            return f.read()
-                except Exception:
-                    continue
-            return ""
+                    # Module not present is normal — log only on parse error
+                    if "No module named" not in str(exc):
+                        self.Debug(f"[apex] {module_name} parse failed: {exc}")
 
         # ── Apex callbacks ─────────────────────────────────────────────────
         def _apex_place_order(self, sym_str: str, qty: float,
