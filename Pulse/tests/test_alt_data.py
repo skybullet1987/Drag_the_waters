@@ -458,3 +458,52 @@ def test_x_signal_subclass_returns_buzz():
     s = XMentionSignal.from_client("DOGE", client=FakeClient())
     assert s.is_buzzy
     assert s.score_boost == 0.10
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Runtime-override behavior for FG_BLOCK_ABOVE / FUNDING_BLOCK_ABOVE
+# ───────────────────────────────────────────────────────────────────────────────
+
+def test_fg_block_respects_config_override(monkeypatch):
+    """fg_block_new_entries reads Pulse.config.FG_BLOCK_ABOVE at call time.
+    Setting it to 999 disables the gate (used by diagnostic backtests).
+    """
+    from Pulse import config as _cfg
+    from Pulse.alt_data import fg_block_new_entries
+    monkeypatch.setattr(_cfg, "FG_BLOCK_ABOVE", 999.0, raising=False)
+    assert fg_block_new_entries(95) is False
+    assert fg_block_new_entries(100) is False
+
+
+def test_fg_block_default_threshold_when_override_unset(monkeypatch):
+    """Without override → default 90."""
+    from Pulse import config as _cfg
+    from Pulse.alt_data import fg_block_new_entries
+    monkeypatch.setattr(_cfg, "FG_BLOCK_ABOVE", 90.0, raising=False)
+    assert fg_block_new_entries(89) is False
+    assert fg_block_new_entries(90) is True
+
+
+def test_funding_block_respects_config_override(monkeypatch):
+    from Pulse import config as _cfg
+    from Pulse.alt_data import funding_block_new_entries
+    monkeypatch.setattr(_cfg, "FUNDING_BLOCK_ABOVE", 99.0, raising=False)
+    assert funding_block_new_entries(0.05) is False   # 5% per 8h, normally blocked
+
+
+def test_fg_signal_uses_overridden_block(monkeypatch):
+    """FGSignal.from_value should also see the override (it calls
+    fg_block_new_entries internally)."""
+    from Pulse import config as _cfg
+    from Pulse.alt_data import FGSignal
+    monkeypatch.setattr(_cfg, "FG_BLOCK_ABOVE", 999.0, raising=False)
+    sig = FGSignal.from_value(100)
+    assert sig.block_new_entries is False
+
+
+def test_funding_signal_uses_overridden_block(monkeypatch):
+    from Pulse import config as _cfg
+    from Pulse.alt_data import FundingSignal
+    monkeypatch.setattr(_cfg, "FUNDING_BLOCK_ABOVE", 99.0, raising=False)
+    sig = FundingSignal.from_rate(0.05)
+    assert sig.block_new_entries is False

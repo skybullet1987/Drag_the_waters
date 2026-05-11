@@ -819,6 +819,7 @@ if HAS_QC:
                     bar_volume_estimate=avg_bar_vol,
                     n_slices=5 if score.high_conviction else 1,
                     large_order_threshold_bps=DEFAULT_LARGE_ORDER_THRESHOLD_BPS,
+                    min_qty_per_slice=min_qty,   # never split below exchange min
                 )
                 self.Log(
                     f"[pulse] SCALP ENTRY {sym.Value} score={score.score:.3f} "

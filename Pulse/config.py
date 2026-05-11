@@ -80,6 +80,16 @@ FG_GREED_EXTREME_THRESHOLD  = 75    # halve max_positions above this
 FG_FEAR_EXTREME_THRESHOLD   = 25    # bias bounce setups below this
 FG_SIZE_MULT_GREED          = 0.5   # at extreme greed
 FG_SIZE_MULT_FEAR           = 1.2   # at extreme fear (slight up-size for capitulation buys)
+# Kill-switch threshold — block all new entries when F&G ≥ this value.
+# Set to 999 (or any > 100) via runtime overrides to disable the gate
+# during diagnostic / edge-discovery backtests.
+FG_BLOCK_ABOVE              = 90.0
+
+# ─── Funding rate kill switch ────────────────────────────────────────────────
+# Block new long entries when Bybit funding rate ≥ this value (decimal/8h).
+# Default +0.10% per 8h (mania territory). Set to 99.0 to disable for
+# diagnostic backtests.
+FUNDING_BLOCK_ABOVE         = 0.0010
 
 # ─── Audit / harsh simulator defaults ────────────────────────────────────────
 HARSH_SLIPPAGE_BASE_BPS     = 100.0   # calibrated to MG36 paper ⚠️ HIGH SLIPPAGE 65-197bp

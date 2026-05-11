@@ -192,3 +192,51 @@ def test_build_plan_btc_realistic_example():
     assert len(plan.steps) == 5
     one_shot_slip = _slip_bps_for_slice(0.1, 0.5, eta=0.30, gamma=0.10)
     assert plan.expected_total_slip_bps < one_shot_slip
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# min_qty_per_slice guard (regression: BCH 5-slice invalid cascade)
+# ───────────────────────────────────────────────────────────────────────────────
+
+def test_min_qty_guard_falls_back_to_one_shot_when_too_small():
+    """Repro: BCH min-qty = 0.004, parent qty = 0.0042 → splitting into 5
+    slices would produce 5 sub-min orders, all rejected by Kraken.
+    Slicer must fall back to a one-shot order in that case."""
+    plan = build_slice_plan(
+        total_quantity=0.0042,
+        bar_volume_estimate=10.0,
+        n_slices=5,
+        large_order_threshold_bps=0,   # force slicing path otherwise
+        min_qty_per_slice=0.004,
+    )
+    assert plan.n_slices == 1
+    assert len(plan.steps) == 1
+    assert plan.steps[0].quantity == pytest.approx(0.0042)
+    assert plan.skipped_reason == "below_min_qty_per_slice"
+
+
+def test_min_qty_guard_allows_slicing_when_parent_large_enough():
+    """If parent qty ≥ n × min, slicer should still split as requested."""
+    plan = build_slice_plan(
+        total_quantity=0.05,         # 5x min × 5 slices margin
+        bar_volume_estimate=0.1,     # 50% participation → high slip → slice
+        n_slices=5,
+        large_order_threshold_bps=20,
+        min_qty_per_slice=0.004,
+    )
+    assert plan.n_slices == 5
+    assert len(plan.steps) == 5
+    assert all(s.quantity >= 0.004 for s in plan.steps)
+
+
+def test_min_qty_guard_default_zero_preserves_old_behaviour():
+    """When min_qty_per_slice is not provided, the guard is inactive."""
+    plan = build_slice_plan(
+        total_quantity=0.0042,
+        bar_volume_estimate=0.01,    # forces slicing
+        n_slices=5,
+        large_order_threshold_bps=20,
+        # min_qty_per_slice omitted → defaults to 0.0
+    )
+    # Without the guard, planner still splits (old behaviour preserved)
+    assert plan.n_slices == 5

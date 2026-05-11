@@ -35,6 +35,9 @@ from Pulse.config import (
     FG_SIZE_MULT_GREED,
     FG_SIZE_MULT_FEAR,
 )
+# Read kill-switch thresholds via the config module (NOT direct import)
+# so runtime_overrides applied to Pulse.config are honored at call-time.
+from Pulse import config as _pulse_config
 
 try:
     from AlgorithmImports import (   # type: ignore  # noqa: F401
@@ -109,14 +112,17 @@ def fg_max_positions_multiplier(value: float | None) -> float:
 
 
 def fg_block_new_entries(value: float | None,
-                         block_above: float = 90.0) -> bool:
+                         block_above: float | None = None) -> bool:
     """Hard gate: above this value, block all new entries.
 
-    Default 90 = essentially "panic-greed only". Off by default in normal
-    operation; surfaced as a hook the strategy can use as a kill switch.
+    Default reads ``Pulse.config.FG_BLOCK_ABOVE`` at call time so that
+    runtime overrides take effect. Set the override to a value > 100
+    (e.g. 999) to fully disable the kill switch for diagnostic backtests.
     """
     if value is None:
         return False
+    if block_above is None:
+        block_above = float(getattr(_pulse_config, "FG_BLOCK_ABOVE", 90.0))
     return float(value) >= block_above
 
 
@@ -265,13 +271,17 @@ def funding_size_modifier(rate: float | None) -> float:
 
 
 def funding_block_new_entries(rate: float | None,
-                              block_above: float = 0.0010) -> bool:
+                              block_above: float | None = None) -> bool:
     """Hard gate: block new long entries when funding is extreme positive.
 
-    Default threshold +0.10% per 8h ≈ +109% annualized — pure mania territory.
+    Default reads ``Pulse.config.FUNDING_BLOCK_ABOVE`` at call time so
+    runtime overrides take effect. Set the override to e.g. 99.0 to
+    fully disable the kill switch for diagnostic backtests.
     """
     if rate is None:
         return False
+    if block_above is None:
+        block_above = float(getattr(_pulse_config, "FUNDING_BLOCK_ABOVE", 0.0010))
     return float(rate) >= block_above
 
 

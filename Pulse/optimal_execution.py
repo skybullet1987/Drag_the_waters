@@ -174,6 +174,7 @@ def build_slice_plan(
     min_slice_frac: float = DEFAULT_MIN_SLICE_QTY_FRAC,
     max_slice_frac: float = DEFAULT_MAX_SLICE_QTY_FRAC,
     large_order_threshold_bps: float = DEFAULT_LARGE_ORDER_THRESHOLD_BPS,
+    min_qty_per_slice: float = 0.0,
 ) -> SlicePlan:
     """Top-level: returns a SlicePlan with quantities + expected slippage.
 
@@ -181,6 +182,9 @@ def build_slice_plan(
       - total_quantity ≤ 0 or n_slices ≤ 1
       - bar_volume_estimate ≤ 0 (no impact estimate available)
       - expected one-shot slippage < large_order_threshold_bps
+      - total_quantity < n_slices × min_qty_per_slice  (would create
+        sub-minimum child orders that the exchange rejects — the bug
+        observed in QC backtest where 5 BCH slices were all invalid)
     """
     if total_quantity <= 0:
         return SlicePlan(total_quantity=total_quantity, n_slices=0,
@@ -196,6 +200,20 @@ def build_slice_plan(
         return SlicePlan(total_quantity=total_quantity, n_slices=1,
                          steps=[SliceStep(0, total_quantity, 1.0, 0.0)],
                          skipped_reason="no_volume_estimate")
+
+    # Min-qty-per-slice guard: if slicing would create child orders below
+    # the exchange minimum, fall back to a single one-shot order so we
+    # don't get N invalid rejections.
+    if min_qty_per_slice > 0 and total_quantity < n_slices * min_qty_per_slice:
+        one_shot_slip = _slip_bps_for_slice(
+            total_quantity, bar_volume_estimate, eta, gamma,
+        )
+        return SlicePlan(total_quantity=total_quantity, n_slices=1,
+                         steps=[SliceStep(0, total_quantity, 1.0, one_shot_slip)],
+                         expected_total_slip_bps=one_shot_slip,
+                         twap_slip_bps=one_shot_slip,
+                         saved_bps=0.0,
+                         skipped_reason="below_min_qty_per_slice")
 
     one_shot_slip = _slip_bps_for_slice(
         total_quantity, bar_volume_estimate, eta, gamma,
