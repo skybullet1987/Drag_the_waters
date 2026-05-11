@@ -63,6 +63,51 @@ def test_read_pulse_dir_rewrites_pulse_imports(tmp_path):
         assert "import universe" in content
 
 
+def test_read_pulse_dir_rewrites_from_pulse_import_form(tmp_path):
+    """Regression for diag-edge-discovery runtime error:
+    `from Pulse import config as _pulse_config` must be rewritten too,
+    not only the `from Pulse.X import Y` form."""
+    pulse_dir = tmp_path / "Pulse"
+    pulse_dir.mkdir()
+    src = (
+        "from Pulse import config as _pulse_config\n"
+        "from Pulse import alpha, beta\n"
+        "x = _pulse_config.SOMETHING\n"
+    )
+    for name in PULSE_FILES:
+        (pulse_dir / name).write_text(src)
+    files = _read_pulse_dir(str(pulse_dir))
+    for content in files.values():
+        # No bare-Pulse references must survive — that's what crashed QC.
+        for line in content.split("\n"):
+            stripped = line.strip()
+            assert not stripped.startswith("from Pulse"), \
+                f"unrewritten line: {stripped!r}"
+            assert not stripped.startswith("import Pulse "), \
+                f"unrewritten line: {stripped!r}"
+        # And the rewritten target should be present
+        assert "import config as _pulse_config" in content
+        assert "import alpha" in content
+        assert "import beta" in content
+
+
+def test_read_pulse_dir_no_bare_pulse_references_in_real_files():
+    """Hard regression: scan the actual workspace Pulse/ files and ensure
+    NO line begins with `from Pulse` or `import Pulse` after rewrite."""
+    workspace_pulse = os.path.join(
+        os.path.dirname(__file__), "..", "..", "Pulse",
+    )
+    files = _read_pulse_dir(workspace_pulse)
+    bad: list[str] = []
+    for name, content in files.items():
+        for ln_num, line in enumerate(content.split("\n"), 1):
+            s = line.strip()
+            if s.startswith("from Pulse") or s.startswith("import Pulse "):
+                bad.append(f"{name}:{ln_num}: {s}")
+    assert not bad, "Unrewritten Pulse imports leaked to QC payload:\n" + \
+                    "\n".join(bad)
+
+
 def test_read_pulse_dir_missing_file_raises(tmp_path):
     """Missing file should be a clean FileNotFoundError, not silent success."""
     pulse_dir = tmp_path / "Pulse"

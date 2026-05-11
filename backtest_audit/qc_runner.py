@@ -98,10 +98,28 @@ def _read_pulse_dir(pulse_dir: str) -> dict[str, str]:
             raise FileNotFoundError(f"Missing Pulse file: {path}")
         with open(path, encoding="utf-8") as f:
             content = f.read()
-        # Rewrite imports: `from Pulse.X import Y` → `from X import Y`
-        # (QC projects are flat — no Pulse package namespace)
+        # Rewrite imports: QC projects are flat — no Pulse package namespace.
+        #   `from Pulse.X import Y`  → `from X import Y`
+        #   `import Pulse.X as Z`    → `import X as Z`
+        #   `from Pulse import X`    → `import X`             (NEW)
+        #   `from Pulse import X, Y` → `import X; import Y`   (NEW)
+        # The `from Pulse import X` form was missing; it shipped a runtime
+        # error to QC ("No module named 'Pulse'") on diag-edge-discovery.
         content = content.replace("from Pulse.", "from ")
         content = content.replace("import Pulse.", "import ")
+        # `from Pulse import alpha as a` → `import alpha as a`
+        # `from Pulse import alpha, beta` → `import alpha\nimport beta`
+        import re as _re
+        def _rewrite_from_pulse_import(match: "_re.Match[str]") -> str:
+            names = match.group(1)
+            parts = [p.strip() for p in names.split(",") if p.strip()]
+            return "\n".join(f"import {p}" for p in parts)
+        content = _re.sub(
+            r"^from Pulse import (.+)$",
+            _rewrite_from_pulse_import,
+            content,
+            flags=_re.MULTILINE,
+        )
         out[name] = content
     return out
 

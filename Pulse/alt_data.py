@@ -37,7 +37,9 @@ from Pulse.config import (
 )
 # Read kill-switch thresholds via the config module (NOT direct import)
 # so runtime_overrides applied to Pulse.config are honored at call-time.
-from Pulse import config as _pulse_config
+# Use `import Pulse.X` form so qc_runner's flat-namespace rewrite picks
+# this up (it rewrites `import Pulse.` → `import `).
+import Pulse.config as _pulse_config
 
 try:
     from AlgorithmImports import (   # type: ignore  # noqa: F401
