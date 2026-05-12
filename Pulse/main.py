@@ -58,6 +58,8 @@ SPECIAL_OVERRIDE_KEYS = (
     "start_year", "end_year", "initial_cash",
     "decision_interval_min",
     "apex_enabled",
+    "apex_fallback_entry_threshold",
+    "apex_fallback_exit_threshold",
 )
 
 
@@ -317,15 +319,7 @@ if HAS_QC:
             self._fg_symbol = self.AddData(FearGreedData, "FNG", Resolution.Daily).Symbol
             self._fg_value: float | None = None
 
-            # ── Binance funding rate subscriptions (for Apex) ─────────────
-            # Native QC dataset — replays correctly in backtest. Subscribed
-            # only for the perp tickers that map to our Kraken universe.
-            #
-            # NOTE: BinanceFundingRate is a SEPARATE QC dataset that requires
-            # a subscription on the user's QC account. If unavailable, the
-            # import fails — we use BaseException because QC's Python.NET
-            # hosted runtime raises non-Exception subclasses on missing
-            # imports (same fix applied earlier to runtime_overrides).
+            # ── Binance funding rate (optional dataset) ───────────────────
             self._binance_funding_symbols: dict[str, Any] = {}
             try:
                 from QuantConnect.DataSource import BinanceFundingRate  # type: ignore
@@ -422,9 +416,6 @@ if HAS_QC:
             self._market_context = MarketContext()
 
             # ── Apex engine (gated by runtime override `apex_enabled`) ────
-            # When enabled, runs every 4h alongside the existing scalp
-            # engine. ML model is loaded from `apex_model_v1.joblib` if
-            # present; otherwise Apex runs in fallback (rule-based) mode.
             self._apex = None
             self._apex_last_tick: datetime | None = None
             apex_raw = self._param("apex_enabled", False)
@@ -437,9 +428,19 @@ if HAS_QC:
                     from Pulse.apex.integration import (
                         bootstrap_apex, attach_callbacks,
                     )
+                    # Lower thresholds in fallback mode (cold-start with
+                    # only 2/9 signals) so Apex can fire any trades.
+                    fallback_entry = float(self._param(
+                        "apex_fallback_entry_threshold", 0.55,
+                    ))
+                    fallback_exit = float(self._param(
+                        "apex_fallback_exit_threshold", 0.42,
+                    ))
                     self._apex = bootstrap_apex(
                         model_path="apex_model_v1.joblib",
                         fallback_only=False,
+                        entry_threshold=fallback_entry,
+                        exit_threshold=fallback_exit,
                     )
                     attach_callbacks(
                         self._apex,
@@ -447,10 +448,7 @@ if HAS_QC:
                         place_exit=self._apex_place_exit,
                         context_provider=lambda s: {"now": self.Time},
                     )
-                    # Bulk-load any bundled CSVs (ETF flows, unlocks).
-                    # These are STATIC data refreshed offline — they don't
-                    # need a live subscription. The Reader-based PythonData
-                    # adapters are still available for live mode.
+                    # Bulk-load any bundled static CSVs.
                     self._apex_load_static_csvs()
                     self.Log(
                         f"[pulse] APEX enabled — "
@@ -1113,48 +1111,31 @@ if HAS_QC:
                         pass
                 self._apex.engine.reset()
 
-        # ── Apex CSV loaders ───────────────────────────────────────────────
         def _apex_load_static_csvs(self) -> None:
-            """Seed the Apex stores from bundled .py-module data sources.
-
-            QC's project file API rejects .csv extensions, so each data
-            CSV is wrapped in a Python module that exposes its content
-            as a CONTENT string constant. Missing modules are skipped
-            silently — Apex still runs (just with fewer live signals).
-            """
-            for module_name, loader in (
-                ("apex_etf_flows_data",
-                 self._apex.etf_flow_store.load_csv),
-                ("apex_token_unlocks_data",
-                 self._apex.unlock_store.load_csv),
-                ("apex_stablecoin_supply_data",
-                 self._apex.stablecoin_store.load_csv),
-                ("apex_news_sentiment_data",
-                 self._apex.news_store.load_csv),
-            ):
-                # BaseException because QC's Python.NET hosted runtime
-                # propagates ModuleNotFoundError as a non-Exception
-                # subclass on missing imports (same pattern as the
-                # runtime_overrides + BinanceFundingRate fixes).
+            """Seed Apex stores from bundled .py CSV-wrapper modules.
+            Uses BaseException for QC Python.NET compatibility."""
+            mods = (
+                ("apex_etf_flows_data",      self._apex.etf_flow_store.load_csv),
+                ("apex_token_unlocks_data",  self._apex.unlock_store.load_csv),
+                ("apex_stablecoin_supply_data", self._apex.stablecoin_store.load_csv),
+                ("apex_news_sentiment_data", self._apex.news_store.load_csv),
+            )
+            for module_name, loader in mods:
                 try:
                     mod = __import__(module_name)
                 except BaseException as exc:
                     msg = str(exc)
-                    if "No module named" not in msg and \
-                       "cannot import" not in msg:
-                        self.Debug(f"[apex] import {module_name} "
-                                   f"failed: {type(exc).__name__}: {msg}")
+                    if "No module named" not in msg and "cannot import" not in msg:
+                        self.Debug(f"[apex] import {module_name}: {exc}")
                     continue
                 try:
                     content = getattr(mod, "CONTENT", "") or ""
                     if not content:
                         continue
                     loader(content)
-                    self.Log(f"[apex] loaded {module_name} "
-                             f"({len(content)} bytes)")
+                    self.Log(f"[apex] loaded {module_name} ({len(content)}b)")
                 except BaseException as exc:
-                    self.Debug(f"[apex] {module_name} parse failed: "
-                               f"{type(exc).__name__}: {exc}")
+                    self.Debug(f"[apex] {module_name} parse: {exc}")
 
         # ── Apex callbacks ─────────────────────────────────────────────────
         def _apex_place_order(self, sym_str: str, qty: float,
@@ -1181,42 +1162,32 @@ if HAS_QC:
                 self.Debug(f"[apex] exit failed for {sym_str}: {exc}")
 
         def _apex_should_run_4h_tick(self, now: datetime) -> bool:
-            """True if it's been ≥ APEX_REBALANCE_HOURS since the last tick."""
             from Pulse.apex.config import APEX_REBALANCE_HOURS
             if self._apex_last_tick is None:
                 return True
-            elapsed = (now - self._apex_last_tick).total_seconds() / 3600
-            return elapsed >= APEX_REBALANCE_HOURS
+            return (now - self._apex_last_tick).total_seconds() / 3600 >= APEX_REBALANCE_HOURS
 
         def _apex_run_4h_tick(self, now: datetime, slice_) -> None:
-            """Score the universe with Apex; place entries via callbacks."""
             if self._apex is None:
                 return
-            # Best-effort: feed BTCUSD price into the on-chain valuation store
-            # (we don't have BitcoinMetadata or CoinGecko subscribed yet,
-            # but the price feed is always available).
             try:
                 btc_sym = self.Symbol("BTCUSD")
                 btc_price = float(self.Securities[btc_sym].Price)
                 if btc_price > 0:
-                    # Placeholder volume = 1 (we lack on-chain volume here)
                     self._apex.onchain_val_store.record(btc_price, 1.0)
             except Exception:
                 pass
 
-            # Build tier-cap helper from existing tier classifier
             def _tier_cap(sym_str: str) -> float:
                 try:
                     sym = self.Symbol(sym_str)
-                    lim = self._tiers.limits_for(sym.Value, now=now)
-                    return float(lim["max_pos_usd"])
+                    return float(self._tiers.limits_for(sym.Value, now=now)["max_pos_usd"])
                 except Exception:
                     return 500.0
 
             def _price_for(sym_str: str) -> float:
                 try:
-                    sym = self.Symbol(sym_str)
-                    return float(self.Securities[sym].Price)
+                    return float(self.Securities[self.Symbol(sym_str)].Price)
                 except Exception:
                     return 0.0
 
@@ -1224,7 +1195,7 @@ if HAS_QC:
             universe = [s.Value for s in self._symbols]
 
             try:
-                self._apex.engine.on_4h_tick(
+                decisions = self._apex.engine.on_4h_tick(
                     now=now, universe=universe,
                     market_context_provider=self._apex.context_provider,
                     equity=equity,
@@ -1234,6 +1205,24 @@ if HAS_QC:
                     current_price_provider=_price_for,
                     current_atr_provider=lambda s: max(_price_for(s) * 0.02, 0.0),
                 )
+                # Diagnostic: show top-3 probs every 4h so we can see
+                # why Apex is/isn't entering.
+                log = self._apex.engine.last_decision_log
+                # Keep only items from this tick
+                this_tick = [d for d in log if d.timestamp == now]
+                if this_tick:
+                    top3 = sorted(this_tick, key=lambda d: d.prob,
+                                  reverse=True)[:3]
+                    summary = ", ".join(
+                        f"{d.symbol}:{d.prob:.2f}({d.kind})"
+                        for d in top3
+                    )
+                    n_entries = sum(1 for d in this_tick if d.kind == "ENTRY")
+                    self.Log(
+                        f"[apex] 4h tick @ {now.strftime('%Y-%m-%d %H:%M')} "
+                        f"open={len(self._apex.engine.open_positions)} "
+                        f"entries={n_entries} top3=[{summary}]"
+                    )
             except Exception as exc:
                 self.Debug(f"[apex] 4h tick failed: {exc}")
             self._apex_last_tick = now
