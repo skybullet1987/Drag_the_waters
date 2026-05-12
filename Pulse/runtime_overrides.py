@@ -18,6 +18,13 @@ After this passes, the next steps are:
 OVERRIDES: dict = {
     # ── Apex engine ─────────────────────────────────────────────────
     "apex_enabled":            True,    # bootstrap & schedule the 4h tick
+
+    # Drop entry threshold to 0.51 so 2-of-9 signals can cross.
+    # Top observed prob in v5 logs was 0.52 (BTCUSD) → would-be entries
+    # at 0.51 give us actual Apex orders to validate the order pipeline.
+    "apex_fallback_entry_threshold":  0.51,
+    "apex_fallback_exit_threshold":   0.40,
+
     # In smoke-test mode the joblib is absent → Apex runs in fallback
     # (rule-based) prob using APEX_FALLBACK_WEIGHTS.
 
