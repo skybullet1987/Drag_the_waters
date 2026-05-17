@@ -27,7 +27,7 @@ from datetime import datetime
 #   hot vol targets, looser bull UVXY triggers. maximize_include_svxy enables SVXY.
 #
 #   Benchmark defaults to TQQQ (set project parameter benchmark_ticker=SPY etc. to override).
-#   Baseline: benchmark_tqqq_buy_hold.py — 100% TQQQ buy-and-hold (same date/cash params).
+#   Baseline: benchmark_tqqq_buy_hold.py — 100% TQQQ buy-and-hold (benchmark defaults QQQ).
 #
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
 # =============================================================================
