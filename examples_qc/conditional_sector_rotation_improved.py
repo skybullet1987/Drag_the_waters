@@ -26,8 +26,9 @@ from datetime import datetime
 #   the saner EOD/rail/band path. When true: disables most rails, same-bar OnData,
 #   hot vol targets, looser bull UVXY triggers. maximize_include_svxy enables SVXY.
 #
+#   Benchmark defaults to TQQQ (set project parameter benchmark_ticker=SPY etc. to override).
+#
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
-# Past performance does not guarantee future results.
 # =============================================================================
 
 
@@ -210,6 +211,17 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         self._sym_to_ticker = {self.symbols[k]: k for k in self.symbols.keys()}
 
+        raw_bench = self.GetParameter("benchmark_ticker")
+        self.benchmark_ticker = (
+            "TQQQ"
+            if raw_bench is None or str(raw_bench).strip() == ""
+            else str(raw_bench).strip().upper()
+        )
+        if self.benchmark_ticker not in self.tickers:
+            raise ValueError(
+                f"benchmark_ticker {self.benchmark_ticker!r} not in universe {self.tickers}"
+            )
+
         for key, ticker, period in [
             ("SPY_SMA200", "SPY", self.spy_sma_period),
             ("QQQ_SMA20", "QQQ", self.qqq_sma_period),
@@ -220,7 +232,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self.symbols[ticker], period, Resolution.Daily
             )
 
-        self.SetBenchmark(self.symbols["SPY"])
+        self.SetBenchmark(self.symbols[self.benchmark_ticker])
+        self.Debug(f"Benchmark={self.benchmark_ticker} (set benchmark_ticker parameter to override)")
 
         warm = max(
             260,
