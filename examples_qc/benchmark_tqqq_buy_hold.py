@@ -10,8 +10,8 @@ from AlgorithmImports import *
 # and cash (start_year, start_month, start_day, end_year, end_month, end_day,
 # starting_cash, run_to_present) so you can compare charts vs the rotation algo.
 #
-# Benchmark defaults to QQQ (parameter benchmark_ticker, e.g. SPY). Do NOT set the
-# benchmark to TQQQ while holding 100% TQQQ — Alpha/PSR/IR vs "yourself" are meaningless.
+# Benchmark defaults to QQQ (parameter benchmark_ticker: SPY, IWM, DIA, …).
+# Do NOT set benchmark to TQQQ while holding 100% TQQQ — Alpha/PSR/IR vs yourself are meaningless.
 #
 # In QuantConnect: point the project main file at this class temporarily, or
 # duplicate the project and swap the algorithm type.
@@ -43,11 +43,8 @@ class TqqqBuyHoldBenchmark(QCAlgorithm):
         self._tqqq = self.AddEquity("TQQQ", Resolution.Daily).Symbol
 
         raw_bench = self.GetParameter("benchmark_ticker")
-        bench = (
-            "QQQ"
-            if raw_bench is None or str(raw_bench).strip() == ""
-            else str(raw_bench).strip().upper()
-        )
+        s = "" if raw_bench is None else str(raw_bench).strip().upper()
+        bench = s if s else "QQQ"
         if bench == "TQQQ":
             self.Debug(
                 "benchmark_ticker=TQQQ with 100% TQQQ portfolio makes Alpha/PSR vs "
