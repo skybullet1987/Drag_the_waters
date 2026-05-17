@@ -12,70 +12,62 @@
 # =============================================================================
 # - **PSR (Probabilistic Sharpe)** near ~0.5–0.8 is *not* proof of edge; treat
 #   **~0.95+** as a stricter sanity bar if you use PSR at all.
-# - **Large drawdowns** (e.g. 50–60%+) are common for single-ticker leveraged
-#   rotation; the backtest assumes you **fully held** the plan through recovery.
-# - **Alpha/Beta near zero** often reflects **benchmark / reporting setup**, not
-#   “market neutral.” Call `SetBenchmark` (done below) so QC can attribute risk.
-# - **Strategy capacity** on QC flags where **size** hits **liquidity** (UVXY,
-#   small inverse funds). Irrelevant at small AUM; critical if you scale.
-# - **Many fixed RSI/SMA cutoffs** = **overfitting risk**. Use **walk-forward**
-#   (train on an early window, validate on a later one) and **parameter sweeps**
-#   (nudge thresholds ±5–10%; if results collapse, the rule set is fragile).
-# - **Leveraged / inverse daily-reset ETFs** are **path-dependent**; long samples
-#   still do not guarantee future paths. Stress **2008, 2018, 2022** separately.
+# - **Huge end equity vs tiny start** can be **internally consistent** with a
+#   high reported CAGR over many years in a bull-heavy sample; it is still not
+#   a promise of live results (fees, fills, borrow, and path all differ).
+# - **Large drawdowns** are common for single-ticker leveraged rotation; the
+#   backtest assumes you **held** the plan through recovery unless you enable
+#   the **drawdown guard** below.
+# - **Alpha/Beta** with `SetBenchmark(SPY)` (enabled) are more interpretable than
+#   uninitialized benchmark behavior — still sample-dependent.
+# - **Strategy capacity** on QC flags liquidity; **Total fees** scale with
+#   turnover and growing portfolio value in simulation.
+# - **Many RSI/SMA cutoffs** = **overfitting risk**: walk-forward, sweeps, and
+#   stress windows (2008, 2018, 2022) still matter.
 #
 # =============================================================================
-# IDEAS TO IMPROVE (implemented vs research-only)
+# IMPLEMENTED IMPROVEMENTS
 # =============================================================================
-# Implemented in this file:
-#   - Parameterized thresholds (sensitivity / OOS testing without code edits).
-#   - **SetBenchmark(SPY)** for more meaningful risk stats vs raw zeros.
-#   - **Trade only when the target sleeve changes** (fewer redundant orders).
-#   - Optional **min_hold_days** to reduce flip-flopping and fee churn.
-#   - Optional **TLT / GLD** in the defensive “max RSI” basket (see ETFs section).
-#   - Optional **run_to_present** to omit `SetEndDate` for rolling research.
-#
-# Research you still do in QC (not auto-coded here):
-#   - Walk-forward / rolling train–test; Monte Carlo on returns.
-#   - Realism: your IB **commission tier**, **margin**, **partial fills**.
-#   - Vol targeting overlay, max DD circuit breaker, multi-sleeve weights (!=100%
-#     one name), or regime filter on realized vol.
+# - Parameterized thresholds, dates, starting cash, run_to_present.
+# - SetBenchmark(SPY); trade only on target change; optional min_hold_days.
+# - Optional TLT/GLD in defensive max-RSI basket (include_defensive_etfs).
+# - **Drawdown guard**: optional switch to `risk_off_ticker` (default BSV) when
+#   peak-to-trough drawdown exceeds `max_drawdown_pct`, with hysteresis release.
+#   While the guard is active, **min_hold_days does not block** de-risk / guard
+#   rotation (it still blocks speculative churn when the guard is off).
 #
 # =============================================================================
 # DO YOU NEED MORE ETFs?
 # =============================================================================
-# **Not automatically.** More symbols add **degrees of freedom** → easier to
-# **overfit** unless each sleeve has a **clear economic role**.
-# - This strategy is **100% one ETF at a time**; extra tickers only help if the
-#   **logic** can choose them (e.g. bonds/gold as **risk-off** when vol is high).
-# - Optional **TLT** (long Treasuries) and **GLD** (gold) are wired into the
-#   **max-RSI defensive tie-break** branches when `include_defensive_etfs=true`.
-#   They are **not** a full risk-parity redesign—just more **escape valves**.
-# - If you want true diversification, consider a **separate** template: static
-#   or vol-weighted **multi-asset** basket (e.g. equity + bonds + gold) with
-#   **infrequent** rebalance, instead of piling symbols into this RSI tree.
+# **Not automatically.** Optional **TLT / GLD** only enter the defensive max-RSI
+# tie-break when `include_defensive_etfs=true`. For true multi-asset weights,
+# use a separate template.
 #
 # =============================================================================
 # PARAMETERS (QC Project → Parameters; all optional)
 # =============================================================================
-# Integers:
-#   rsi_period (default 10), spy_sma_period (200), qqq_sma_period (20),
+# Dates (ignored partially if run_to_present for end):
+#   start_year (2012), start_month (1), start_day (1),
+#   end_year (2024), end_month (12), end_day (31)
+# Cash: starting_cash (100000)
+# Integers: rsi_period (10), spy_sma_period (200), qqq_sma_period (20),
 #   tqqq_sma_period (20), min_hold_days (0 = off)
-# Floats (RSI / SMA tree):
+# Floats — RSI tree:
 #   th_rsi_qqq_bull_uvxy (81), th_rsi_spy_bull_uvxy (80),
 #   th_rsi_tqqq_bear_tecl (30), th_rsi_spy_bear_spxl (30),
 #   th_rsi_uvxy_elevated (74), th_rsi_uvxy_extreme (84),
 #   th_rsi_sqqq_tecs_qqq_above (31), th_rsi_sqqq_tecs_tqqq_above (34)
-# Strings / bool-like:
-#   run_to_present = "true"  → do not call SetEndDate (backtest to “now”).
-#   include_defensive_etfs = "true" → add TLT, GLD to universe & max-RSI picks.
+# Drawdown guard:
+#   use_drawdown_guard ("false"), max_drawdown_pct (0.35) = 35% from peak,
+#   drawdown_release_frac (0.50) release when DD <= max * this fraction,
+#   risk_off_ticker ("BSV") must exist in the universe (core or defensive list)
+# Bools / strings: run_to_present, include_defensive_etfs
 #
 # =============================================================================
 # DISCLAIMER
 # =============================================================================
-# Educational / research only. Past performance does not guarantee future
-# results. Leveraged and inverse ETFs can lose most or all of their value
-# intraday in extreme moves.
+# Educational / research only. Leveraged and inverse ETFs can lose most or all
+# of their value intraday in extreme moves.
 
 from AlgorithmImports import *
 
@@ -83,11 +75,25 @@ from AlgorithmImports import *
 class ConditionalSectorRotation(QCAlgorithm):
 
     def Initialize(self):
-        self.SetStartDate(2012, 1, 1)
-        if not self._bool_parameter("run_to_present", False):
-            self.SetEndDate(2024, 12, 31)
+        sy, sm, sd = (
+            self._int_parameter("start_year", 2012),
+            self._int_parameter("start_month", 1),
+            self._int_parameter("start_day", 1),
+        )
+        self.SetStartDate(sy, sm, sd)
 
-        self.SetCash(100000)
+        run_open = self._bool_parameter("run_to_present", False)
+        if not run_open:
+            ey, em, ed = (
+                self._int_parameter("end_year", 2024),
+                self._int_parameter("end_month", 12),
+                self._int_parameter("end_day", 31),
+            )
+            self.SetEndDate(ey, em, ed)
+
+        cash = max(1000, self._int_parameter("starting_cash", 100000))
+        self.SetCash(cash)
+
         self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage)
 
         self.rsi_period = self._int_parameter("rsi_period", 10)
@@ -110,12 +116,29 @@ class ConditionalSectorRotation(QCAlgorithm):
         self.include_defensive_etfs = self._bool_parameter(
             "include_defensive_etfs", False)
 
+        self.use_drawdown_guard = self._bool_parameter("use_drawdown_guard", False)
+        self.max_drawdown_pct = max(
+            0.05, min(0.95, self._float_parameter("max_drawdown_pct", 0.35)))
+        self.drawdown_release_frac = max(
+            0.05, min(1.0, self._float_parameter("drawdown_release_frac", 0.50)))
+
+        raw_risk_off = self.GetParameter("risk_off_ticker")
+        if raw_risk_off is None or str(raw_risk_off).strip() == "":
+            self.risk_off_ticker = "BSV"
+        else:
+            self.risk_off_ticker = str(raw_risk_off).strip().upper()
+
         self.tickers = [
             "SPY", "QQQ", "TQQQ", "UVXY",
             "TECL", "SPXL", "SQQQ", "TECS", "BSV",
         ]
         if self.include_defensive_etfs:
             self.tickers.extend(["TLT", "GLD"])
+
+        if self.risk_off_ticker not in self.tickers:
+            raise ValueError(
+                f"risk_off_ticker {self.risk_off_ticker!r} not in universe {self.tickers}"
+            )
 
         self.symbols = {}
         self.indicators = {}
@@ -146,6 +169,8 @@ class ConditionalSectorRotation(QCAlgorithm):
 
         self._last_target_ticker = None
         self._last_trade_time = None
+        self._peak_equity = float(cash)
+        self._drawdown_guard_active = False
 
     def _int_parameter(self, name, default):
         raw = self.GetParameter(name)
@@ -191,8 +216,31 @@ class ConditionalSectorRotation(QCAlgorithm):
             base.extend(["TLT", "GLD"])
         return base
 
+    def _update_drawdown_guard(self):
+        if not self.use_drawdown_guard:
+            self._drawdown_guard_active = False
+            return
+
+        pv = self.Portfolio.TotalPortfolioValue
+        if pv <= 0:
+            return
+
+        if pv > self._peak_equity:
+            self._peak_equity = pv
+
+        dd = 1.0 - (pv / self._peak_equity) if self._peak_equity > 0 else 0.0
+
+        if dd >= self.max_drawdown_pct:
+            self._drawdown_guard_active = True
+        elif self._drawdown_guard_active:
+            release_level = self.max_drawdown_pct * self.drawdown_release_frac
+            if dd <= release_level:
+                self._drawdown_guard_active = False
+
     def _min_hold_blocks_switch(self):
         if self.min_hold_days <= 0 or self._last_trade_time is None:
+            return False
+        if self._drawdown_guard_active:
             return False
         return (self.Time - self._last_trade_time).days < self.min_hold_days
 
@@ -200,9 +248,14 @@ class ConditionalSectorRotation(QCAlgorithm):
         if self.IsWarmingUp or not self._indicators_ready():
             return
 
+        self._update_drawdown_guard()
+
         price_spy = self.Securities[self.symbols["SPY"]].Price
         price_qqq = self.Securities[self.symbols["QQQ"]].Price
         price_tqqq = self.Securities[self.symbols["TQQQ"]].Price
+
+        if price_spy <= 0 or price_qqq <= 0 or price_tqqq <= 0:
+            return
 
         rsi_qqq = self.indicators[self._rsi_key("QQQ")].Current.Value
         rsi_spy = self.indicators[self._rsi_key("SPY")].Current.Value
@@ -214,44 +267,49 @@ class ConditionalSectorRotation(QCAlgorithm):
         sma_qqq = self.indicators["QQQ_SMA20"].Current.Value
         sma_tqqq = self.indicators["TQQQ_SMA20"].Current.Value
 
-        target_ticker = None
+        signal_target = None
 
         if price_spy > sma_spy:
             if rsi_qqq > self.th_rsi_qqq_bull_uvxy:
-                target_ticker = "UVXY"
+                signal_target = "UVXY"
             elif rsi_spy > self.th_rsi_spy_bull_uvxy:
-                target_ticker = "UVXY"
+                signal_target = "UVXY"
             else:
-                target_ticker = "TQQQ"
+                signal_target = "TQQQ"
         else:
             if rsi_tqqq < self.th_rsi_tqqq_bear_tecl:
-                target_ticker = "TECL"
+                signal_target = "TECL"
             elif rsi_spy < self.th_rsi_spy_bear_spxl:
-                target_ticker = "SPXL"
+                signal_target = "SPXL"
             elif rsi_uvxy > self.th_rsi_uvxy_elevated:
                 if rsi_uvxy > self.th_rsi_uvxy_extreme:
                     if price_qqq > sma_qqq:
                         if rsi_sqqq < self.th_rsi_sqqq_tecs_qqq_above:
-                            target_ticker = "TECS"
+                            signal_target = "TECS"
                         else:
-                            target_ticker = "TECL"
+                            signal_target = "TECL"
                     else:
-                        target_ticker = self._get_max_rsi_ticker(
+                        signal_target = self._get_max_rsi_ticker(
                             self._defensive_rsi_candidates())
                 else:
-                    target_ticker = "UVXY"
+                    signal_target = "UVXY"
             else:
                 if price_tqqq > sma_tqqq:
                     if rsi_sqqq < self.th_rsi_sqqq_tecs_tqqq_above:
-                        target_ticker = "TECS"
+                        signal_target = "TECS"
                     else:
-                        target_ticker = "TECL"
+                        signal_target = "TECL"
                 else:
-                    target_ticker = self._get_max_rsi_ticker(
+                    signal_target = self._get_max_rsi_ticker(
                         self._defensive_rsi_candidates())
 
-        if target_ticker is None:
+        if signal_target is None:
             return
+
+        if self.use_drawdown_guard and self._drawdown_guard_active:
+            target_ticker = self.risk_off_ticker
+        else:
+            target_ticker = signal_target
 
         if target_ticker == self._last_target_ticker:
             return
@@ -262,7 +320,12 @@ class ConditionalSectorRotation(QCAlgorithm):
         self.SetHoldings(self.symbols[target_ticker], 1.0, True)
         self._last_target_ticker = target_ticker
         self._last_trade_time = self.Time
-        self.Debug(f"{self.Time:%Y-%m-%d} target={target_ticker}")
+
+        guard = " [DD_GUARD]" if (
+            self.use_drawdown_guard and self._drawdown_guard_active) else ""
+        self.Debug(
+            f"{self.Time:%Y-%m-%d} target={target_ticker}{guard} signal={signal_target}"
+        )
 
     def _get_max_rsi_ticker(self, ticker_list):
         best = None
