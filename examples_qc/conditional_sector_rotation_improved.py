@@ -7,12 +7,19 @@ from datetime import datetime
 # =============================================================================
 # Conditional sector rotation — improved research template (QuantConnect / IB)
 #
-# Adds (vs a simple OnData same-bar version):
-#   1) Optional end-of-day decision + next-session open execution (Schedule).
-#   2) Volatility targeting: scales gross exposure toward a target ann. vol.
-#   3) Vol-ETP rails: cap consecutive days in UVXY/SVXY; optional gap cooldown.
-#   4) Tiered drawdown scaling: gradually reduces risk exposure before hard stop.
-#   5) Optional "trade start" date to mimic walk-forward / frozen-parameter live.
+# Core:
+#   1) Optional EOD decision + next-session open execution (Schedule).
+#   2) Volatility targeting vs anchor ETF realized vol.
+#   3) Vol-ETP rails (consecutive UVXY/SVXY cap) + gap cooldown on large daily loss.
+#   4) Tiered drawdown scaling + hard drawdown guard.
+#   5) Optional trade_start_* for walk-forward style runs.
+#
+# NEW (rebalancing / risk hygiene):
+#   6) Rebalance bands: skip tiny same-ticker weight nudges (cuts order spam).
+#   7) Max daily weight change cap when staying in the same ticker (vol targeting).
+#   8) Optional max_days_without_rebalance: bypass band if portfolio is stale.
+#   9) Vol-ETP entry confirmation: require N consecutive EOD signals before UVXY/SVXY.
+#  10) Optional regime-based vol target (higher in bull, lower in bear vs SPY SMA).
 #
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
 # Past performance does not guarantee future results.
@@ -44,6 +51,34 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         # ── Execution mode ──────────────────────────────────────────────
         self.use_eod_next_bar_execution = self._bool_parameter(
             "use_eod_next_bar_execution", True
+        )
+
+        # ── Rebalance hygiene ───────────────────────────────────────────
+        self.use_rebalance_bands = self._bool_parameter("use_rebalance_bands", True)
+        self.min_weight_change_to_trade = max(
+            0.0, min(1.0, self._float_parameter("min_weight_change_to_trade", 0.02))
+        )
+        self.max_daily_weight_change = max(
+            0.0, min(1.0, self._float_parameter("max_daily_weight_change", 0.15))
+        )
+        self.max_days_without_rebalance = max(
+            0, self._int_parameter("max_days_without_rebalance", 0)
+        )
+
+        # ── Vol-ETP confirmation (entries) ──────────────────────────────
+        self.vol_etp_confirm_days = max(
+            0, self._int_parameter("vol_etp_confirm_days", 0)
+        )
+
+        # ── Regime-based vol target ─────────────────────────────────────
+        self.use_regime_vol_target = self._bool_parameter(
+            "use_regime_vol_target", False
+        )
+        self.target_ann_vol_bull = max(
+            0.01, self._float_parameter("target_ann_vol_bull", 0.28)
+        )
+        self.target_ann_vol_bear = max(
+            0.01, self._float_parameter("target_ann_vol_bear", 0.18)
         )
 
         # ── Indicator periods ───────────────────────────────────────────
@@ -209,6 +244,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._consec_vol_etp_days = 0
         self._cooldown_remaining = 0
 
+        self._vol_etp_confirm_name = None
+        self._vol_etp_confirm_count = 0
+
     # ── QC callbacks ─────────────────────────────────────────────────────
 
     def OnData(self, data):
@@ -232,6 +270,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._pending_weight = 0.0
             return
 
+        raw_signal = self._apply_vol_etp_entry_confirmation(raw_signal)
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
 
@@ -256,6 +295,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._pending_ticker = self._last_target_ticker
             self._pending_weight = self._last_pending_weight_or_default()
             return
+
+        target_ticker, base_weight = self._apply_rebalance_friction(
+            target_ticker, base_weight
+        )
 
         self._pending_ticker = target_ticker
         self._pending_weight = base_weight
@@ -315,6 +358,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if raw_signal is None:
             return
 
+        raw_signal = self._apply_vol_etp_entry_confirmation(raw_signal)
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
 
@@ -332,9 +376,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if self._min_hold_blocks_switch_target(target_ticker):
             return
 
+        target_ticker, w = self._apply_rebalance_friction(target_ticker, w)
+
         if target_ticker == self._last_target_ticker and abs(
             w - getattr(self, "_last_executed_weight", 0.0)
-        ) < 1e-6:
+        ) < 1e-9:
             return
 
         sym = self.symbols[target_ticker]
@@ -349,6 +395,102 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
+
+    # ── Regime + vol-ETP confirmation ───────────────────────────────────
+
+    def _is_bull_regime(self):
+        price_spy = self.Securities[self.symbols["SPY"]].Price
+        sma_spy = self.indicators["SPY_SMA200"].Current.Value
+        if price_spy <= 0 or sma_spy <= 0:
+            return True
+        return price_spy > sma_spy
+
+    def _vol_etp_standby_ticker(self):
+        return "TQQQ" if self._is_bull_regime() else self.risk_off_ticker
+
+    def _apply_vol_etp_entry_confirmation(self, signal):
+        vset = self._vol_etp_names()
+        if self.vol_etp_confirm_days <= 0:
+            self._vol_etp_confirm_name = None
+            self._vol_etp_confirm_count = 0
+            return signal
+
+        if signal in vset:
+            if self._vol_etp_confirm_name == signal:
+                self._vol_etp_confirm_count += 1
+            else:
+                self._vol_etp_confirm_name = signal
+                self._vol_etp_confirm_count = 1
+            if self._vol_etp_confirm_count >= self.vol_etp_confirm_days:
+                return signal
+            return self._vol_etp_standby_ticker()
+
+        self._vol_etp_confirm_name = None
+        self._vol_etp_confirm_count = 0
+        return signal
+
+    # ── Rebalance bands + daily weight cap ──────────────────────────────
+
+    def _dominant_holding(self):
+        pv = self.Portfolio.TotalPortfolioValue
+        if pv <= 0:
+            return None, 0.0
+        best_t, best_f = None, 0.0
+        for sym in self.symbols.values():
+            h = self.Portfolio[sym]
+            if not h.Invested:
+                continue
+            f = abs(float(h.HoldingsValue)) / pv
+            if f > best_f:
+                best_f = f
+                best_t = self._sym_to_ticker.get(sym, None)
+        return best_t, best_f
+
+    def _stale_rebalance_needed(self):
+        if self.max_days_without_rebalance <= 0:
+            return False
+        if self._last_trade_time is None:
+            return False
+        return (self.Time - self._last_trade_time).days >= self.max_days_without_rebalance
+
+    def _apply_rebalance_friction(self, target_ticker, base_weight):
+        """
+        Ticker change: always trade to target (min-hold handled earlier).
+        Same ticker: clamp one-day weight delta, then apply min-change band.
+        """
+        if self.use_drawdown_guard and self._drawdown_guard_active:
+            return target_ticker, base_weight
+
+        dom_t, dom_w = self._dominant_holding()
+        if dom_t is None:
+            return target_ticker, base_weight
+
+        if target_ticker != dom_t:
+            return target_ticker, base_weight
+
+        w_tgt = float(base_weight)
+        w_cur = float(dom_w)
+
+        w_adj = w_tgt
+        cap = float(self.max_daily_weight_change)
+        if cap > 0.0:
+            delta = w_adj - w_cur
+            if delta > cap:
+                w_adj = w_cur + cap
+            elif delta < -cap:
+                w_adj = w_cur - cap
+
+        w_adj = max(0.0, min(1.0, w_adj))
+
+        if not self.use_rebalance_bands or self.min_weight_change_to_trade <= 0.0:
+            return target_ticker, w_adj
+
+        if abs(w_adj - w_cur) < self.min_weight_change_to_trade:
+            if self._stale_rebalance_needed():
+                return target_ticker, w_adj
+            return dom_t, w_cur
+
+        return target_ticker, w_adj
 
     # ── Parameter helpers ───────────────────────────────────────────────
 
@@ -432,6 +574,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return self.tier1_mult
         return 1.0
 
+    def _effective_target_ann_vol(self):
+        if self.use_regime_vol_target:
+            return (
+                self.target_ann_vol_bull
+                if self._is_bull_regime()
+                else self.target_ann_vol_bear
+            )
+        return self.target_ann_vol
+
     def _vol_target_multiplier(self):
         t = self.vol_anchor_ticker
         hist = self.History(self.symbols[t], self.vol_lookback + 1, Resolution.Daily)
@@ -453,7 +604,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if rv <= 1e-12:
             return 1.0
         ann = rv * (252.0 ** 0.5)
-        return min(1.0, self.target_ann_vol / ann)
+        tgt = self._effective_target_ann_vol()
+        return min(1.0, tgt / ann)
 
     def _vol_etp_names(self):
         return {"UVXY", "SVXY"}
@@ -494,16 +646,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return float(w)
 
     def _dominant_equity_ticker_from_portfolio(self):
-        best_t, best_abs = None, 0.0
-        for sym in self.symbols.values():
-            h = self.Portfolio[sym]
-            if not h.Invested:
-                continue
-            v = abs(float(h.HoldingsValue))
-            if v > best_abs:
-                best_abs = v
-                best_t = self._sym_to_ticker.get(sym, None)
-        return best_t
+        t, _ = self._dominant_holding()
+        return t
 
     def _mark_eod_gap_cooldown(self):
         if self.gap_cooldown_days <= 0:
