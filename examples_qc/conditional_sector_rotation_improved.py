@@ -21,10 +21,10 @@ from datetime import datetime
 #   9) Vol-ETP entry confirmation: require N consecutive EOD signals before UVXY/SVXY.
 #  10) Optional regime-based vol target (higher in bull, lower in bear vs SPY SMA).
 #
-# BACKTEST-ONLY PROFIT MODE (explicitly NOT for live):
-#   maximize_backtest_equity=true applies aggressive overrides to lift in-sample
-#   equity (disables most rails, same-bar OnData, hot vol targets, looser bull
-#   UVXY triggers). Optional maximize_include_svxy=true enables SVXY calm path.
+# BACKTEST-ONLY PROFIT MODE (DEFAULT ON — explicitly NOT for live):
+#   maximize_backtest_equity defaults TRUE; set project parameter to false for
+#   the saner EOD/rail/band path. When true: disables most rails, same-bar OnData,
+#   hot vol targets, looser bull UVXY triggers. maximize_include_svxy enables SVXY.
 #
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
 # Past performance does not guarantee future results.
@@ -169,7 +169,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.trade_start = datetime(tsy, tsm, tsd)
 
         self.maximize_backtest_equity = self._bool_parameter(
-            "maximize_backtest_equity", False
+            "maximize_backtest_equity", True
         )
         self.maximize_include_svxy = self._bool_parameter(
             "maximize_include_svxy", False
@@ -267,7 +267,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         and huge divergence vs live fills. Do not deploy this profile to IB.
         """
         self.Debug(
-            "maximize_backtest_equity=true: aggressive backtest-only profile active."
+            "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
+            "looser bull UVXY — NOT for live. Set maximize_backtest_equity=false to disable."
         )
         self.use_eod_next_bar_execution = False
         self.use_rebalance_bands = False
@@ -282,15 +283,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_tiered_drawdown = False
         self.use_vol_targeting = True
         self.use_regime_vol_target = True
-        self.target_ann_vol = 0.55
-        self.target_ann_vol_bull = 0.62
-        self.target_ann_vol_bear = 0.42
+        self.target_ann_vol = 0.58
+        self.target_ann_vol_bull = 0.68
+        self.target_ann_vol_bear = 0.48
         self.min_hold_days = 0
-        self.th_rsi_qqq_bull_uvxy = 88.0
-        self.th_rsi_spy_bull_uvxy = 87.0
-        self.th_rsi_uvxy_elevated = 80.0
-        self.th_rsi_uvxy_extreme = 92.0
-        self.th_rsi_soxl_bull = 36.0
+        self.th_rsi_qqq_bull_uvxy = 90.0
+        self.th_rsi_spy_bull_uvxy = 89.0
+        self.th_rsi_uvxy_elevated = 82.0
+        self.th_rsi_uvxy_extreme = 93.0
+        self.th_rsi_soxl_bull = 34.0
         if self.maximize_include_svxy:
             self.use_svxy_calm = True
 
