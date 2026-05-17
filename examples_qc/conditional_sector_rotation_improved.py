@@ -21,6 +21,11 @@ from datetime import datetime
 #   9) Vol-ETP entry confirmation: require N consecutive EOD signals before UVXY/SVXY.
 #  10) Optional regime-based vol target (higher in bull, lower in bear vs SPY SMA).
 #
+# BACKTEST-ONLY PROFIT MODE (explicitly NOT for live):
+#   maximize_backtest_equity=true applies aggressive overrides to lift in-sample
+#   equity (disables most rails, same-bar OnData, hot vol targets, looser bull
+#   UVXY triggers). Optional maximize_include_svxy=true enables SVXY calm path.
+#
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
 # Past performance does not guarantee future results.
 # =============================================================================
@@ -163,6 +168,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         tsd = self._int_parameter("trade_start_day", sd)
         self.trade_start = datetime(tsy, tsm, tsd)
 
+        self.maximize_backtest_equity = self._bool_parameter(
+            "maximize_backtest_equity", False
+        )
+        self.maximize_include_svxy = self._bool_parameter(
+            "maximize_include_svxy", False
+        )
+        if self.maximize_backtest_equity:
+            self._apply_maximize_backtest_equity_profile()
+
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
             "SPY", "QQQ", "TQQQ", "UVXY",
@@ -246,6 +260,39 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         self._vol_etp_confirm_name = None
         self._vol_etp_confirm_count = 0
+
+    def _apply_maximize_backtest_equity_profile(self):
+        """
+        In-sample equity maximization bundle. Expect deeper drawdowns, gap risk,
+        and huge divergence vs live fills. Do not deploy this profile to IB.
+        """
+        self.Debug(
+            "maximize_backtest_equity=true: aggressive backtest-only profile active."
+        )
+        self.use_eod_next_bar_execution = False
+        self.use_rebalance_bands = False
+        self.min_weight_change_to_trade = 0.0
+        self.max_daily_weight_change = 0.0
+        self.max_days_without_rebalance = 0
+        self.vol_etp_confirm_days = 0
+        self.max_consecutive_vol_etp_days = 0
+        self.gap_cooldown_days = 0
+        self.use_drawdown_guard = False
+        self._drawdown_guard_active = False
+        self.use_tiered_drawdown = False
+        self.use_vol_targeting = True
+        self.use_regime_vol_target = True
+        self.target_ann_vol = 0.55
+        self.target_ann_vol_bull = 0.62
+        self.target_ann_vol_bear = 0.42
+        self.min_hold_days = 0
+        self.th_rsi_qqq_bull_uvxy = 88.0
+        self.th_rsi_spy_bull_uvxy = 87.0
+        self.th_rsi_uvxy_elevated = 80.0
+        self.th_rsi_uvxy_extreme = 92.0
+        self.th_rsi_soxl_bull = 36.0
+        if self.maximize_include_svxy:
+            self.use_svxy_calm = True
 
     # ── QC callbacks ─────────────────────────────────────────────────────
 
