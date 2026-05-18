@@ -438,6 +438,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self.TimeRules.BeforeMarketOpen(spy, 5),
                 self._before_market_open_execute,
             )
+        else:
+            self.Debug("EXECUTION_MODE=same_bar (OnData only; no EOD schedule)")
+
+        self._log_runtime_config_verify()
 
         # ── State ───────────────────────────────────────────────────────
         self._last_target_ticker = None
@@ -523,6 +527,25 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             bg = max(1.0, min(2.0, float(getattr(self, "_bull_gross_cap", cap))))
             return min(cap, bg)
         return min(cap, 1.0)
+
+    def _log_runtime_config_verify(self):
+        ok = (
+            not self.use_eod_next_bar_execution
+            and not self.use_rebalance_bands
+            and not self.use_drawdown_guard
+            and self.min_rebalance_weight_delta >= 0.029
+        )
+        self.Debug(
+            "RUNTIME_VERIFY "
+            f"eod={self.use_eod_next_bar_execution} bands={self.use_rebalance_bands} "
+            f"dd_guard={self.use_drawdown_guard} min_rebal_delta={self.min_rebalance_weight_delta:.3f} "
+            f"max_gross={self.max_gross_exposure:.2f} vol_tgt={self.use_vol_targeting} "
+            f"OK_60x_baseline={ok}"
+        )
+        if not ok and BACKTEST_PROFILE == "maximize_60x":
+            self.Debug(
+                "WARNING: config does not match ~60x baseline — re-upload main.py + csr_profiles.py"
+            )
 
     def _log_effective_config(self):
         self.Debug(
@@ -802,9 +825,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         self._record_signal_attribution(target_ticker, w)
 
-        if target_ticker == self._last_target_ticker and abs(
-            w - getattr(self, "_last_executed_weight", 0.0)
-        ) < 1e-9:
+        last_w = float(getattr(self, "_last_executed_weight", 0.0))
+        rebal_eps = max(1e-9, float(getattr(self, "min_rebalance_weight_delta", 0.0)))
+        if target_ticker == self._last_target_ticker and abs(w - last_w) < rebal_eps:
             return
 
         sym = self.symbols[target_ticker]
@@ -1045,7 +1068,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.maximize_include_svxy = False
         self.use_plain_maximize_only = p == "maximize_60x"
         self.ignore_qc_parameter_overrides = True
-        self._apply_selected_profiles_from_flags()
+        if p in ("maximize_60x", "maximize", "max_equity"):
+            csr.apply_maximize_60x_baseline(self)
+        elif self.production_safe_defaults:
+            csr.apply_production_safe_profile(self)
+        elif self.lift_120x_research:
+            csr.apply_maximize_60x_baseline(self)
+            csr.apply_lift_120x_research_bundle(self)
+        else:
+            self._apply_selected_profiles_from_flags()
 
     def _apply_selected_profiles_from_flags(self):
         if self.production_safe_defaults:

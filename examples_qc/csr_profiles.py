@@ -34,6 +34,7 @@ def apply_production_safe_profile(algo):
 
 
 def apply_maximize_backtest_equity_profile(algo):
+    """~60x in-sample baseline: same-bar, rails off, vol targets 0.58/0.68/0.48."""
     algo.Debug("MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, vol targets 0.58/0.68/0.48.")
     algo.use_eod_next_bar_execution = False
     algo.use_rebalance_bands = False
@@ -42,7 +43,10 @@ def apply_maximize_backtest_equity_profile(algo):
     algo.max_days_without_rebalance = 0
     algo.vol_etp_confirm_days = 0
     algo.max_consecutive_vol_etp_days = 0
+    algo.max_consecutive_uvxy_days = 0
+    algo.max_consecutive_svxy_days = 0
     algo.gap_cooldown_days = 0
+    algo.gap_cooldown_pct = -0.12
     algo.use_drawdown_guard = False
     algo._drawdown_guard_active = False
     algo.use_tiered_drawdown = False
@@ -52,6 +56,13 @@ def apply_maximize_backtest_equity_profile(algo):
     algo.target_ann_vol_bull = 0.68
     algo.target_ann_vol_bear = 0.48
     algo.min_hold_days = 0
+    algo.max_gross_exposure = 1.0
+    algo.max_position_weight = 1.0
+    algo.margin_safety_pct = 1.0
+    # Skip tiny vol-scaler weight tweaks (0.0 caused ~2k orders / ~32x vs ~900 / ~60x).
+    algo.min_rebalance_weight_delta = 0.03
+    algo._bull_sleeve_mode = False
+    algo._vol_target_off_in_bull = False
     algo.th_rsi_qqq_bull_uvxy = 90.0
     algo.th_rsi_spy_bull_uvxy = 89.0
     algo.th_rsi_uvxy_elevated = 82.0
@@ -61,6 +72,16 @@ def apply_maximize_backtest_equity_profile(algo):
         algo.use_svxy_calm = True
     if algo.maximize_disable_vol_target:
         algo.use_vol_targeting = False
+
+
+def apply_maximize_60x_baseline(algo):
+    """Single entry for hardcoded QC upload — no parameter panel."""
+    algo.maximize_backtest_equity = True
+    algo.maximize_include_svxy = False
+    algo.maximize_disable_vol_target = False
+    algo.lift_120x_research = False
+    algo.production_safe_defaults = False
+    apply_maximize_backtest_equity_profile(algo)
 
 
 def apply_lift_120x_research_bundle(algo):
