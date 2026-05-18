@@ -1,121 +1,45 @@
 ================================================================================
-Conditional Sector Rotation (Improved) — QuantConnect deployment
+Conditional Sector Rotation — QuantConnect deployment (~60x baseline)
 ================================================================================
 
-FILES TO UPLOAD (both required; each must stay under 64,000 characters)
+RESTORED BASELINE (commit ae73726 logic, May 2026)
 --------------------------------------------------------------------------------
-1. conditional_sector_rotation_improved.py  →  rename to  main.py
-2. csr_profiles.py                          →  keep name csr_profiles.py
+The ~60x run (~$6M, ~900 orders) used this single-file algorithm BEFORE later
+120x/LIFT experiments added _safe_set_holdings churn, VIX gates, and csr_profiles
+splits that degraded results to ~$3.2M / ~1700 orders.
 
-Top of main.py must remain:
-    import csr_profiles as csr
-    class ConditionalSectorRotationImproved(QCAlgorithm):
-
-Brokerage (already set in code): Interactive Brokers, Margin account.
-
-PRE-FLIGHT (local, optional)
+UPLOAD FOR ~60x BASELINE — ONE FILE ONLY
 --------------------------------------------------------------------------------
-  wc -c examples_qc/conditional_sector_rotation_improved.py examples_qc/csr_profiles.py
-  python3 -m py_compile examples_qc/conditional_sector_rotation_improved.py examples_qc/csr_profiles.py
+  conditional_sector_rotation_improved.py  →  rename to  main.py
 
-CURRENT SIZES (approx): main ~52k, csr_profiles ~6.5k — well under 64k limit.
+Do NOT upload csr_profiles.py for this baseline (main.py has no import).
 
-DEFAULT BACKTEST (~60x baseline) — USE THIS FIRST
---------------------------------------------------------------------------------
-Upload both .py files only. Code ignores the QC parameter panel by default.
+File size ~50k — under QuantConnect 64k limit.
 
-At top of main.py (hardcoded):
+At top of main.py (already set):
   USE_QC_UI_PARAMETERS = False
-  BACKTEST_PROFILE = "maximize_60x"
 
-Expected log lines at start:
-  HARDCODED_BACKTEST: 2020-01-01 .. 2026-05-17, $100k, profile='maximize_60x'
-  ACTIVE_PROFILE=hardcoded 'maximize_60x' (USE_QC_UI_PARAMETERS=False; QC panel ignored)
-  MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, vol targets 0.58/0.68/0.48.
-  EFFECTIVE_CONFIG ... lift_120x=False bull_sleeve=False ...
+No QuantConnect parameter panel settings required.
 
-Expected ballpark (2020-01-01 start, $100k, run_to_present or end 2026):
+Expected log at start:
+  BASELINE_60X_RESTORED: ae73726 logic, hardcoded 2020-2026, $100k, ...
+  MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, ...
+  EXECUTION_MODE=same_bar (maximize baseline)
+
+Expected ballpark (2020-01-01 .. 2026-05-17, $100k):
   End equity ~ $6M+   |  Orders ~900   |  CAGR ~90%   |  Max DD ~45%
 
-If you see ACTIVE_PROFILE=lift_120x or end equity ~$760k / ~1500 orders:
-  → QC still has lift_120x_research=true or research_preset=bull_sleeve_120x.
-  → Remove those parameters or set lift_120x_research=false.
+If you still see ~$3M / ~1700 orders:
+  - Old main.py still on QC (with csr_profiles import) — replace entirely
+  - Remove csr_profiles.py from the QC project if present
+  - Delete the algorithm and re-create with only the new main.py
 
-KEY PARAMETERS
+OPTIONAL: csr_profiles.py path
 --------------------------------------------------------------------------------
-  headline_qc_default=true          (default) → plain maximize profile
-  maximize_backtest_equity=true     (set by headline default)
-  production_safe_defaults=false    (default)
+Only for future experiments. Not used by the restored baseline.
 
-  research_preset=production        → live-safe: EOD execution, rails, bands
-  research_preset=maximize          → same as default maximize
-  lift_120x_research=true           → OPT-IN 120x research bundle (NOT default)
-  research_preset=bull_sleeve_120x  → same as lift_120x_research
-
-  run_to_present=true               → extend backtest to today
-  starting_cash=100000
-
-  For realistic friction test:
-  research_preset=realistic         → adds default slippage 0.001/share
-
-120x RESEARCH (only after 60x baseline is restored)
+BENCHMARK (separate QC project)
 --------------------------------------------------------------------------------
-One knob at a time. Do NOT stack LIFT + max_gross_exposure + deprecated presets.
-
-  lift_120x_research=true
-  OR research_preset=bull_sleeve_120x
-
-Historical note: LIFT defaults hurt vs plain maximize (~7.6x vs ~60x). Treat as experiment.
-
-DEPRECATED (map to LIFT; avoid for baseline):
-  aggressive_120x_research, target_120x_research, research_preset=target_120x
-
-LIVE / IB (Ontario, Canada)
---------------------------------------------------------------------------------
-  Account: Margin (required for leveraged long ETFs and algorithm as written).
-  TFSA/RRSP: No short selling; long-only inverse ETFs (SQQQ, SOXS, TECS) OK.
-
-  This algo does NOT open borrow-short positions. Bear exposure uses inverse
-  leveraged ETFs already in the universe — same economic idea, no stock loan.
-
-  Borrow-short TQQQ/UVXY on IB Canada:
-    - Often hard-to-borrow or expensive; daily-decay products are poor shorts.
-    - Prefer SQQQ/SOXS/TECS legs (already in signal logic) over shorting TQQQ.
-    - Check IB Trader Workstation: Short Stock Availability (SLB) per symbol.
-
-  Ontario has no separate short-sale rule beyond Canada federal + IB margin policy.
-  Confirm: margin approval, PDT rules if applicable, and symbol shortability.
-
-IDEAS FROM EXTERNAL RESEARCH (opt-in experiments only — not enabled by default)
---------------------------------------------------------------------------------
-QuantConnect community / top algos (patterns):
-  - Regime filter (SPY 200 SMA) — already in algo (regime_mode=spy default).
-  - Vol targeting — on in maximize (bull 0.68 / bear 0.48 ann vol).
-  - Momentum rank rotation — partial via SOXL vs TQQQ RSI/SMA rules.
-  - Monthly rebalance bands — production profile; off in maximize (fewer trades).
-
-github.com/desenyon/quantconnect-strategies (reviewed):
-  sector_rotation_strategy.py   → multi-sector momentum by economic regime
-                                  (XLK/XLF/...); could add sector sleeve later.
-  multi_asset_vol_target_strategy.py → diversified vol target (SPY/TLT/GLD);
-                                  algo already vol-targets via TQQQ anchor.
-  tail_risk_hedging_strategy.py → UVXY/VXX hedge sizing by stress regime;
-                                  algo already rotates UVXY/SVXY in bull/bear.
-  trend_following_cta.py        → trailing stops; possible live overlay.
-  risk_parity_strategy.py       → multi-asset weights; low priority vs CSR core.
-
-Suggested A/B order (after 60x locked):
-  1. max_gross_exposure=1.05  (single knob, margin_safety_pct=0.98)
-  2. regime_mode=spy_and_qqq  (dual filter — may reduce whipsaw)
-  3. include_defensive_etfs=true + risk_off_ticker=TLT
-  4. lift_120x_research=true  (bull sleeve — last; historically weak)
-
-ATTRIBUTION (end of backtest log)
---------------------------------------------------------------------------------
-  ATTRIBUTION ... TQQQ=..% SOXL=..%  |  TQQQ+SOXL share  |  executions
-
-BENCHMARK
---------------------------------------------------------------------------------
-  examples_qc/benchmark_tqqq_buy_hold.py — separate QC project for TQQQ B&H.
+  benchmark_tqqq_buy_hold.py
 
 ================================================================================
