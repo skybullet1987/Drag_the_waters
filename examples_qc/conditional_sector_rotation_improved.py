@@ -28,10 +28,13 @@ from datetime import datetime
 # Research presets (parameter research_preset):
 #   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
 #   max_equity / maximize — same as maximize_backtest_equity=true.
-#   realistic — production + default constant_slippage_per_share if unset.
+#   realistic / realistic_backtest — default slippage only (does not force production).
 #
-# maximize_backtest_equity defaults TRUE (QC headline backtests match pre-merge behavior).
-# Set false, research_preset=production, or research_preset=realistic for live-style rails.
+# headline_qc_default (default TRUE): when true and not in production preset, the
+# aggressive maximize bundle is used even if the QC project still has
+# maximize_backtest_equity=false saved. Set headline_qc_default=false to honor that flag.
+#
+# maximize_backtest_equity is honored when headline_qc_default=false.
 #
 # Benchmark defaults to TQQQ; unknown tickers are appended to the universe.
 # Baseline: benchmark_tqqq_buy_hold.py (benchmark defaults QQQ for 100% TQQQ book).
@@ -68,8 +71,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "production",
             "prod",
             "live_safe",
-            "realistic",
-            "realistic_backtest",
         )
         self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
         if self._preset_force_production and self._preset_force_max_equity:
@@ -239,11 +240,16 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.production_safe_defaults = bool(
             prod_user or self._preset_force_production
         )
-        max_user = self._bool_parameter("maximize_backtest_equity", True)
-        self.maximize_backtest_equity = bool(
-            (max_user or self._preset_force_max_equity)
-            and not self.production_safe_defaults
-        )
+        self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
+        if self.headline_qc_default and not self.production_safe_defaults:
+            max_user = True
+            self.maximize_backtest_equity = True
+        else:
+            max_user = self._bool_parameter("maximize_backtest_equity", True)
+            self.maximize_backtest_equity = bool(
+                (max_user or self._preset_force_max_equity)
+                and not self.production_safe_defaults
+            )
         self.maximize_include_svxy = self._bool_parameter(
             "maximize_include_svxy", False
         )
@@ -370,11 +376,20 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         security.SetSlippageModel(ConstantSlippageModel(self._equity_slippage_dollars))
 
     def _log_active_research_profile(self):
+        raw_max = self.GetParameter("maximize_backtest_equity")
+        raw_prod = self.GetParameter("production_safe_defaults")
+        raw_head = self.GetParameter("headline_qc_default")
+        self.Debug(
+            "QC_PARAMS_RAW "
+            f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
+            f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
+        )
         if self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
-                "rails mostly off). For EOD + rails set maximize_backtest_equity=false or "
-                "research_preset=production."
+                "rails mostly off). For EOD + rails: research_preset=production or "
+                "production_safe_defaults=true, or set headline_qc_default=false and "
+                "maximize_backtest_equity=false."
             )
         elif self.production_safe_defaults:
             self.Debug(
@@ -383,7 +398,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             )
         else:
             self.Debug(
-                "ACTIVE_PROFILE=custom (maximize off, not production preset). "
+                "ACTIVE_PROFILE=custom (maximize off, headline_qc_default false). "
                 "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
             )
 
