@@ -30,8 +30,8 @@ from datetime import datetime
 #   max_equity / maximize — same as maximize_backtest_equity=true.
 #   realistic — production + default constant_slippage_per_share if unset.
 #
-# maximize_backtest_equity defaults FALSE; set true or research_preset=max_equity
-# for the aggressive in-sample bundle (not for live).
+# maximize_backtest_equity defaults TRUE (QC headline backtests match pre-merge behavior).
+# Set false, research_preset=production, or research_preset=realistic for live-style rails.
 #
 # Benchmark defaults to TQQQ; unknown tickers are appended to the universe.
 # Baseline: benchmark_tqqq_buy_hold.py (benchmark defaults QQQ for 100% TQQQ book).
@@ -239,7 +239,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.production_safe_defaults = bool(
             prod_user or self._preset_force_production
         )
-        max_user = self._bool_parameter("maximize_backtest_equity", False)
+        max_user = self._bool_parameter("maximize_backtest_equity", True)
         self.maximize_backtest_equity = bool(
             (max_user or self._preset_force_max_equity)
             and not self.production_safe_defaults
@@ -261,6 +261,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         if self._equity_slippage_dollars > 0.0:
             self.SetSecurityInitializer(self._equity_slippage_initializer)
+
+        self._log_active_research_profile()
 
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
@@ -367,6 +369,24 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
         security.SetSlippageModel(ConstantSlippageModel(self._equity_slippage_dollars))
 
+    def _log_active_research_profile(self):
+        if self.maximize_backtest_equity:
+            self.Debug(
+                "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
+                "rails mostly off). For EOD + rails set maximize_backtest_equity=false or "
+                "research_preset=production."
+            )
+        elif self.production_safe_defaults:
+            self.Debug(
+                "ACTIVE_PROFILE=production_safe (EOD, rails, bands). "
+                "research_preset or production_safe_defaults triggered this."
+            )
+        else:
+            self.Debug(
+                "ACTIVE_PROFILE=custom (maximize off, not production preset). "
+                "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
+            )
+
     def _apply_production_safe_profile(self):
         self.Debug(
             "PRODUCTION_SAFE profile: EOD execution, rebalance bands, vol-ETP rails, "
@@ -396,8 +416,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         """
         self.Debug(
             "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
-            "looser bull UVXY — NOT for live. Defaults off; set maximize_backtest_equity=true "
-            "or research_preset=max_equity to enable."
+            "looser bull UVXY — NOT for live. This is the default QC profile unless "
+            "maximize_backtest_equity=false or research_preset=production."
         )
         self.use_eod_next_bar_execution = False
         self.use_rebalance_bands = False
