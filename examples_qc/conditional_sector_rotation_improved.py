@@ -20,9 +20,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._use_qc_ui_parameters = USE_QC_UI_PARAMETERS
 
         if not self._use_qc_ui_parameters:
+            cash = 100000
             self.SetStartDate(2020, 1, 1)
             self.SetEndDate(2026, 5, 17)
-            self.SetCash(100000)
+            self.SetCash(cash)
             self.Debug(
                 "HARDCODED_BACKTEST: 2020-01-01 .. 2026-05-17, $100k, profile="
                 f"{BACKTEST_PROFILE!r} (QC parameter panel ignored)"
