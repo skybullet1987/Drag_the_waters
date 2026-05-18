@@ -23,10 +23,11 @@ from datetime import datetime
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
 #  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
 #
-# Optional 120x research bundle (OFF by default — does not change headline ~60x maximize):
-#   research_preset=aggressive_120x  OR  aggressive_120x_research=true
-# Knobs: max_gross_exposure, disable_bull_uvxy, bull_uvxy_require_both, maximize_disable_vol_target,
-#   th_rsi_*, target_ann_vol_bull (QC overrides only when parameter is explicitly set).
+# ~60x default: headline_qc_default=true → maximize only (unchanged).
+# ~120x research: research_preset=target_120x  OR  target_120x_research=true
+#   (moderate gross 1.22, QQQ vol anchor, VIX-gated bull UVXY, SOXL outperform bias).
+# Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
+# QC overrides apply only when the parameter is explicitly set in the project.
 #
 # Regime / signal extensions:
 #   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
@@ -35,6 +36,8 @@ from datetime import datetime
 # Research presets (parameter research_preset):
 #   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
 #   max_equity / maximize — same as maximize_backtest_equity=true.
+#   target_120x / target_120 — maximize + TARGET_120X bundle (~120x research).
+#   aggressive_120x — legacy hot bundle (high drawdown risk).
 #   realistic / realistic_backtest — default slippage only (does not force production).
 #
 # headline_qc_default (default TRUE): when true and not in production preset, the
@@ -82,8 +85,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
         self._preset_force_aggressive_120x = preset in (
             "aggressive_120x",
-            "120x",
             "max_120x",
+        )
+        self._preset_force_target_120x = preset in (
+            "target_120x",
+            "target_120",
+            "120x_target",
+            "target_120_plus",
         )
         if self._preset_force_production and self._preset_force_max_equity:
             self.Debug(
@@ -184,10 +192,24 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.aggressive_120x_research = self._bool_parameter(
             "aggressive_120x_research", False
         ) or self._preset_force_aggressive_120x
+        self.target_120x_research = self._bool_parameter(
+            "target_120x_research", False
+        ) or self._preset_force_target_120x
         self.maximize_disable_vol_target = self._bool_parameter(
             "maximize_disable_vol_target", False
         )
         self._soxl_skip_spy_rsi_filter = False
+        self._use_vix_gate = False
+        self._prefer_soxl_on_outperform = False
+        self.vix_min_bull_uvxy = max(
+            10.0, self._float_parameter("vix_min_bull_uvxy", 18.0)
+        )
+        self.soxl_outperform_days = max(
+            2, self._int_parameter("soxl_outperform_days", 5)
+        )
+        self.soxl_outperform_rsi_bonus = max(
+            0.0, self._float_parameter("soxl_outperform_rsi_bonus", 4.0)
+        )
 
         # ── Volatility targeting ────────────────────────────────────────
         self.use_vol_targeting = self._bool_parameter("use_vol_targeting", True)
@@ -273,6 +295,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.production_safe_defaults = bool(
             prod_user or self._preset_force_production
         )
+        if self._preset_force_target_120x:
+            self.production_safe_defaults = False
+            self.maximize_backtest_equity = True
         self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
         if self.headline_qc_default and not self.production_safe_defaults:
             max_user = True
@@ -292,8 +317,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         elif self.maximize_backtest_equity:
             self._apply_maximize_backtest_equity_profile()
 
-        if self.aggressive_120x_research or self._preset_force_aggressive_120x:
+        if (self.aggressive_120x_research or self._preset_force_aggressive_120x) and not (
+            self.target_120x_research
+        ):
             self._apply_aggressive_120x_research_bundle()
+        if self.target_120x_research:
+            self._apply_target_120x_research_bundle()
 
         if self.maximize_backtest_equity or self.production_safe_defaults:
             self._reload_user_overrides_after_profile()
@@ -336,11 +365,21 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.benchmark_ticker = _bs if _bs else "TQQQ"
         if self.benchmark_ticker not in self.tickers:
             self.tickers.append(self.benchmark_ticker)
+        if getattr(self, "_use_vix_gate", False) and "VIX" not in self.tickers:
+            self.tickers.append("VIX")
 
         self.symbols = {}
         self.indicators = {}
         for ticker in self.tickers:
-            sym = self.AddEquity(ticker, Resolution.Daily).Symbol
+            if ticker == "VIX":
+                try:
+                    sym = self.AddIndex("VIX", Resolution.Daily).Symbol
+                except Exception:
+                    self.Debug("VIX index unavailable — bull UVXY VIX gate disabled")
+                    self._use_vix_gate = False
+                    continue
+            else:
+                sym = self.AddEquity(ticker, Resolution.Daily).Symbol
             self.symbols[ticker] = sym
             self.indicators[self._rsi_key(ticker)] = self.RSI(
                 sym, self.rsi_period, MovingAverageType.Wilders, Resolution.Daily
@@ -423,11 +462,19 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
-        if self.maximize_backtest_equity:
+        if getattr(self, "target_120x_research", False):
+            self.Debug(
+                "ACTIVE_PROFILE=target_120x (maximize + TARGET_120X bundle, "
+                f"max_gross={self.max_gross_exposure:.2f}, vol_anchor={self.vol_anchor_ticker}, "
+                f"VIX_gate={getattr(self, '_use_vix_gate', False)}). "
+                "Baseline ~60x: clear research_preset / target_120x_research."
+            )
+        elif self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
                 f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
-                "For EOD + rails: research_preset=production or production_safe_defaults=true."
+                "For 120x research: research_preset=target_120x. "
+                "For EOD + rails: research_preset=production."
             )
         elif self.production_safe_defaults:
             self.Debug(
@@ -531,6 +578,63 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if self.maximize_disable_vol_target:
             self.use_vol_targeting = False
 
+    def _apply_target_120x_research_bundle(self):
+        """
+        Tuned ~120x research path: more bull beta than baseline maximize, less blow-up risk
+        than aggressive_120x (1.35 gross + AND UVXY).
+        """
+        self.Debug(
+            "TARGET_120X bundle: max_gross~1.22, QQQ vol anchor, VIX-gated bull UVXY (OR), "
+            "SOXL outperform bias, SVXY calm on. Set research_preset=target_120x."
+        )
+        self.maximize_backtest_equity = True
+        self.target_ann_vol = 0.62
+        self.target_ann_vol_bull = 0.72
+        self.target_ann_vol_bear = 0.50
+        self.max_gross_exposure = max(
+            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.22))
+        )
+        self.max_position_weight = max(
+            0.01,
+            min(
+                self.max_gross_exposure,
+                self._float_parameter("max_position_weight", self.max_gross_exposure),
+            ),
+        )
+        self.vol_lookback = max(5, self._int_parameter("vol_lookback", 12))
+        if not self._parameter_was_set("vol_anchor_ticker"):
+            self.vol_anchor_ticker = "QQQ"
+        if not self._parameter_was_set("regime_mode"):
+            self.regime_mode = "spy"
+        if not self._parameter_was_set("risk_off_ticker"):
+            self.risk_off_ticker = "TQQQ"
+        self.th_rsi_qqq_bull_uvxy = 95.0
+        self.th_rsi_spy_bull_uvxy = 94.0
+        self.th_rsi_soxl_bull = 30.0
+        self.bull_uvxy_require_both = False
+        self.disable_bull_uvxy = False
+        self._soxl_skip_spy_rsi_filter = False
+        self._use_vix_gate = True
+        self._prefer_soxl_on_outperform = True
+        self.vix_min_bull_uvxy = max(
+            10.0, self._float_parameter("vix_min_bull_uvxy", self.vix_min_bull_uvxy)
+        )
+        self.soxl_outperform_days = max(
+            2, self._int_parameter("soxl_outperform_days", self.soxl_outperform_days)
+        )
+        self.soxl_outperform_rsi_bonus = max(
+            0.0,
+            self._float_parameter(
+                "soxl_outperform_rsi_bonus", self.soxl_outperform_rsi_bonus
+            ),
+        )
+        self.use_svxy_calm = True
+        self.maximize_include_svxy = True
+        if not self._parameter_was_set("margin_safety_pct"):
+            self.margin_safety_pct = 0.97
+        if self.maximize_disable_vol_target:
+            self.use_vol_targeting = False
+
     def _parameter_was_set(self, name):
         raw = self.GetParameter(name)
         return raw is not None and str(raw).strip() != ""
@@ -589,6 +693,22 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.use_vol_targeting = self._bool_parameter(
                 "use_vol_targeting", self.use_vol_targeting
             )
+        if self._parameter_was_set("vix_min_bull_uvxy"):
+            self.vix_min_bull_uvxy = max(
+                10.0, self._float_parameter("vix_min_bull_uvxy", self.vix_min_bull_uvxy)
+            )
+        if self._parameter_was_set("soxl_outperform_days"):
+            self.soxl_outperform_days = max(
+                2, self._int_parameter("soxl_outperform_days", self.soxl_outperform_days)
+            )
+        if self._parameter_was_set("vol_lookback"):
+            self.vol_lookback = max(
+                5, self._int_parameter("vol_lookback", self.vol_lookback)
+            )
+        if self._parameter_was_set("vol_anchor_ticker"):
+            raw = self.GetParameter("vol_anchor_ticker")
+            if raw is not None and str(raw).strip() != "":
+                self.vol_anchor_ticker = str(raw).strip().upper()
 
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
@@ -872,6 +992,46 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if c0 <= 0 or c1 <= 0:
             return True
         return (c1 / c0) - 1.0 > 0.0
+
+    def _asset_return_over_days(self, ticker, days):
+        d = int(days)
+        if d <= 0 or ticker not in self.symbols:
+            return None
+        hist = self.History(self.symbols[ticker], d + 1, Resolution.Daily)
+        if hist is None or getattr(hist, "empty", True):
+            return None
+        try:
+            closes = hist["close"].dropna()
+        except Exception:
+            try:
+                closes = hist.xs(ticker, level=0)["close"].dropna()
+            except Exception:
+                return None
+        if closes is None or len(closes) < d + 1:
+            return None
+        c0 = float(closes.iloc[-(d + 1)])
+        c1 = float(closes.iloc[-1])
+        if c0 <= 0 or c1 <= 0:
+            return None
+        return (c1 / c0) - 1.0
+
+    def _soxl_outperformed_tqqq(self, days=None):
+        d = int(days if days is not None else self.soxl_outperform_days)
+        r_soxl = self._asset_return_over_days("SOXL", d)
+        r_tqqq = self._asset_return_over_days("TQQQ", d)
+        if r_soxl is None or r_tqqq is None:
+            return False
+        return r_soxl > r_tqqq
+
+    def _vix_ok_for_bull_uvxy(self):
+        if not getattr(self, "_use_vix_gate", False):
+            return True
+        if "VIX" not in self.symbols:
+            return True
+        vix = self.Securities[self.symbols["VIX"]].Price
+        if vix <= 0:
+            return True
+        return float(vix) >= float(self.vix_min_bull_uvxy)
 
     def _bull_risk_on_momentum(self, ticker):
         if ticker not in ("TQQQ", "SOXL"):
@@ -1234,14 +1394,17 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                     bull_uvxy = qqq_hot and spy_hot
                 else:
                     bull_uvxy = qqq_hot or spy_hot
-                if bull_uvxy:
+                if bull_uvxy and self._vix_ok_for_bull_uvxy():
                     return "UVXY"
             if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
                 return "SVXY"
+            soxl_rsi_th = float(self.th_rsi_soxl_bull)
+            if getattr(self, "_prefer_soxl_on_outperform", False) and self._soxl_outperformed_tqqq():
+                soxl_rsi_th = max(22.0, soxl_rsi_th - float(self.soxl_outperform_rsi_bonus))
             soxl_ok = (
                 self.use_soxl_bull
                 and price_soxl > sma_soxl
-                and rsi_soxl > self.th_rsi_soxl_bull
+                and rsi_soxl > soxl_rsi_th
             )
             if soxl_ok and not getattr(self, "_soxl_skip_spy_rsi_filter", False):
                 soxl_ok = rsi_soxl > rsi_spy
