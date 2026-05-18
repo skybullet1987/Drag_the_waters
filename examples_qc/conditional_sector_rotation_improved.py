@@ -21,6 +21,7 @@ from datetime import datetime
 #   9) Optional per-name UVXY / SVXY consecutive-day rails (state machine).
 #  10) max_position_weight + vol_etp_max_weight execution caps.
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
+#  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
 #
 # Optional 120x research bundle (OFF by default — does not change headline ~60x maximize):
 #   research_preset=aggressive_120x  OR  aggressive_120x_research=true
@@ -204,6 +205,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self.vol_etp_max_weight = max(
             0.01, min(1.0, self._float_parameter("vol_etp_max_weight", 1.0))
+        )
+        self.margin_safety_pct = max(
+            0.50, min(1.0, self._float_parameter("margin_safety_pct", 0.98))
         )
         raw_vol_anchor = self.GetParameter("vol_anchor_ticker")
         self.vol_anchor_ticker = (
@@ -589,6 +593,62 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _safe_set_holdings(self, sym, weight, liquidate_existing=True):
+        """
+        Scale target weight to available margin before SetHoldings.
+        Prevents 'Insufficient buying power' on leveraged ETFs (TQQQ/SOXL) when w≈1.
+        """
+        w = max(0.0, min(self._gross_cap(), float(weight)))
+        if w <= 1e-9:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            return 0.0
+
+        buf = max(0.50, min(1.0, float(getattr(self, "margin_safety_pct", 0.98))))
+        w = w * buf
+
+        pv = float(self.Portfolio.TotalPortfolioValue)
+        if pv > 0:
+            try:
+                bp = float(self.Portfolio.GetBuyingPower(sym, OrderDirection.Buy))
+                if bp > 0:
+                    w = min(w, bp / pv)
+            except Exception:
+                pass
+
+        w_exec = w
+        qty = 0
+        for _ in range(16):
+            try:
+                qty = int(self.CalculateOrderQuantity(sym, w_exec))
+            except Exception:
+                qty = 0
+            if qty != 0:
+                break
+            w_exec *= 0.98
+            if w_exec < 0.05:
+                w_exec = 0.0
+                break
+
+        if w_exec <= 1e-9 or qty == 0:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            if weight > 0.1:
+                self.Debug(
+                    f"{self.Time:%Y-%m-%d} MARGIN_CLAMP {sym.Value} "
+                    f"requested={float(weight):.3f} affordable=0"
+                )
+            return 0.0
+
+        if w_exec < w * 0.995:
+            self.Debug(
+                f"{self.Time:%Y-%m-%d} MARGIN_CLAMP {sym.Value} "
+                f"requested={float(weight):.3f} exec={w_exec:.3f}"
+            )
+
+        self.SetHoldings(sym, w_exec, liquidate_existing)
+        return float(w_exec)
+
     # ── QC callbacks ─────────────────────────────────────────────────────
 
     def OnData(self, data):
@@ -693,10 +753,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._last_trade_time = self.Time
             return
 
-        self.SetHoldings(sym, w, True)
+        w_exec = self._safe_set_holdings(sym, w, True)
         self._last_target_ticker = t
         self._last_trade_time = self.Time
-        self._last_executed_weight = w
+        self._last_executed_weight = w_exec
 
     # ── Same-bar fallback (original style) ────────────────────────────────
 
@@ -749,13 +809,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         sym = self.symbols[target_ticker]
-        self.SetHoldings(sym, w, True)
+        w_exec = self._safe_set_holdings(sym, w, True)
         self._last_target_ticker = target_ticker
         self._last_trade_time = self.Time
-        self._last_executed_weight = w
+        self._last_executed_weight = w_exec
 
         self.Debug(
-            f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w:.3f} raw={raw_signal}"
+            f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w_exec:.3f} raw={raw_signal}"
         )
 
         if self._cooldown_remaining > 0:
