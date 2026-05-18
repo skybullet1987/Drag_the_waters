@@ -23,10 +23,10 @@ from datetime import datetime
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
 #  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
 #
-# ~60x default: headline_qc_default=true → maximize only (unchanged).
-# ~120x research: research_preset=target_120x  OR  target_120x_research=true
-#   v2: maximize vol + TQQQ anchor, gross~1.12, VIX-gated UVXY (low churn).
-#   target_120x_high_churn=true reproduces v1-style (more orders, often worse CAGR).
+# Default (code): headline_qc_default=true → maximize + TARGET_120X v2 (no QC params needed).
+# Plain ~60x maximize only: use_plain_maximize_only=true
+# Production live-style: research_preset=production (disables target_120x).
+# target_120x_high_churn=true reproduces v1-style (more orders, often worse CAGR).
 # Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
 # QC overrides apply only when the parameter is explicitly set in the project.
 #
@@ -41,9 +41,9 @@ from datetime import datetime
 #   aggressive_120x — legacy hot bundle (high drawdown risk).
 #   realistic / realistic_backtest — default slippage only (does not force production).
 #
-# headline_qc_default (default TRUE): when true and not in production preset, the
-# aggressive maximize bundle is used even if the QC project still has
-# maximize_backtest_equity=false saved. Set headline_qc_default=false to honor that flag.
+# headline_qc_default (default TRUE): maximize + TARGET_120X v2 in code (no manual preset).
+# use_plain_maximize_only=true → old ~60x maximize without target_120x bundle.
+# Set headline_qc_default=false to honor maximize_backtest_equity from the QC UI.
 #
 # maximize_backtest_equity is honored when headline_qc_default=false.
 #
@@ -193,9 +193,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.aggressive_120x_research = self._bool_parameter(
             "aggressive_120x_research", False
         ) or self._preset_force_aggressive_120x
-        self.target_120x_research = self._bool_parameter(
-            "target_120x_research", False
-        ) or self._preset_force_target_120x
+        self.target_120x_research = (
+            self._bool_parameter("target_120x_research", True)
+            or self._preset_force_target_120x
+        )
+        self.use_plain_maximize_only = self._bool_parameter(
+            "use_plain_maximize_only", False
+        )
         self.maximize_disable_vol_target = self._bool_parameter(
             "maximize_disable_vol_target", False
         )
@@ -300,6 +304,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.production_safe_defaults = False
             self.maximize_backtest_equity = True
         self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
+        if self.production_safe_defaults:
+            self.target_120x_research = False
+        elif self.use_plain_maximize_only:
+            self.target_120x_research = False
+        elif self.headline_qc_default and not self._preset_force_production:
+            self.target_120x_research = True
         if self.headline_qc_default and not self.production_safe_defaults:
             max_user = True
             self.maximize_backtest_equity = True
@@ -468,14 +478,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 "ACTIVE_PROFILE=target_120x (maximize + TARGET_120X bundle, "
                 f"max_gross={self.max_gross_exposure:.2f}, vol_anchor={self.vol_anchor_ticker}, "
                 f"VIX_gate={getattr(self, '_use_vix_gate', False)}). "
-                "Baseline ~60x: clear research_preset / target_120x_research."
+                "Plain maximize only: use_plain_maximize_only=true."
             )
         elif self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
                 f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
-                "For 120x research: research_preset=target_120x. "
-                "For EOD + rails: research_preset=production."
+                "TARGET_120X v2 is ON by default in code. "
+                "Plain ~60x: use_plain_maximize_only=true. EOD: research_preset=production."
             )
         elif self.production_safe_defaults:
             self.Debug(
