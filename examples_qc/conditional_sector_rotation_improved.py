@@ -1,61 +1,15 @@
 # region imports
 from AlgorithmImports import *
 from datetime import datetime
+from csr_profiles import CSRProfileMixin
 
 # endregion
 
-# =============================================================================
-# Conditional sector rotation — improved research template (QuantConnect / IB)
-#
-# Core:
-#   1) Optional EOD decision + next-session open execution (Schedule).
-#   2) Volatility targeting vs anchor ETF realized vol.
-#   3) Vol-ETP rails (consecutive UVXY/SVXY cap) + gap cooldown on large daily loss.
-#   4) Tiered drawdown scaling + hard drawdown guard.
-#   5) Optional trade_start_* / trade_end_* for walk-forward and OOS windows.
-#
-# Rebalancing / risk hygiene:
-#   6) Rebalance bands, max daily weight change, max_days_without_rebalance.
-#   7) Vol-ETP entry confirmation (N EOD bars) before UVXY/SVXY.
-#   8) Regime-based vol target (bull vs bear).
-#   9) Optional per-name UVXY / SVXY consecutive-day rails (state machine).
-#  10) max_position_weight + vol_etp_max_weight execution caps.
-#  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
-#  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
-#
-# Default (code): headline_qc_default=true → maximize + LIFT_120X (bull sleeve, no vol-scale in bull).
-# Plain ~60x anchor (R0): use_plain_maximize_only=true
-# Preset: research_preset=bull_sleeve_120x (same as LIFT default path).
-# Legacy target_120x bundle: target_120x_research=true (often ~30x / 2k orders — avoid).
-# Production: research_preset=production
-# Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
-# QC overrides apply only when the parameter is explicitly set in the project.
-#
-# Regime / signal extensions:
-#   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
-#   bull_tqqq_momentum_days: require positive TQQQ N-day return before SOXL/TQQQ.
-#
-# Research presets (parameter research_preset):
-#   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
-#   max_equity / maximize — same as maximize_backtest_equity=true.
-#   target_120x / target_120 — maximize + TARGET_120X bundle (~120x research).
-#   aggressive_120x — legacy hot bundle (high drawdown risk).
-#   realistic / realistic_backtest — default slippage only (does not force production).
-#
-# headline_qc_default (default TRUE): maximize + TARGET_120X v2 in code (no manual preset).
-# use_plain_maximize_only=true → old ~60x maximize without target_120x bundle.
-# Set headline_qc_default=false to honor maximize_backtest_equity from the QC UI.
-#
-# maximize_backtest_equity is honored when headline_qc_default=false.
-#
-# Benchmark defaults to TQQQ; unknown tickers are appended to the universe.
-# Baseline: benchmark_tqqq_buy_hold.py (benchmark defaults QQQ for 100% TQQQ book).
-#
-# Educational / research only. Leveraged and inverse ETFs can gap and decay.
-# =============================================================================
+# Conditional sector rotation (QuantConnect / IB). Deploy main.py + csr_profiles.py (<64k each).
+# Default: maximize + LIFT_120X (bull sleeve, vol off in bull). Plain ~60x: use_plain_maximize_only=true.
 
 
-class ConditionalSectorRotationImproved(QCAlgorithm):
+class ConditionalSectorRotationImproved(CSRProfileMixin, QCAlgorithm):
 
     def Initialize(self):
         sy = self._int_parameter("start_year", 2020)
@@ -354,13 +308,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         elif self.maximize_backtest_equity:
             self._apply_maximize_backtest_equity_profile()
 
-        if (self.aggressive_120x_research or self._preset_force_aggressive_120x) and not (
-            self.target_120x_research
-        ):
-            self._apply_aggressive_120x_research_bundle()
-        if self.target_120x_research:
-            self._apply_target_120x_research_bundle()
-        elif self.lift_120x_research:
+        if self.target_120x_research or self.aggressive_120x_research:
+            self.Debug("DEPRECATED preset/bundle -> LIFT_120X")
+            self.lift_120x_research = True
+        if self.lift_120x_research:
             self._apply_lift_120x_research_bundle()
 
         skip_reload = self.ignore_qc_parameter_overrides and self.lift_120x_research
@@ -521,11 +472,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 f"{bs}, vol_in_bull={vb}, bull_gross={getattr(self, '_bull_gross_cap', 1):.2f}, "
                 f"min_hold={self.min_hold_days}). Plain ~60x: use_plain_maximize_only=true."
             )
-        elif getattr(self, "target_120x_research", False):
-            self.Debug(
-                "ACTIVE_PROFILE=target_120x (legacy bundle — prefer lift_120x). "
-                f"max_gross={self.max_gross_exposure:.2f}, vol_anchor={self.vol_anchor_ticker}."
-            )
         elif self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
@@ -543,278 +489,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 "ACTIVE_PROFILE=custom (maximize off, headline_qc_default false). "
                 "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
             )
-
-    def _apply_production_safe_profile(self):
-        self.Debug(
-            "PRODUCTION_SAFE profile: EOD execution, rebalance bands, vol-ETP rails, "
-            "drawdown guard — baseline for live-style IB research."
-        )
-        self.maximize_backtest_equity = False
-        self.use_eod_next_bar_execution = True
-        self.use_rebalance_bands = True
-        self.min_weight_change_to_trade = max(self.min_weight_change_to_trade, 0.02)
-        if self.max_daily_weight_change <= 0.0:
-            self.max_daily_weight_change = 0.15
-        if self.max_days_without_rebalance <= 0:
-            self.max_days_without_rebalance = 5
-        self.vol_etp_confirm_days = max(self.vol_etp_confirm_days, 1)
-        if self.max_consecutive_vol_etp_days <= 0:
-            self.max_consecutive_vol_etp_days = 5
-        self.gap_cooldown_days = max(self.gap_cooldown_days, 3)
-        self.use_drawdown_guard = True
-        self.use_tiered_drawdown = True
-        self.use_vol_targeting = True
-        self.use_regime_vol_target = True
-
-    def _apply_maximize_backtest_equity_profile(self):
-        """
-        In-sample equity maximization bundle. Expect deeper drawdowns, gap risk,
-        and huge divergence vs live fills. Do not deploy this profile to IB.
-        """
-        self.Debug(
-            "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
-            "looser bull UVXY — NOT for live. This is the default QC profile unless "
-            "maximize_backtest_equity=false or research_preset=production."
-        )
-        self.use_eod_next_bar_execution = False
-        self.use_rebalance_bands = False
-        self.min_weight_change_to_trade = 0.0
-        self.max_daily_weight_change = 0.0
-        self.max_days_without_rebalance = 0
-        self.vol_etp_confirm_days = 0
-        self.max_consecutive_vol_etp_days = 0
-        self.gap_cooldown_days = 0
-        self.use_drawdown_guard = False
-        self._drawdown_guard_active = False
-        self.use_tiered_drawdown = False
-        self.use_vol_targeting = True
-        self.use_regime_vol_target = True
-        self.target_ann_vol = 0.58
-        self.target_ann_vol_bull = 0.68
-        self.target_ann_vol_bear = 0.48
-        self.min_hold_days = 0
-        self.th_rsi_qqq_bull_uvxy = 90.0
-        self.th_rsi_spy_bull_uvxy = 89.0
-        self.th_rsi_uvxy_elevated = 82.0
-        self.th_rsi_uvxy_extreme = 93.0
-        self.th_rsi_soxl_bull = 34.0
-        if self.maximize_include_svxy:
-            self.use_svxy_calm = True
-        if self.maximize_disable_vol_target:
-            self.use_vol_targeting = False
-
-    def _apply_aggressive_120x_research_bundle(self):
-        """
-        Opt-in only. Hot gross, vol targets, and UVXY/SOXL logic for 120x experiments.
-        Default maximize (~60x) is unchanged when this bundle is not enabled.
-        """
-        self.Debug(
-            "AGGRESSIVE_120X bundle: max_gross=1.35, hotter vol targets, stricter bull UVXY. "
-            "High drawdown risk — not the default maximize profile."
-        )
-        self.target_ann_vol = 0.75
-        self.target_ann_vol_bull = 0.85
-        self.target_ann_vol_bear = 0.55
-        self.max_gross_exposure = max(
-            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.35))
-        )
-        self.max_position_weight = max(
-            0.01,
-            min(
-                self.max_gross_exposure,
-                self._float_parameter("max_position_weight", self.max_gross_exposure),
-            ),
-        )
-        self.th_rsi_qqq_bull_uvxy = 97.0
-        self.th_rsi_spy_bull_uvxy = 96.0
-        self.th_rsi_soxl_bull = 26.0
-        self.bull_uvxy_require_both = True
-        self._soxl_skip_spy_rsi_filter = True
-        if self.maximize_include_svxy:
-            self.use_svxy_calm = True
-        if self.maximize_disable_vol_target:
-            self.use_vol_targeting = False
-
-    def _apply_target_120x_research_bundle(self):
-        """
-        ~120x research: maximize core + small deltas only (v2 — less churn than v1).
-
-        v1 over-traded (SVXY calm, QQQ vol anchor, SOXL outperform) → ~30x / 1900 orders.
-        v2 keeps maximize vol/anchor, skips SVXY calm, modest gross, VIX-gated bull UVXY.
-        """
-        self.Debug(
-            "TARGET_120X v2: maximize vol/anchor + max_gross~1.12, VIX-gated bull UVXY (OR 93/92), "
-            "no SVXY calm / no SOXL outperform (low churn). Optional: target_120x_high_churn=true."
-        )
-        self.maximize_backtest_equity = True
-        # Same vol targeting as headline ~60x maximize (do not down-shift beta)
-        self.target_ann_vol = 0.58
-        self.target_ann_vol_bull = 0.68
-        self.target_ann_vol_bear = 0.48
-        self.max_gross_exposure = max(
-            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.12))
-        )
-        self.max_position_weight = max(
-            0.01,
-            min(
-                self.max_gross_exposure,
-                self._float_parameter("max_position_weight", self.max_gross_exposure),
-            ),
-        )
-        if not self._parameter_was_set("vol_lookback"):
-            self.vol_lookback = 20
-        # TQQQ anchor = same as ~60x (QQQ anchor caused vol-scaler churn)
-        if not self._parameter_was_set("vol_anchor_ticker"):
-            self.vol_anchor_ticker = "TQQQ"
-        self.th_rsi_qqq_bull_uvxy = 93.0
-        self.th_rsi_spy_bull_uvxy = 92.0
-        self.th_rsi_soxl_bull = 32.0
-        self.bull_uvxy_require_both = False
-        self.disable_bull_uvxy = False
-        self._soxl_skip_spy_rsi_filter = False
-        self._use_vix_gate = True
-        self._prefer_soxl_on_outperform = False
-        self.vix_min_bull_uvxy = max(
-            10.0, self._float_parameter("vix_min_bull_uvxy", 20.0)
-        )
-        # Do not force SVXY calm — major order-count inflation in v1 backtest
-        self.use_svxy_calm = self._bool_parameter("target_120x_use_svxy_calm", False)
-        if not self._parameter_was_set("margin_safety_pct"):
-            self.margin_safety_pct = 0.98
-        if self.maximize_disable_vol_target:
-            self.use_vol_targeting = False
-        if self._bool_parameter("target_120x_high_churn", False):
-            self.Debug("TARGET_120X: high_churn overrides enabled (v1-style experiment).")
-            self.vol_lookback = max(5, self._int_parameter("vol_lookback", 12))
-            if not self._parameter_was_set("vol_anchor_ticker"):
-                self.vol_anchor_ticker = "QQQ"
-            if not self._parameter_was_set("regime_mode"):
-                self.regime_mode = "spy"
-            if not self._parameter_was_set("risk_off_ticker"):
-                self.risk_off_ticker = "TQQQ"
-            self.target_ann_vol = 0.62
-            self.target_ann_vol_bull = 0.72
-            self.target_ann_vol_bear = 0.50
-            self.max_gross_exposure = max(
-                1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.22))
-            )
-            self._prefer_soxl_on_outperform = True
-            self.use_svxy_calm = True
-            self.maximize_include_svxy = True
-            self.th_rsi_qqq_bull_uvxy = 95.0
-            self.th_rsi_spy_bull_uvxy = 94.0
-            self.th_rsi_soxl_bull = 30.0
-
-    def _apply_lift_120x_research_bundle(self):
-        """
-        Plan path: maximize core + bull sleeve (TQQQ/SOXL only in bull) + no vol scaler in bull.
-        """
-        self.Debug(
-            "LIFT_120X: bull_sleeve on, vol_target_off_in_bull on, bull_gross~1.15, "
-            "min_hold=2, SOXL RSI 32, ignore stale QC overrides."
-        )
-        self.maximize_backtest_equity = True
-        self._bull_sleeve_mode = True
-        self._vol_target_off_in_bull = True
-        self.disable_bull_uvxy = True
-        self.use_svxy_calm = False
-        self.maximize_include_svxy = False
-        self._use_vix_gate = False
-        self._prefer_soxl_on_outperform = False
-        self.bull_uvxy_require_both = False
-        self._bull_gross_cap = max(
-            1.0, min(2.0, self._float_parameter("bull_gross_cap", 1.15))
-        )
-        self.max_gross_exposure = max(
-            1.0,
-            min(2.0, self._float_parameter("max_gross_exposure", self._bull_gross_cap)),
-        )
-        self.max_position_weight = max(
-            0.01,
-            min(
-                self.max_gross_exposure,
-                self._float_parameter("max_position_weight", self.max_gross_exposure),
-            ),
-        )
-        self.min_hold_days = max(0, self._int_parameter("min_hold_days", 2))
-        self.th_rsi_soxl_bull = 32.0
-        if not self._parameter_was_set("margin_safety_pct"):
-            self.margin_safety_pct = 0.99
-
-    def _parameter_was_set(self, name):
-        raw = self.GetParameter(name)
-        return raw is not None and str(raw).strip() != ""
-
-    def _reload_user_overrides_after_profile(self):
-        """Apply QC parameters only when explicitly set in the project."""
-        if self._parameter_was_set("max_gross_exposure"):
-            self.max_gross_exposure = max(
-                1.0,
-                min(2.0, self._float_parameter("max_gross_exposure", 1.0)),
-            )
-        if self._parameter_was_set("max_position_weight"):
-            self.max_position_weight = max(
-                0.01,
-                min(
-                    self.max_gross_exposure,
-                    self._float_parameter("max_position_weight", 1.0),
-                ),
-            )
-        if self._parameter_was_set("target_ann_vol"):
-            self.target_ann_vol = max(
-                0.01, self._float_parameter("target_ann_vol", self.target_ann_vol)
-            )
-        if self._parameter_was_set("target_ann_vol_bull"):
-            self.target_ann_vol_bull = max(
-                0.01,
-                self._float_parameter("target_ann_vol_bull", self.target_ann_vol_bull),
-            )
-        if self._parameter_was_set("target_ann_vol_bear"):
-            self.target_ann_vol_bear = max(
-                0.01,
-                self._float_parameter("target_ann_vol_bear", self.target_ann_vol_bear),
-            )
-        if self._parameter_was_set("th_rsi_qqq_bull_uvxy"):
-            self.th_rsi_qqq_bull_uvxy = self._float_parameter(
-                "th_rsi_qqq_bull_uvxy", self.th_rsi_qqq_bull_uvxy
-            )
-        if self._parameter_was_set("th_rsi_spy_bull_uvxy"):
-            self.th_rsi_spy_bull_uvxy = self._float_parameter(
-                "th_rsi_spy_bull_uvxy", self.th_rsi_spy_bull_uvxy
-            )
-        if self._parameter_was_set("th_rsi_soxl_bull"):
-            self.th_rsi_soxl_bull = self._float_parameter(
-                "th_rsi_soxl_bull", self.th_rsi_soxl_bull
-            )
-        if self._parameter_was_set("disable_bull_uvxy"):
-            self.disable_bull_uvxy = self._bool_parameter("disable_bull_uvxy", False)
-        if self._parameter_was_set("bull_uvxy_require_both"):
-            self.bull_uvxy_require_both = self._bool_parameter(
-                "bull_uvxy_require_both", False
-            )
-        if self._parameter_was_set("maximize_disable_vol_target"):
-            if self._bool_parameter("maximize_disable_vol_target", False):
-                self.use_vol_targeting = False
-        if self._parameter_was_set("use_vol_targeting"):
-            self.use_vol_targeting = self._bool_parameter(
-                "use_vol_targeting", self.use_vol_targeting
-            )
-        if self._parameter_was_set("vix_min_bull_uvxy"):
-            self.vix_min_bull_uvxy = max(
-                10.0, self._float_parameter("vix_min_bull_uvxy", self.vix_min_bull_uvxy)
-            )
-        if self._parameter_was_set("soxl_outperform_days"):
-            self.soxl_outperform_days = max(
-                2, self._int_parameter("soxl_outperform_days", self.soxl_outperform_days)
-            )
-        if self._parameter_was_set("vol_lookback"):
-            self.vol_lookback = max(
-                5, self._int_parameter("vol_lookback", self.vol_lookback)
-            )
-        if self._parameter_was_set("vol_anchor_ticker"):
-            raw = self.GetParameter("vol_anchor_ticker")
-            if raw is not None and str(raw).strip() != "":
-                self.vol_anchor_ticker = str(raw).strip().upper()
 
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
