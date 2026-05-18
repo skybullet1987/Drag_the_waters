@@ -23,10 +23,10 @@ from datetime import datetime
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
 #  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
 #
-# Default (code): headline_qc_default=true → maximize + TARGET_120X v2 (no QC params needed).
-# Plain ~60x maximize only: use_plain_maximize_only=true
-# Production live-style: research_preset=production (disables target_120x).
-# target_120x_high_churn=true reproduces v1-style (more orders, often worse CAGR).
+# Default (code): headline_qc_default=true → maximize + LIFT_120X (minimal deltas for ~120x hunt).
+# Plain ~60x only: use_plain_maximize_only=true
+# Legacy target_120x bundle: target_120x_research=true (often ~30x / 2k orders — avoid).
+# Production: research_preset=production
 # Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
 # QC overrides apply only when the parameter is explicitly set in the project.
 #
@@ -194,11 +194,19 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "aggressive_120x_research", False
         ) or self._preset_force_aggressive_120x
         self.target_120x_research = (
-            self._bool_parameter("target_120x_research", True)
+            self._bool_parameter("target_120x_research", False)
             or self._preset_force_target_120x
         )
+        self.lift_120x_research = self._bool_parameter("lift_120x_research", True)
         self.use_plain_maximize_only = self._bool_parameter(
             "use_plain_maximize_only", False
+        )
+        self.ignore_qc_parameter_overrides = self._bool_parameter(
+            "ignore_qc_parameter_overrides", True
+        )
+        self.min_rebalance_weight_delta = max(
+            0.0,
+            min(0.25, self._float_parameter("min_rebalance_weight_delta", 0.03)),
         )
         self.maximize_disable_vol_target = self._bool_parameter(
             "maximize_disable_vol_target", False
@@ -303,13 +311,19 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if self._preset_force_target_120x:
             self.production_safe_defaults = False
             self.maximize_backtest_equity = True
+            self.lift_120x_research = False
+            self.target_120x_research = True
         self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
         if self.production_safe_defaults:
             self.target_120x_research = False
+            self.lift_120x_research = False
         elif self.use_plain_maximize_only:
             self.target_120x_research = False
+            self.lift_120x_research = False
         elif self.headline_qc_default and not self._preset_force_production:
-            self.target_120x_research = True
+            self.lift_120x_research = not self.target_120x_research
+            if self.lift_120x_research:
+                self.target_120x_research = False
         if self.headline_qc_default and not self.production_safe_defaults:
             max_user = True
             self.maximize_backtest_equity = True
@@ -334,8 +348,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._apply_aggressive_120x_research_bundle()
         if self.target_120x_research:
             self._apply_target_120x_research_bundle()
+        elif self.lift_120x_research:
+            self._apply_lift_120x_research_bundle()
 
-        if self.maximize_backtest_equity or self.production_safe_defaults:
+        skip_reload = self.ignore_qc_parameter_overrides and self.lift_120x_research
+        if (self.maximize_backtest_equity or self.production_safe_defaults) and not skip_reload:
             self._reload_user_overrides_after_profile()
 
         if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
@@ -473,18 +490,22 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
-        if getattr(self, "target_120x_research", False):
+        if getattr(self, "lift_120x_research", False):
             self.Debug(
-                "ACTIVE_PROFILE=target_120x (maximize + TARGET_120X bundle, "
-                f"max_gross={self.max_gross_exposure:.2f}, vol_anchor={self.vol_anchor_ticker}, "
-                f"VIX_gate={getattr(self, '_use_vix_gate', False)}). "
-                "Plain maximize only: use_plain_maximize_only=true."
+                "ACTIVE_PROFILE=lift_120x (maximize + LIFT_120X: no bull UVXY, gross~1.15, "
+                f"min_hold={self.min_hold_days}, max_gross={self.max_gross_exposure:.2f}). "
+                "Plain ~60x: use_plain_maximize_only=true."
+            )
+        elif getattr(self, "target_120x_research", False):
+            self.Debug(
+                "ACTIVE_PROFILE=target_120x (legacy bundle — prefer lift_120x). "
+                f"max_gross={self.max_gross_exposure:.2f}, vol_anchor={self.vol_anchor_ticker}."
             )
         elif self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
                 f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
-                "TARGET_120X v2 is ON by default in code. "
+                "LIFT_120X is the default 120x path in code. "
                 "Plain ~60x: use_plain_maximize_only=true. EOD: research_preset=production."
             )
         elif self.production_safe_defaults:
@@ -659,6 +680,37 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.th_rsi_spy_bull_uvxy = 94.0
             self.th_rsi_soxl_bull = 30.0
 
+    def _apply_lift_120x_research_bundle(self):
+        """
+        Minimal ~120x lift on top of headline maximize (~60x). Avoids target_120x churn
+        (SVXY / QQQ anchor / VIX gate) that produced ~30x and 1900+ orders.
+        """
+        self.Debug(
+            "LIFT_120X: maximize + disable bull UVXY, max_gross~1.15, min_hold_days=2, "
+            "SOXL RSI 32, margin_safety 0.99, ignore stale QC overrides."
+        )
+        self.maximize_backtest_equity = True
+        self.disable_bull_uvxy = True
+        self.use_svxy_calm = False
+        self.maximize_include_svxy = False
+        self._use_vix_gate = False
+        self._prefer_soxl_on_outperform = False
+        self.bull_uvxy_require_both = False
+        self.max_gross_exposure = max(
+            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.15))
+        )
+        self.max_position_weight = max(
+            0.01,
+            min(
+                self.max_gross_exposure,
+                self._float_parameter("max_position_weight", self.max_gross_exposure),
+            ),
+        )
+        self.min_hold_days = max(0, self._int_parameter("min_hold_days", 2))
+        self.th_rsi_soxl_bull = 32.0
+        if not self._parameter_was_set("margin_safety_pct"):
+            self.margin_safety_pct = 0.99
+
     def _parameter_was_set(self, name):
         raw = self.GetParameter(name)
         return raw is not None and str(raw).strip() != ""
@@ -737,16 +789,31 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _portfolio_weight_in_symbol(self, sym):
+        pv = float(self.Portfolio.TotalPortfolioValue)
+        if pv <= 0:
+            return 0.0
+        h = self.Portfolio[sym]
+        if not h.Invested:
+            return 0.0
+        return abs(float(h.HoldingsValue)) / pv
+
     def _safe_set_holdings(self, sym, weight, liquidate_existing=True):
         """
         Scale target weight to available margin before SetHoldings.
         Prevents 'Insufficient buying power' on leveraged ETFs (TQQQ/SOXL) when w≈1.
+        Skips tiny same-symbol weight changes to avoid vol-scaler churn (~2k orders).
         """
         w = max(0.0, min(self._gross_cap(), float(weight)))
         if w <= 1e-9:
             if liquidate_existing:
                 self.Liquidate(sym)
             return 0.0
+
+        cur_w = self._portfolio_weight_in_symbol(sym)
+        band = float(getattr(self, "min_rebalance_weight_delta", 0.03))
+        if band > 0 and cur_w > 1e-9 and abs(w - cur_w) < band:
+            return float(cur_w)
 
         buf = max(0.50, min(1.0, float(getattr(self, "margin_safety_pct", 0.98))))
         w = w * buf
