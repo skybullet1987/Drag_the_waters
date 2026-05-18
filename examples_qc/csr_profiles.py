@@ -91,7 +91,10 @@ def apply_lift_120x_research_bundle(algo):
     algo.min_hold_days = max(0, algo._int_parameter("min_hold_days", 2))
     algo.th_rsi_soxl_bull = 32.0
     if not parameter_was_set(algo, "margin_safety_pct"):
-        algo.margin_safety_pct = 0.99
+        algo.margin_safety_pct = 0.98
+    algo.min_rebalance_weight_delta = max(
+        0.0, min(0.25, algo._float_parameter("min_rebalance_weight_delta", 0.03))
+    )
 
 
 def reload_user_overrides_after_profile(algo):

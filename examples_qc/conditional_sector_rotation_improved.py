@@ -6,7 +6,7 @@ import csr_profiles as csr
 # endregion
 
 # Conditional sector rotation (QuantConnect / IB). Deploy main.py + csr_profiles.py (<64k each).
-# Default: maximize + LIFT_120X (bull sleeve, vol off in bull). Plain ~60x: use_plain_maximize_only=true.
+# Default: headline maximize only (~60x). LIFT_120x: lift_120x_research=true or research_preset=bull_sleeve_120x.
 
 
 class ConditionalSectorRotationImproved(QCAlgorithm):
@@ -157,7 +157,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._bool_parameter("target_120x_research", False)
             or self._preset_force_target_120x
         )
-        self.lift_120x_research = self._bool_parameter("lift_120x_research", True)
+        self.lift_120x_research = (
+            self._bool_parameter("lift_120x_research", False)
+            or self._preset_force_bull_sleeve
+        )
         self.use_plain_maximize_only = self._bool_parameter(
             "use_plain_maximize_only", False
         )
@@ -166,7 +169,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self.min_rebalance_weight_delta = max(
             0.0,
-            min(0.25, self._float_parameter("min_rebalance_weight_delta", 0.03)),
+            min(0.25, self._float_parameter("min_rebalance_weight_delta", 0.0)),
         )
         self.maximize_disable_vol_target = self._bool_parameter(
             "maximize_disable_vol_target", False
@@ -205,7 +208,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             0.01, min(1.0, self._float_parameter("vol_etp_max_weight", 1.0))
         )
         self.margin_safety_pct = max(
-            0.50, min(1.0, self._float_parameter("margin_safety_pct", 0.98))
+            0.50, min(1.0, self._float_parameter("margin_safety_pct", 1.0))
         )
         raw_vol_anchor = self.GetParameter("vol_anchor_ticker")
         self.vol_anchor_ticker = (
@@ -283,13 +286,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         elif self.use_plain_maximize_only:
             self.target_120x_research = False
             self.lift_120x_research = False
-        elif self._preset_force_bull_sleeve:
-            self.lift_120x_research = True
-            self.target_120x_research = False
-        elif self.headline_qc_default and not self._preset_force_production:
-            self.lift_120x_research = not self.target_120x_research
-            if self.lift_120x_research:
-                self.target_120x_research = False
         if self.headline_qc_default and not self.production_safe_defaults:
             max_user = True
             self.maximize_backtest_equity = True
@@ -468,16 +464,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             bs = "on" if getattr(self, "_bull_sleeve_mode", False) else "off"
             vb = "off" if getattr(self, "_vol_target_off_in_bull", False) else "on"
             self.Debug(
-                "ACTIVE_PROFILE=lift_120x (maximize + LIFT_120X: bull_sleeve="
+                "ACTIVE_PROFILE=lift_120x (maximize + LIFT: bull_sleeve="
                 f"{bs}, vol_in_bull={vb}, bull_gross={getattr(self, '_bull_gross_cap', 1):.2f}, "
-                f"min_hold={self.min_hold_days}). Plain ~60x: use_plain_maximize_only=true."
+                f"min_hold={self.min_hold_days})."
             )
         elif self.maximize_backtest_equity:
             self.Debug(
-                "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
-                f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
-                "LIFT_120X is the default 120x path in code. "
-                "Plain ~60x: use_plain_maximize_only=true. EOD: research_preset=production."
+                "ACTIVE_PROFILE=maximize_backtest_equity (~60x baseline; same-bar, "
+                f"rails off, max_gross={self.max_gross_exposure:.2f}). "
+                "For LIFT/bull_sleeve: lift_120x_research=true. EOD: research_preset=production."
             )
         elif self.production_safe_defaults:
             self.Debug(
