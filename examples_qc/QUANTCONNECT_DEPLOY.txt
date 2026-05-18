@@ -22,10 +22,16 @@ CURRENT SIZES (approx): main ~52k, csr_profiles ~6.5k — well under 64k limit.
 
 DEFAULT BACKTEST (~60x baseline) — USE THIS FIRST
 --------------------------------------------------------------------------------
-Upload with NO parameters (or explicitly clear stale QC project parameters).
+Upload both .py files only. Code ignores the QC parameter panel by default.
+
+At top of main.py (hardcoded):
+  USE_QC_UI_PARAMETERS = False
+  BACKTEST_PROFILE = "maximize_60x"
 
 Expected log lines at start:
-  ACTIVE_PROFILE=maximize_backtest_equity (~60x baseline; same-bar, rails off, ...)
+  HARDCODED_BACKTEST: 2020-01-01 .. 2026-05-17, $100k, profile='maximize_60x'
+  ACTIVE_PROFILE=hardcoded 'maximize_60x' (USE_QC_UI_PARAMETERS=False; QC panel ignored)
+  MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, vol targets 0.58/0.68/0.48.
   EFFECTIVE_CONFIG ... lift_120x=False bull_sleeve=False ...
 
 Expected ballpark (2020-01-01 start, $100k, run_to_present or end 2026):

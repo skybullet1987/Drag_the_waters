@@ -6,32 +6,50 @@ import csr_profiles as csr
 # endregion
 
 # Conditional sector rotation (QuantConnect / IB). Deploy main.py + csr_profiles.py (<64k each).
-# Default: headline maximize only (~60x). LIFT_120x: lift_120x_research=true or research_preset=bull_sleeve_120x.
+#
+# UPLOAD BOTH FILES AND RUN — no QuantConnect parameter panel required.
+# Change BACKTEST_PROFILE in code only for experiments (production | lift_120x).
+
+USE_QC_UI_PARAMETERS = False
+BACKTEST_PROFILE = "maximize_60x"
 
 
 class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def Initialize(self):
-        sy = self._int_parameter("start_year", 2020)
-        sm = self._int_parameter("start_month", 1)
-        sd = self._int_parameter("start_day", 1)
-        self.SetStartDate(sy, sm, sd)
+        self._use_qc_ui_parameters = USE_QC_UI_PARAMETERS
 
-        if not self._bool_parameter("run_to_present", False):
-            ey = self._int_parameter("end_year", 2026)
-            em = self._int_parameter("end_month", 5)
-            ed = self._int_parameter("end_day", 17)
-            self.SetEndDate(ey, em, ed)
+        if not self._use_qc_ui_parameters:
+            self.SetStartDate(2020, 1, 1)
+            self.SetEndDate(2026, 5, 17)
+            self.SetCash(100000)
+            self.Debug(
+                "HARDCODED_BACKTEST: 2020-01-01 .. 2026-05-17, $100k, profile="
+                f"{BACKTEST_PROFILE!r} (QC parameter panel ignored)"
+            )
+        else:
+            sy = self._int_parameter("start_year", 2020)
+            sm = self._int_parameter("start_month", 1)
+            sd = self._int_parameter("start_day", 1)
+            self.SetStartDate(sy, sm, sd)
 
-        cash = max(1000, self._int_parameter("starting_cash", 100000))
-        self.SetCash(cash)
+            if not self._bool_parameter("run_to_present", False):
+                ey = self._int_parameter("end_year", 2026)
+                em = self._int_parameter("end_month", 5)
+                ed = self._int_parameter("end_day", 17)
+                self.SetEndDate(ey, em, ed)
+
+            cash = max(1000, self._int_parameter("starting_cash", 100000))
+            self.SetCash(cash)
 
         self.SetBrokerageModel(
             BrokerageName.InteractiveBrokersBrokerage,
             AccountType.Margin,
         )
 
-        preset = str(self.GetParameter("research_preset") or "").strip().lower()
+        preset = ""
+        if self._use_qc_ui_parameters:
+            preset = str(self.GetParameter("research_preset") or "").strip().lower()
         self._research_preset = preset
         self._preset_force_production = preset in (
             "production",
@@ -107,7 +125,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.regime_qqq_sma_period = max(
             2, self._int_parameter("regime_qqq_sma_period", 50)
         )
-        raw_regime = self.GetParameter("regime_mode")
+        raw_regime = self._raw_parameter("regime_mode")
         rm = "" if raw_regime is None else str(raw_regime).strip().lower()
         if rm in ("spy_and_qqq", "spy+qqq", "dual", "both"):
             self.regime_mode = "spy_and_qqq"
@@ -210,7 +228,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.margin_safety_pct = max(
             0.50, min(1.0, self._float_parameter("margin_safety_pct", 1.0))
         )
-        raw_vol_anchor = self.GetParameter("vol_anchor_ticker")
+        raw_vol_anchor = self._raw_parameter("vol_anchor_ticker")
         self.vol_anchor_ticker = (
             "TQQQ"
             if raw_vol_anchor is None or str(raw_vol_anchor).strip() == ""
@@ -246,7 +264,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.tier2_drawdown = max(0.0, self._float_parameter("tier2_drawdown", 0.25))
         self.tier2_mult = max(0.0, min(1.0, self._float_parameter("tier2_mult", 0.70)))
 
-        raw_risk_off = self.GetParameter("risk_off_ticker")
+        raw_risk_off = self._raw_parameter("risk_off_ticker")
         self.risk_off_ticker = (
             "BSV"
             if raw_risk_off is None or str(raw_risk_off).strip() == ""
@@ -254,65 +272,67 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
 
         # ── Walk-forward style: begin trading after this date ───────────
-        tsy = self._int_parameter("trade_start_year", sy)
-        tsm = self._int_parameter("trade_start_month", sm)
-        tsd = self._int_parameter("trade_start_day", sd)
-        self.trade_start = datetime(tsy, tsm, tsd)
-
-        tey = self._int_parameter("trade_end_year", 0)
-        if tey > 0:
-            tem = max(1, min(12, self._int_parameter("trade_end_month", 12)))
-            ted = max(1, min(31, self._int_parameter("trade_end_day", 31)))
-            self.trade_end = datetime(tey, tem, ted)
-            if self.trade_end.date() < self.trade_start.date():
-                self.Debug("trade_end before trade_start — ignoring trade_end")
-                self.trade_end = None
-        else:
+        if not self._use_qc_ui_parameters:
+            self.trade_start = datetime(2020, 1, 1)
             self.trade_end = None
-
-        prod_user = self._bool_parameter("production_safe_defaults", False)
-        self.production_safe_defaults = bool(
-            prod_user or self._preset_force_production
-        )
-        if self._preset_force_target_120x:
-            self.production_safe_defaults = False
-            self.maximize_backtest_equity = True
-            self.lift_120x_research = False
-            self.target_120x_research = True
-        self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
-        if self.production_safe_defaults:
-            self.target_120x_research = False
-            self.lift_120x_research = False
-        elif self.use_plain_maximize_only:
-            self.target_120x_research = False
-            self.lift_120x_research = False
-        if self.headline_qc_default and not self.production_safe_defaults:
-            max_user = True
-            self.maximize_backtest_equity = True
         else:
-            max_user = self._bool_parameter("maximize_backtest_equity", True)
-            self.maximize_backtest_equity = bool(
-                (max_user or self._preset_force_max_equity)
-                and not self.production_safe_defaults
+            tsy = self._int_parameter("trade_start_year", sy)
+            tsm = self._int_parameter("trade_start_month", sm)
+            tsd = self._int_parameter("trade_start_day", sd)
+            self.trade_start = datetime(tsy, tsm, tsd)
+
+            tey = self._int_parameter("trade_end_year", 0)
+            if tey > 0:
+                tem = max(1, min(12, self._int_parameter("trade_end_month", 12)))
+                ted = max(1, min(31, self._int_parameter("trade_end_day", 31)))
+                self.trade_end = datetime(tey, tem, ted)
+                if self.trade_end.date() < self.trade_start.date():
+                    self.Debug("trade_end before trade_start — ignoring trade_end")
+                    self.trade_end = None
+            else:
+                self.trade_end = None
+
+        if not self._use_qc_ui_parameters:
+            self._apply_hardcoded_profile(BACKTEST_PROFILE)
+        else:
+            prod_user = self._bool_parameter("production_safe_defaults", False)
+            self.production_safe_defaults = bool(
+                prod_user or self._preset_force_production
             )
-        self.maximize_include_svxy = self._bool_parameter(
-            "maximize_include_svxy", False
-        )
+            if self._preset_force_target_120x:
+                self.production_safe_defaults = False
+                self.maximize_backtest_equity = True
+                self.lift_120x_research = False
+                self.target_120x_research = True
+            self.headline_qc_default = self._bool_parameter("headline_qc_default", True)
+            if self.production_safe_defaults:
+                self.target_120x_research = False
+                self.lift_120x_research = False
+            elif self.use_plain_maximize_only:
+                self.target_120x_research = False
+                self.lift_120x_research = False
+            if self.headline_qc_default and not self.production_safe_defaults:
+                max_user = True
+                self.maximize_backtest_equity = True
+            else:
+                max_user = self._bool_parameter("maximize_backtest_equity", True)
+                self.maximize_backtest_equity = bool(
+                    (max_user or self._preset_force_max_equity)
+                    and not self.production_safe_defaults
+                )
+            self.maximize_include_svxy = self._bool_parameter(
+                "maximize_include_svxy", False
+            )
+            self._apply_selected_profiles_from_flags()
 
-        if self.production_safe_defaults:
-            csr.apply_production_safe_profile(self)
-        elif self.maximize_backtest_equity:
-            csr.apply_maximize_backtest_equity_profile(self)
-
-        if self.target_120x_research or self.aggressive_120x_research:
-            self.Debug("DEPRECATED preset/bundle -> LIFT_120X")
-            self.lift_120x_research = True
-        if self.lift_120x_research:
-            csr.apply_lift_120x_research_bundle(self)
-
-        skip_reload = self.ignore_qc_parameter_overrides and self.lift_120x_research
-        if (self.maximize_backtest_equity or self.production_safe_defaults) and not skip_reload:
-            csr.reload_user_overrides_after_profile(self)
+        if self._use_qc_ui_parameters:
+            skip_reload = (
+                self.ignore_qc_parameter_overrides and self.lift_120x_research
+            )
+            if (
+                self.maximize_backtest_equity or self.production_safe_defaults
+            ) and not skip_reload:
+                csr.reload_user_overrides_after_profile(self)
 
         if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
             self._equity_slippage_dollars = 0.001
@@ -348,7 +368,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 f"risk_off_ticker {self.risk_off_ticker!r} not in universe {self.tickers}"
             )
 
-        raw_bench = self.GetParameter("benchmark_ticker")
+        raw_bench = self._raw_parameter("benchmark_ticker")
         _bs = "" if raw_bench is None else str(raw_bench).strip().upper()
         self.benchmark_ticker = _bs if _bs else "TQQQ"
         if self.benchmark_ticker not in self.tickers:
@@ -452,14 +472,20 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         security.SetSlippageModel(ConstantSlippageModel(self._equity_slippage_dollars))
 
     def _log_active_research_profile(self):
-        raw_max = self.GetParameter("maximize_backtest_equity")
-        raw_prod = self.GetParameter("production_safe_defaults")
-        raw_head = self.GetParameter("headline_qc_default")
-        self.Debug(
-            "QC_PARAMS_RAW "
-            f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
-            f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
-        )
+        if not getattr(self, "_use_qc_ui_parameters", True):
+            self.Debug(
+                f"ACTIVE_PROFILE=hardcoded {BACKTEST_PROFILE!r} "
+                "(USE_QC_UI_PARAMETERS=False; QC panel ignored)"
+            )
+        else:
+            raw_max = self.GetParameter("maximize_backtest_equity")
+            raw_prod = self.GetParameter("production_safe_defaults")
+            raw_head = self.GetParameter("headline_qc_default")
+            self.Debug(
+                "QC_PARAMS_RAW "
+                f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
+                f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
+            )
         if getattr(self, "lift_120x_research", False):
             bs = "on" if getattr(self, "_bull_sleeve_mode", False) else "off"
             vb = "off" if getattr(self, "_vol_target_off_in_bull", False) else "on"
@@ -1001,9 +1027,46 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         return target_ticker, w_adj
 
+    def _apply_hardcoded_profile(self, profile_name):
+        p = str(profile_name or "maximize_60x").strip().lower()
+        self.production_safe_defaults = p in ("production", "prod", "live_safe")
+        self.maximize_backtest_equity = p in (
+            "maximize_60x",
+            "maximize",
+            "max_equity",
+            "lift_120x",
+            "bull_sleeve_120x",
+        )
+        self.lift_120x_research = p in ("lift_120x", "bull_sleeve_120x")
+        self.target_120x_research = False
+        self.aggressive_120x_research = False
+        self.headline_qc_default = True
+        self.maximize_include_svxy = False
+        self.use_plain_maximize_only = p == "maximize_60x"
+        self.ignore_qc_parameter_overrides = True
+        self._apply_selected_profiles_from_flags()
+
+    def _apply_selected_profiles_from_flags(self):
+        if self.production_safe_defaults:
+            csr.apply_production_safe_profile(self)
+        elif self.maximize_backtest_equity:
+            csr.apply_maximize_backtest_equity_profile(self)
+        if self.target_120x_research or self.aggressive_120x_research:
+            self.Debug("DEPRECATED preset/bundle -> LIFT_120X")
+            self.lift_120x_research = True
+        if self.lift_120x_research:
+            csr.apply_lift_120x_research_bundle(self)
+
     # ── Parameter helpers ───────────────────────────────────────────────
 
+    def _raw_parameter(self, name):
+        if not getattr(self, "_use_qc_ui_parameters", True):
+            return None
+        return self.GetParameter(name)
+
     def _int_parameter(self, name, default):
+        if not getattr(self, "_use_qc_ui_parameters", True):
+            return default
         raw = self.GetParameter(name)
         if raw is None or str(raw).strip() == "":
             return default
@@ -1013,6 +1076,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return default
 
     def _float_parameter(self, name, default):
+        if not getattr(self, "_use_qc_ui_parameters", True):
+            return float(default)
         raw = self.GetParameter(name)
         if raw is None or str(raw).strip() == "":
             return float(default)
@@ -1022,6 +1087,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return float(default)
 
     def _bool_parameter(self, name, default):
+        if not getattr(self, "_use_qc_ui_parameters", True):
+            return default
         raw = self.GetParameter(name)
         if raw is None:
             return default
