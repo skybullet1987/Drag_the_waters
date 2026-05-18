@@ -1,7 +1,7 @@
 # region imports
 from AlgorithmImports import *
 from datetime import datetime
-from csr_profiles import CSRProfileMixin
+import csr_profiles as csr
 
 # endregion
 
@@ -9,7 +9,7 @@ from csr_profiles import CSRProfileMixin
 # Default: maximize + LIFT_120X (bull sleeve, vol off in bull). Plain ~60x: use_plain_maximize_only=true.
 
 
-class ConditionalSectorRotationImproved(CSRProfileMixin, QCAlgorithm):
+class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def Initialize(self):
         sy = self._int_parameter("start_year", 2020)
@@ -304,19 +304,19 @@ class ConditionalSectorRotationImproved(CSRProfileMixin, QCAlgorithm):
         )
 
         if self.production_safe_defaults:
-            self._apply_production_safe_profile()
+            csr.apply_production_safe_profile(self)
         elif self.maximize_backtest_equity:
-            self._apply_maximize_backtest_equity_profile()
+            csr.apply_maximize_backtest_equity_profile(self)
 
         if self.target_120x_research or self.aggressive_120x_research:
             self.Debug("DEPRECATED preset/bundle -> LIFT_120X")
             self.lift_120x_research = True
         if self.lift_120x_research:
-            self._apply_lift_120x_research_bundle()
+            csr.apply_lift_120x_research_bundle(self)
 
         skip_reload = self.ignore_qc_parameter_overrides and self.lift_120x_research
         if (self.maximize_backtest_equity or self.production_safe_defaults) and not skip_reload:
-            self._reload_user_overrides_after_profile()
+            csr.reload_user_overrides_after_profile(self)
 
         if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
             self._equity_slippage_dollars = 0.001
