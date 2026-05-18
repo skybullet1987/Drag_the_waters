@@ -12,22 +12,31 @@ from datetime import datetime
 #   2) Volatility targeting vs anchor ETF realized vol.
 #   3) Vol-ETP rails (consecutive UVXY/SVXY cap) + gap cooldown on large daily loss.
 #   4) Tiered drawdown scaling + hard drawdown guard.
-#   5) Optional trade_start_* for walk-forward style runs.
+#   5) Optional trade_start_* / trade_end_* for walk-forward and OOS windows.
 #
-# NEW (rebalancing / risk hygiene):
-#   6) Rebalance bands: skip tiny same-ticker weight nudges (cuts order spam).
-#   7) Max daily weight change cap when staying in the same ticker (vol targeting).
-#   8) Optional max_days_without_rebalance: bypass band if portfolio is stale.
-#   9) Vol-ETP entry confirmation: require N consecutive EOD signals before UVXY/SVXY.
-#  10) Optional regime-based vol target (higher in bull, lower in bear vs SPY SMA).
+# Rebalancing / risk hygiene:
+#   6) Rebalance bands, max daily weight change, max_days_without_rebalance.
+#   7) Vol-ETP entry confirmation (N EOD bars) before UVXY/SVXY.
+#   8) Regime-based vol target (bull vs bear).
+#   9) Optional per-name UVXY / SVXY consecutive-day rails (state machine).
+#  10) max_position_weight + vol_etp_max_weight execution caps.
 #
-# BACKTEST-ONLY PROFIT MODE (explicitly NOT for live):
-#   maximize_backtest_equity=true applies aggressive overrides to lift in-sample
-#   equity (disables most rails, same-bar OnData, hot vol targets, looser bull
-#   UVXY triggers). Optional maximize_include_svxy=true enables SVXY calm path.
+# Regime / signal extensions:
+#   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
+#   bull_tqqq_momentum_days: require positive TQQQ N-day return before SOXL/TQQQ.
+#
+# Research presets (parameter research_preset):
+#   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
+#   max_equity / maximize — same as maximize_backtest_equity=true.
+#   realistic — production + default constant_slippage_per_share if unset.
+#
+# maximize_backtest_equity defaults FALSE; set true or research_preset=max_equity
+# for the aggressive in-sample bundle (not for live).
+#
+# Benchmark defaults to TQQQ; unknown tickers are appended to the universe.
+# Baseline: benchmark_tqqq_buy_hold.py (benchmark defaults QQQ for 100% TQQQ book).
 #
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
-# Past performance does not guarantee future results.
 # =============================================================================
 
 
@@ -51,6 +60,27 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.SetBrokerageModel(
             BrokerageName.InteractiveBrokersBrokerage,
             AccountType.Margin,
+        )
+
+        preset = str(self.GetParameter("research_preset") or "").strip().lower()
+        self._research_preset = preset
+        self._preset_force_production = preset in (
+            "production",
+            "prod",
+            "live_safe",
+            "realistic",
+            "realistic_backtest",
+        )
+        self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
+        if self._preset_force_production and self._preset_force_max_equity:
+            self.Debug(
+                "research_preset conflict: production/live_safe wins over max_equity"
+            )
+            self._preset_force_max_equity = False
+
+        # ── Optional constant slippage (per share) — set before AddEquity ─
+        self._equity_slippage_dollars = max(
+            0.0, self._float_parameter("constant_slippage_per_share", 0.0)
         )
 
         # ── Execution mode ──────────────────────────────────────────────
@@ -92,7 +122,21 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.qqq_sma_period = self._int_parameter("qqq_sma_period", 20)
         self.tqqq_sma_period = self._int_parameter("tqqq_sma_period", 20)
         self.soxl_sma_period = self._int_parameter("soxl_sma_period", 20)
+        self.regime_qqq_sma_period = max(
+            2, self._int_parameter("regime_qqq_sma_period", 50)
+        )
+        raw_regime = self.GetParameter("regime_mode")
+        rm = "" if raw_regime is None else str(raw_regime).strip().lower()
+        if rm in ("spy_and_qqq", "spy+qqq", "dual", "both"):
+            self.regime_mode = "spy_and_qqq"
+        elif rm in ("qqq", "qqq_only", "qqq_sma"):
+            self.regime_mode = "qqq"
+        else:
+            self.regime_mode = "spy"
         self.min_hold_days = max(0, self._int_parameter("min_hold_days", 0))
+        self.bull_tqqq_momentum_days = max(
+            0, self._int_parameter("bull_tqqq_momentum_days", 0)
+        )
 
         # ── RSI thresholds ────────────────────────────────────────────
         self.th_rsi_qqq_bull_uvxy = self._float_parameter("th_rsi_qqq_bull_uvxy", 81.0)
@@ -125,6 +169,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_vol_targeting = self._bool_parameter("use_vol_targeting", True)
         self.target_ann_vol = max(0.01, self._float_parameter("target_ann_vol", 0.25))
         self.vol_lookback = max(5, self._int_parameter("vol_lookback", 20))
+        self.max_position_weight = max(
+            0.01, min(1.0, self._float_parameter("max_position_weight", 1.0))
+        )
+        self.vol_etp_max_weight = max(
+            0.01, min(1.0, self._float_parameter("vol_etp_max_weight", 1.0))
+        )
         raw_vol_anchor = self.GetParameter("vol_anchor_ticker")
         self.vol_anchor_ticker = (
             "TQQQ"
@@ -135,6 +185,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         # ── Vol ETP rails ───────────────────────────────────────────────
         self.max_consecutive_vol_etp_days = max(
             0, self._int_parameter("max_consecutive_vol_etp_days", 5)
+        )
+        self.max_consecutive_uvxy_days = max(
+            0, self._int_parameter("max_consecutive_uvxy_days", 0)
+        )
+        self.max_consecutive_svxy_days = max(
+            0, self._int_parameter("max_consecutive_svxy_days", 0)
         )
         self.gap_cooldown_pct = min(
             -0.01, self._float_parameter("gap_cooldown_pct", -0.12)
@@ -168,14 +224,43 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         tsd = self._int_parameter("trade_start_day", sd)
         self.trade_start = datetime(tsy, tsm, tsd)
 
-        self.maximize_backtest_equity = self._bool_parameter(
-            "maximize_backtest_equity", False
+        tey = self._int_parameter("trade_end_year", 0)
+        if tey > 0:
+            tem = max(1, min(12, self._int_parameter("trade_end_month", 12)))
+            ted = max(1, min(31, self._int_parameter("trade_end_day", 31)))
+            self.trade_end = datetime(tey, tem, ted)
+            if self.trade_end.date() < self.trade_start.date():
+                self.Debug("trade_end before trade_start — ignoring trade_end")
+                self.trade_end = None
+        else:
+            self.trade_end = None
+
+        prod_user = self._bool_parameter("production_safe_defaults", False)
+        self.production_safe_defaults = bool(
+            prod_user or self._preset_force_production
+        )
+        max_user = self._bool_parameter("maximize_backtest_equity", False)
+        self.maximize_backtest_equity = bool(
+            (max_user or self._preset_force_max_equity)
+            and not self.production_safe_defaults
         )
         self.maximize_include_svxy = self._bool_parameter(
             "maximize_include_svxy", False
         )
-        if self.maximize_backtest_equity:
+
+        if self.production_safe_defaults:
+            self._apply_production_safe_profile()
+        elif self.maximize_backtest_equity:
             self._apply_maximize_backtest_equity_profile()
+
+        if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
+            self._equity_slippage_dollars = 0.001
+            self.Debug(
+                "research_preset=realistic: default constant_slippage_per_share=0.001"
+            )
+
+        if self._equity_slippage_dollars > 0.0:
+            self.SetSecurityInitializer(self._equity_slippage_initializer)
 
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
@@ -199,6 +284,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 f"risk_off_ticker {self.risk_off_ticker!r} not in universe {self.tickers}"
             )
 
+        raw_bench = self.GetParameter("benchmark_ticker")
+        _bs = "" if raw_bench is None else str(raw_bench).strip().upper()
+        self.benchmark_ticker = _bs if _bs else "TQQQ"
+        if self.benchmark_ticker not in self.tickers:
+            self.tickers.append(self.benchmark_ticker)
+
         self.symbols = {}
         self.indicators = {}
         for ticker in self.tickers:
@@ -220,7 +311,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self.symbols[ticker], period, Resolution.Daily
             )
 
-        self.SetBenchmark(self.symbols["SPY"])
+        if self.regime_mode in ("spy_and_qqq", "qqq"):
+            self.indicators["QQQ_SMA_REGIME"] = self.SMA(
+                self.symbols["QQQ"], self.regime_qqq_sma_period, Resolution.Daily
+            )
+
+        self.SetBenchmark(self.symbols[self.benchmark_ticker])
+        self.Debug(f"Benchmark={self.benchmark_ticker} (set benchmark_ticker parameter to override)")
 
         warm = max(
             260,
@@ -228,6 +325,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.qqq_sma_period + 60,
             self.tqqq_sma_period + 60,
             self.soxl_sma_period + 60,
+            self.regime_qqq_sma_period + 60 if self.regime_mode in ("spy_and_qqq", "qqq") else 0,
             self.rsi_period + 60,
             self.vol_lookback + 10,
         )
@@ -255,11 +353,41 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._pending_ticker = None
         self._pending_weight = 0.0
 
-        self._consec_vol_etp_days = 0
+        self._consec_uvxy_days = 0
+        self._consec_svxy_days = 0
         self._cooldown_remaining = 0
 
         self._vol_etp_confirm_name = None
         self._vol_etp_confirm_count = 0
+
+    def _equity_slippage_initializer(self, security):
+        if security.Type != SecurityType.Equity:
+            return
+        if self._equity_slippage_dollars <= 0.0:
+            return
+        security.SetSlippageModel(ConstantSlippageModel(self._equity_slippage_dollars))
+
+    def _apply_production_safe_profile(self):
+        self.Debug(
+            "PRODUCTION_SAFE profile: EOD execution, rebalance bands, vol-ETP rails, "
+            "drawdown guard — baseline for live-style IB research."
+        )
+        self.maximize_backtest_equity = False
+        self.use_eod_next_bar_execution = True
+        self.use_rebalance_bands = True
+        self.min_weight_change_to_trade = max(self.min_weight_change_to_trade, 0.02)
+        if self.max_daily_weight_change <= 0.0:
+            self.max_daily_weight_change = 0.15
+        if self.max_days_without_rebalance <= 0:
+            self.max_days_without_rebalance = 5
+        self.vol_etp_confirm_days = max(self.vol_etp_confirm_days, 1)
+        if self.max_consecutive_vol_etp_days <= 0:
+            self.max_consecutive_vol_etp_days = 5
+        self.gap_cooldown_days = max(self.gap_cooldown_days, 3)
+        self.use_drawdown_guard = True
+        self.use_tiered_drawdown = True
+        self.use_vol_targeting = True
+        self.use_regime_vol_target = True
 
     def _apply_maximize_backtest_equity_profile(self):
         """
@@ -267,7 +395,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         and huge divergence vs live fills. Do not deploy this profile to IB.
         """
         self.Debug(
-            "maximize_backtest_equity=true: aggressive backtest-only profile active."
+            "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
+            "looser bull UVXY — NOT for live. Defaults off; set maximize_backtest_equity=true "
+            "or research_preset=max_equity to enable."
         )
         self.use_eod_next_bar_execution = False
         self.use_rebalance_bands = False
@@ -282,15 +412,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_tiered_drawdown = False
         self.use_vol_targeting = True
         self.use_regime_vol_target = True
-        self.target_ann_vol = 0.55
-        self.target_ann_vol_bull = 0.62
-        self.target_ann_vol_bear = 0.42
+        self.target_ann_vol = 0.58
+        self.target_ann_vol_bull = 0.68
+        self.target_ann_vol_bear = 0.48
         self.min_hold_days = 0
-        self.th_rsi_qqq_bull_uvxy = 88.0
-        self.th_rsi_spy_bull_uvxy = 87.0
-        self.th_rsi_uvxy_elevated = 80.0
-        self.th_rsi_uvxy_extreme = 92.0
-        self.th_rsi_soxl_bull = 36.0
+        self.th_rsi_qqq_bull_uvxy = 90.0
+        self.th_rsi_spy_bull_uvxy = 89.0
+        self.th_rsi_uvxy_elevated = 82.0
+        self.th_rsi_uvxy_extreme = 93.0
+        self.th_rsi_soxl_bull = 34.0
         if self.maximize_include_svxy:
             self.use_svxy_calm = True
 
@@ -304,6 +434,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def _after_market_close_plan(self):
         if self.IsWarmingUp or not self._indicators_ready():
+            return
+
+        if self._past_trade_end():
+            self._pending_ticker = None
+            self._pending_weight = 0.0
             return
 
         self._update_drawdown_guard()
@@ -346,6 +481,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         target_ticker, base_weight = self._apply_rebalance_friction(
             target_ticker, base_weight
         )
+        target_ticker, base_weight = self._apply_execution_caps(
+            target_ticker, base_weight
+        )
 
         self._pending_ticker = target_ticker
         self._pending_weight = base_weight
@@ -361,6 +499,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def _before_market_open_execute(self):
         if self.IsWarmingUp or not self._indicators_ready():
+            return
+
+        if self._past_trade_end():
+            if self.Portfolio.Invested:
+                self.Liquidate()
+            self._last_target_ticker = None
+            self._pending_ticker = None
+            self._pending_weight = 0.0
             return
 
         if self.Time.date() < self.trade_start.date():
@@ -391,6 +537,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def _run_intraday_pipeline(self):
         if self.IsWarmingUp or not self._indicators_ready():
+            return
+
+        if self._past_trade_end():
+            if self.Portfolio.Invested:
+                self.Liquidate()
+            self._last_target_ticker = None
             return
 
         if self.Time.date() < self.trade_start.date():
@@ -424,6 +576,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         target_ticker, w = self._apply_rebalance_friction(target_ticker, w)
+        target_ticker, w = self._apply_execution_caps(target_ticker, w)
 
         if target_ticker == self._last_target_ticker and abs(
             w - getattr(self, "_last_executed_weight", 0.0)
@@ -445,12 +598,83 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     # ── Regime + vol-ETP confirmation ───────────────────────────────────
 
+    def _past_trade_end(self):
+        if self.trade_end is None:
+            return False
+        return self.Time.date() > self.trade_end.date()
+
+    def _apply_execution_caps(self, ticker, weight):
+        w = max(0.0, min(1.0, float(weight)))
+        mw = max(0.01, min(1.0, float(self.max_position_weight)))
+        w = min(w, mw)
+        if ticker in self._vol_etp_names():
+            vw = max(0.01, min(1.0, float(self.vol_etp_max_weight)))
+            w = min(w, vw)
+        return ticker, w
+
+    def _is_qqq_bull_trend(self):
+        key = "QQQ_SMA_REGIME"
+        if key not in self.indicators:
+            return True
+        ind = self.indicators[key]
+        if not ind.IsReady:
+            return False
+        price_qqq = self.Securities[self.symbols["QQQ"]].Price
+        sma = ind.Current.Value
+        if price_qqq <= 0 or sma <= 0:
+            return False
+        return price_qqq > sma
+
+    def _tqqq_momentum_positive(self, days):
+        d = int(days)
+        if d <= 0:
+            return True
+        hist = self.History(self.symbols["TQQQ"], d + 1, Resolution.Daily)
+        if hist is None or getattr(hist, "empty", True):
+            return True
+        try:
+            closes = hist["close"].dropna()
+        except Exception:
+            try:
+                closes = hist.xs("TQQQ", level=0)["close"].dropna()
+            except Exception:
+                return True
+        if closes is None or len(closes) < d + 1:
+            return True
+        c0 = float(closes.iloc[-(d + 1)])
+        c1 = float(closes.iloc[-1])
+        if c0 <= 0 or c1 <= 0:
+            return True
+        return (c1 / c0) - 1.0 > 0.0
+
+    def _bull_risk_on_momentum(self, ticker):
+        if ticker not in ("TQQQ", "SOXL"):
+            return ticker
+        if self.bull_tqqq_momentum_days <= 0:
+            return ticker
+        if self._tqqq_momentum_positive(self.bull_tqqq_momentum_days):
+            return ticker
+        return self.risk_off_ticker
+
     def _is_bull_regime(self):
         price_spy = self.Securities[self.symbols["SPY"]].Price
         sma_spy = self.indicators["SPY_SMA200"].Current.Value
-        if price_spy <= 0 or sma_spy <= 0:
-            return True
-        return price_spy > sma_spy
+        spy_ok = price_spy > 0 and sma_spy > 0
+        spy_bull = spy_ok and (price_spy > sma_spy)
+        qqq_bull = self._is_qqq_bull_trend()
+        if self.regime_mode == "spy":
+            if not spy_ok:
+                return False
+            return spy_bull
+        if self.regime_mode == "spy_and_qqq":
+            if not spy_ok:
+                return False
+            return spy_bull and qqq_bull
+        if self.regime_mode == "qqq":
+            return qqq_bull
+        if not spy_ok:
+            return False
+        return spy_bull
 
     def _vol_etp_standby_ticker(self):
         return "TQQQ" if self._is_bull_regime() else self.risk_off_ticker
@@ -657,16 +881,37 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _vol_etp_names(self):
         return {"UVXY", "SVXY"}
 
+    def _uvxy_rail_limit(self):
+        if self.max_consecutive_uvxy_days > 0:
+            return self.max_consecutive_uvxy_days
+        return self.max_consecutive_vol_etp_days
+
+    def _svxy_rail_limit(self):
+        if self.max_consecutive_svxy_days > 0:
+            return self.max_consecutive_svxy_days
+        return self.max_consecutive_vol_etp_days
+
     def _apply_vol_etp_rails(self, signal):
-        vset = self._vol_etp_names()
-        if signal in vset:
-            lim = self.max_consecutive_vol_etp_days
-            if lim > 0 and self._consec_vol_etp_days >= lim:
-                self._consec_vol_etp_days = 0
+        uv_lim = self._uvxy_rail_limit()
+        sv_lim = self._svxy_rail_limit()
+        if signal == "UVXY":
+            if uv_lim > 0 and self._consec_uvxy_days >= uv_lim:
+                self._consec_uvxy_days = 0
+                self._consec_svxy_days = 0
                 return "TQQQ"
-            self._consec_vol_etp_days += 1
-        else:
-            self._consec_vol_etp_days = 0
+            self._consec_uvxy_days += 1
+            self._consec_svxy_days = 0
+            return signal
+        if signal == "SVXY":
+            if sv_lim > 0 and self._consec_svxy_days >= sv_lim:
+                self._consec_uvxy_days = 0
+                self._consec_svxy_days = 0
+                return "TQQQ"
+            self._consec_svxy_days += 1
+            self._consec_uvxy_days = 0
+            return signal
+        self._consec_uvxy_days = 0
+        self._consec_svxy_days = 0
         return signal
 
     def _apply_gap_cooldown_filter(self, signal):
@@ -751,12 +996,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         rsi_soxl = self._rsi("SOXL")
         rsi_soxs = self._rsi("SOXS")
 
-        sma_spy = self.indicators["SPY_SMA200"].Current.Value
         sma_qqq = self.indicators["QQQ_SMA20"].Current.Value
         sma_tqqq = self.indicators["TQQQ_SMA20"].Current.Value
         sma_soxl = self.indicators["SOXL_SMA20"].Current.Value
 
-        if price_spy > sma_spy:
+        if self._is_bull_regime():
             if rsi_qqq > self.th_rsi_qqq_bull_uvxy or rsi_spy > self.th_rsi_spy_bull_uvxy:
                 return "UVXY"
             if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
@@ -767,8 +1011,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 and rsi_soxl > self.th_rsi_soxl_bull
                 and rsi_soxl > rsi_spy
             ):
-                return "SOXL"
-            return "TQQQ"
+                return self._bull_risk_on_momentum("SOXL")
+            return self._bull_risk_on_momentum("TQQQ")
 
         if rsi_tqqq < self.th_rsi_tqqq_bear_tecl:
             return "TECL"
