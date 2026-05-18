@@ -23,8 +23,9 @@ from datetime import datetime
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
 #  12) margin_safety_pct + _safe_set_holdings: avoid IB insufficient buying power on 3x ETFs.
 #
-# Default (code): headline_qc_default=true → maximize + LIFT_120X (minimal deltas for ~120x hunt).
-# Plain ~60x only: use_plain_maximize_only=true
+# Default (code): headline_qc_default=true → maximize + LIFT_120X (bull sleeve, no vol-scale in bull).
+# Plain ~60x anchor (R0): use_plain_maximize_only=true
+# Preset: research_preset=bull_sleeve_120x (same as LIFT default path).
 # Legacy target_120x bundle: target_120x_research=true (often ~30x / 2k orders — avoid).
 # Production: research_preset=production
 # Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
@@ -93,6 +94,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "target_120",
             "120x_target",
             "target_120_plus",
+        )
+        self._preset_force_bull_sleeve = preset in (
+            "bull_sleeve_120x",
+            "bull_sleeve",
+            "lift_120x",
         )
         if self._preset_force_production and self._preset_force_max_equity:
             self.Debug(
@@ -212,6 +218,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "maximize_disable_vol_target", False
         )
         self._soxl_skip_spy_rsi_filter = False
+        self._bull_sleeve_mode = False
+        self._vol_target_off_in_bull = False
+        self._bull_gross_cap = 1.0
         self._use_vix_gate = False
         self._prefer_soxl_on_outperform = False
         self.vix_min_bull_uvxy = max(
@@ -320,6 +329,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         elif self.use_plain_maximize_only:
             self.target_120x_research = False
             self.lift_120x_research = False
+        elif self._preset_force_bull_sleeve:
+            self.lift_120x_research = True
+            self.target_120x_research = False
         elif self.headline_qc_default and not self._preset_force_production:
             self.lift_120x_research = not self.target_120x_research
             if self.lift_120x_research:
@@ -365,6 +377,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.SetSecurityInitializer(self._equity_slippage_initializer)
 
         self._log_active_research_profile()
+        self._log_effective_config()
 
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
@@ -474,6 +487,16 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._vol_etp_confirm_name = None
         self._vol_etp_confirm_count = 0
 
+        self._init_attribution_state()
+
+    def _init_attribution_state(self):
+        self._attrib_signal_days = {}
+        self._attrib_signal_total = 0
+        self._attrib_weight_sum = 0.0
+        self._attrib_executions = 0
+        self._attrib_skipped_small = 0
+        self._attrib_ticker_switch = 0
+
     def _equity_slippage_initializer(self, security):
         if security.Type != SecurityType.Equity:
             return
@@ -491,10 +514,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
         if getattr(self, "lift_120x_research", False):
+            bs = "on" if getattr(self, "_bull_sleeve_mode", False) else "off"
+            vb = "off" if getattr(self, "_vol_target_off_in_bull", False) else "on"
             self.Debug(
-                "ACTIVE_PROFILE=lift_120x (maximize + LIFT_120X: no bull UVXY, gross~1.15, "
-                f"min_hold={self.min_hold_days}, max_gross={self.max_gross_exposure:.2f}). "
-                "Plain ~60x: use_plain_maximize_only=true."
+                "ACTIVE_PROFILE=lift_120x (maximize + LIFT_120X: bull_sleeve="
+                f"{bs}, vol_in_bull={vb}, bull_gross={getattr(self, '_bull_gross_cap', 1):.2f}, "
+                f"min_hold={self.min_hold_days}). Plain ~60x: use_plain_maximize_only=true."
             )
         elif getattr(self, "target_120x_research", False):
             self.Debug(
@@ -682,22 +707,27 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def _apply_lift_120x_research_bundle(self):
         """
-        Minimal ~120x lift on top of headline maximize (~60x). Avoids target_120x churn
-        (SVXY / QQQ anchor / VIX gate) that produced ~30x and 1900+ orders.
+        Plan path: maximize core + bull sleeve (TQQQ/SOXL only in bull) + no vol scaler in bull.
         """
         self.Debug(
-            "LIFT_120X: maximize + disable bull UVXY, max_gross~1.15, min_hold_days=2, "
-            "SOXL RSI 32, margin_safety 0.99, ignore stale QC overrides."
+            "LIFT_120X: bull_sleeve on, vol_target_off_in_bull on, bull_gross~1.15, "
+            "min_hold=2, SOXL RSI 32, ignore stale QC overrides."
         )
         self.maximize_backtest_equity = True
+        self._bull_sleeve_mode = True
+        self._vol_target_off_in_bull = True
         self.disable_bull_uvxy = True
         self.use_svxy_calm = False
         self.maximize_include_svxy = False
         self._use_vix_gate = False
         self._prefer_soxl_on_outperform = False
         self.bull_uvxy_require_both = False
+        self._bull_gross_cap = max(
+            1.0, min(2.0, self._float_parameter("bull_gross_cap", 1.15))
+        )
         self.max_gross_exposure = max(
-            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.15))
+            1.0,
+            min(2.0, self._float_parameter("max_gross_exposure", self._bull_gross_cap)),
         )
         self.max_position_weight = max(
             0.01,
@@ -789,6 +819,59 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _effective_gross_cap(self):
+        cap = self._gross_cap()
+        if not getattr(self, "_bull_sleeve_mode", False):
+            return cap
+        if self._is_bull_regime():
+            bg = max(1.0, min(2.0, float(getattr(self, "_bull_gross_cap", cap))))
+            return min(cap, bg)
+        return min(cap, 1.0)
+
+    def _log_effective_config(self):
+        self.Debug(
+            "EFFECTIVE_CONFIG "
+            f"plain_maximize={self.use_plain_maximize_only} lift_120x={self.lift_120x_research} "
+            f"bull_sleeve={getattr(self, '_bull_sleeve_mode', False)} "
+            f"vol_off_in_bull={getattr(self, '_vol_target_off_in_bull', False)} "
+            f"max_gross={self.max_gross_exposure:.2f} bull_gross={getattr(self, '_bull_gross_cap', 1):.2f} "
+            f"vol_anchor={self.vol_anchor_ticker} ignore_qc_overrides={self.ignore_qc_parameter_overrides} "
+            f"min_rebal_delta={self.min_rebalance_weight_delta:.3f} margin_safety={self.margin_safety_pct:.3f}"
+        )
+
+    def _record_signal_attribution(self, ticker, weight):
+        if self.IsWarmingUp or self.Time.date() < self.trade_start.date():
+            return
+        if ticker is None:
+            return
+        self._attrib_signal_days[ticker] = self._attrib_signal_days.get(ticker, 0) + 1
+        self._attrib_signal_total += 1
+        self._attrib_weight_sum += float(weight)
+
+    def _log_backtest_attribution(self):
+        if self._attrib_signal_total <= 0:
+            self.Debug("ATTRIBUTION no signal days recorded")
+            return
+        parts = []
+        for t in sorted(self._attrib_signal_days.keys()):
+            n = self._attrib_signal_days[t]
+            pct = 100.0 * n / self._attrib_signal_total
+            parts.append(f"{t}={pct:.1f}%")
+        avg_w = self._attrib_weight_sum / max(1, self._attrib_signal_total)
+        self.Debug(
+            "ATTRIBUTION signal_days="
+            + ",".join(parts)
+            + f" | avg_target_w={avg_w:.3f} executions={self._attrib_executions} "
+            f"skipped_small_rebal={self._attrib_skipped_small} ticker_switches={self._attrib_ticker_switch}"
+        )
+        tqqq_soxl = self._attrib_signal_days.get("TQQQ", 0) + self._attrib_signal_days.get(
+            "SOXL", 0
+        )
+        pct_bull_beta = 100.0 * tqqq_soxl / self._attrib_signal_total
+        self.Debug(
+            f"ATTRIBUTION TQQQ+SOXL share={pct_bull_beta:.1f}% (bull beta proxy; higher helps 120x hunt)"
+        )
+
     def _portfolio_weight_in_symbol(self, sym):
         pv = float(self.Portfolio.TotalPortfolioValue)
         if pv <= 0:
@@ -804,7 +887,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         Prevents 'Insufficient buying power' on leveraged ETFs (TQQQ/SOXL) when w≈1.
         Skips tiny same-symbol weight changes to avoid vol-scaler churn (~2k orders).
         """
-        w = max(0.0, min(self._gross_cap(), float(weight)))
+        w = max(0.0, min(self._effective_gross_cap(), float(weight)))
         if w <= 1e-9:
             if liquidate_existing:
                 self.Liquidate(sym)
@@ -813,6 +896,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         cur_w = self._portfolio_weight_in_symbol(sym)
         band = float(getattr(self, "min_rebalance_weight_delta", 0.03))
         if band > 0 and cur_w > 1e-9 and abs(w - cur_w) < band:
+            self._attrib_skipped_small += 1
             return float(cur_w)
 
         buf = max(0.50, min(1.0, float(getattr(self, "margin_safety_pct", 0.98))))
@@ -857,6 +941,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 f"requested={float(weight):.3f} exec={w_exec:.3f}"
             )
 
+        tkr = self._sym_to_ticker.get(sym, None)
+        prev_t = getattr(self, "_last_target_ticker", None)
+        if prev_t is not None and tkr is not None and prev_t != tkr:
+            self._attrib_ticker_switch += 1
+        self._attrib_executions += 1
         self.SetHoldings(sym, w_exec, liquidate_existing)
         return float(w_exec)
 
@@ -902,7 +991,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             if self.use_vol_targeting:
                 base_weight *= self._vol_target_multiplier()
 
-        base_weight = max(0.0, min(self._gross_cap(), float(base_weight)))
+        base_weight = max(0.0, min(self._effective_gross_cap(), float(base_weight)))
 
         if self.Time.date() < self.trade_start.date():
             self._pending_ticker = None
@@ -921,6 +1010,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             target_ticker, base_weight
         )
 
+        self._record_signal_attribution(target_ticker, base_weight)
         self._pending_ticker = target_ticker
         self._pending_weight = base_weight
 
@@ -1006,13 +1096,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             w *= self._tiered_drawdown_multiplier()
             if self.use_vol_targeting:
                 w *= self._vol_target_multiplier()
-        w = max(0.0, min(self._gross_cap(), float(w)))
+        w = max(0.0, min(self._effective_gross_cap(), float(w)))
 
         if self._min_hold_blocks_switch_target(target_ticker):
             return
 
         target_ticker, w = self._apply_rebalance_friction(target_ticker, w)
         target_ticker, w = self._apply_execution_caps(target_ticker, w)
+
+        self._record_signal_attribution(target_ticker, w)
 
         if target_ticker == self._last_target_ticker and abs(
             w - getattr(self, "_last_executed_weight", 0.0)
@@ -1040,7 +1132,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return self.Time.date() > self.trade_end.date()
 
     def _apply_execution_caps(self, ticker, weight):
-        cap = self._gross_cap()
+        cap = self._effective_gross_cap()
         w = max(0.0, min(cap, float(weight)))
         mw = max(0.01, min(cap, float(self.max_position_weight)))
         w = min(w, mw)
@@ -1228,7 +1320,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             elif delta < -cap:
                 w_adj = w_cur - cap
 
-        w_adj = max(0.0, min(self._gross_cap(), w_adj))
+        w_adj = max(0.0, min(self._effective_gross_cap(), w_adj))
 
         if not self.use_rebalance_bands or self.min_weight_change_to_trade <= 0.0:
             return target_ticker, w_adj
@@ -1332,6 +1424,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return self.target_ann_vol
 
     def _vol_target_multiplier(self):
+        if getattr(self, "_vol_target_off_in_bull", False) and self._is_bull_regime():
+            return self._effective_gross_cap()
         t = self.vol_anchor_ticker
         hist = self.History(self.symbols[t], self.vol_lookback + 1, Resolution.Daily)
         if hist is None or hist.empty:
@@ -1353,7 +1447,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return 1.0
         ann = rv * (252.0 ** 0.5)
         tgt = self._effective_target_ann_vol()
-        return min(self._gross_cap(), tgt / ann)
+        return min(self._effective_gross_cap(), tgt / ann)
 
     def _vol_etp_names(self):
         return {"UVXY", "SVXY"}
@@ -1456,6 +1550,45 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 highest, best = v, ticker
         return best
 
+    def _compute_bull_signal(
+        self, rsi_qqq, rsi_spy, rsi_uvxy, rsi_soxl, price_soxl, sma_soxl
+    ):
+        if getattr(self, "_bull_sleeve_mode", False):
+            soxl_ok = (
+                self.use_soxl_bull
+                and price_soxl > sma_soxl
+                and rsi_soxl > self.th_rsi_soxl_bull
+                and rsi_soxl > rsi_spy
+            )
+            if soxl_ok:
+                return self._bull_risk_on_momentum("SOXL")
+            return self._bull_risk_on_momentum("TQQQ")
+
+        if not self.disable_bull_uvxy:
+            qqq_hot = rsi_qqq > self.th_rsi_qqq_bull_uvxy
+            spy_hot = rsi_spy > self.th_rsi_spy_bull_uvxy
+            if self.bull_uvxy_require_both:
+                bull_uvxy = qqq_hot and spy_hot
+            else:
+                bull_uvxy = qqq_hot or spy_hot
+            if bull_uvxy and self._vix_ok_for_bull_uvxy():
+                return "UVXY"
+        if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
+            return "SVXY"
+        soxl_rsi_th = float(self.th_rsi_soxl_bull)
+        if getattr(self, "_prefer_soxl_on_outperform", False) and self._soxl_outperformed_tqqq():
+            soxl_rsi_th = max(22.0, soxl_rsi_th - float(self.soxl_outperform_rsi_bonus))
+        soxl_ok = (
+            self.use_soxl_bull
+            and price_soxl > sma_soxl
+            and rsi_soxl > soxl_rsi_th
+        )
+        if soxl_ok and not getattr(self, "_soxl_skip_spy_rsi_filter", False):
+            soxl_ok = rsi_soxl > rsi_spy
+        if soxl_ok:
+            return self._bull_risk_on_momentum("SOXL")
+        return self._bull_risk_on_momentum("TQQQ")
+
     def _compute_signal(self):
         price_spy = self.Securities[self.symbols["SPY"]].Price
         price_qqq = self.Securities[self.symbols["QQQ"]].Price
@@ -1478,30 +1611,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         sma_soxl = self.indicators["SOXL_SMA20"].Current.Value
 
         if self._is_bull_regime():
-            if not self.disable_bull_uvxy:
-                qqq_hot = rsi_qqq > self.th_rsi_qqq_bull_uvxy
-                spy_hot = rsi_spy > self.th_rsi_spy_bull_uvxy
-                if self.bull_uvxy_require_both:
-                    bull_uvxy = qqq_hot and spy_hot
-                else:
-                    bull_uvxy = qqq_hot or spy_hot
-                if bull_uvxy and self._vix_ok_for_bull_uvxy():
-                    return "UVXY"
-            if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
-                return "SVXY"
-            soxl_rsi_th = float(self.th_rsi_soxl_bull)
-            if getattr(self, "_prefer_soxl_on_outperform", False) and self._soxl_outperformed_tqqq():
-                soxl_rsi_th = max(22.0, soxl_rsi_th - float(self.soxl_outperform_rsi_bonus))
-            soxl_ok = (
-                self.use_soxl_bull
-                and price_soxl > sma_soxl
-                and rsi_soxl > soxl_rsi_th
+            return self._compute_bull_signal(
+                rsi_qqq,
+                rsi_spy,
+                rsi_uvxy,
+                rsi_soxl,
+                price_soxl,
+                sma_soxl,
             )
-            if soxl_ok and not getattr(self, "_soxl_skip_spy_rsi_filter", False):
-                soxl_ok = rsi_soxl > rsi_spy
-            if soxl_ok:
-                return self._bull_risk_on_momentum("SOXL")
-            return self._bull_risk_on_momentum("TQQQ")
 
         if rsi_tqqq < self.th_rsi_tqqq_bear_tecl:
             return "TECL"
@@ -1527,4 +1644,5 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return self._get_max_rsi_ticker(self._defensive_rsi_candidates())
 
     def OnEndOfAlgorithm(self):
+        self._log_backtest_attribution()
         self.Debug("Algorithm finished.")
