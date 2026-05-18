@@ -7,6 +7,8 @@ from AlgorithmImports import *
 
 
 def parameter_was_set(algo, name):
+    if not getattr(algo, "_use_qc_ui_parameters", True):
+        return False
     raw = algo.GetParameter(name)
     return raw is not None and str(raw).strip() != ""
 
@@ -98,6 +100,8 @@ def apply_lift_120x_research_bundle(algo):
 
 
 def reload_user_overrides_after_profile(algo):
+    if not getattr(algo, "_use_qc_ui_parameters", True):
+        return
     if parameter_was_set(algo, "max_gross_exposure"):
         algo.max_gross_exposure = max(
             1.0,
