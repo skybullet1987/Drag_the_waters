@@ -24,6 +24,8 @@ from datetime import datetime
 # Regime / signal extensions:
 #   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
 #   bull_tqqq_momentum_days: require positive TQQQ N-day return before SOXL/TQQQ.
+#   use_soxl_spy_rsi_filter: when true, SOXL bull leg also requires SOXL RSI > SPY RSI.
+#   maximize_vol_lookback: optional override (default 12) while maximize profile is active.
 #
 # Research presets (parameter research_preset):
 #   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
@@ -72,7 +74,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "prod",
             "live_safe",
         )
-        self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
+        self._preset_force_max_equity = preset in (
+            "max_equity",
+            "maximize",
+            "is_max",
+            "ultra_max",
+            "ultra_maximize",
+            "moon",
+        )
         if self._preset_force_production and self._preset_force_max_equity:
             self.Debug(
                 "research_preset conflict: production/live_safe wins over max_equity"
@@ -165,6 +174,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self.use_soxl_bull = self._bool_parameter("use_soxl_bull", True)
         self.use_svxy_calm = self._bool_parameter("use_svxy_calm", False)
+        self.use_soxl_spy_rsi_filter = self._bool_parameter(
+            "use_soxl_spy_rsi_filter", True
+        )
 
         # ── Volatility targeting ────────────────────────────────────────
         self.use_vol_targeting = self._bool_parameter("use_vol_targeting", True)
@@ -428,11 +440,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         """
         In-sample equity maximization bundle. Expect deeper drawdowns, gap risk,
         and huge divergence vs live fills. Do not deploy this profile to IB.
+
+        v2 bump: hotter vol targets, shorter vol lookback (faster sizing), rarer
+        bull UVXY via higher RSI bars, easier SOXL (lower RSI + optional drop of
+        SOXL>SPY RSI), no TQQQ momentum stall, slightly rarer bear-path UVXY.
         """
         self.Debug(
-            "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
-            "looser bull UVXY — NOT for live. This is the default QC profile unless "
-            "maximize_backtest_equity=false or research_preset=production."
+            "MAXIMIZE_BACKTEST_EQUITY profile (v2): same-bar, rails off, hotter vol "
+            "targets, shorter vol lookback, rarer bull UVXY, easier SOXL — NOT for live."
         )
         self.use_eod_next_bar_execution = False
         self.use_rebalance_bands = False
@@ -447,15 +462,35 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_tiered_drawdown = False
         self.use_vol_targeting = True
         self.use_regime_vol_target = True
-        self.target_ann_vol = 0.58
-        self.target_ann_vol_bull = 0.68
-        self.target_ann_vol_bear = 0.48
+        # Vol targeting: push toward cap=1.0 multiplier more often in calm tape.
+        self.target_ann_vol = 0.74
+        self.target_ann_vol_bull = 0.90
+        self.target_ann_vol_bear = 0.60
+        self.vol_lookback = max(5, self._int_parameter("maximize_vol_lookback", 12))
         self.min_hold_days = 0
-        self.th_rsi_qqq_bull_uvxy = 90.0
-        self.th_rsi_spy_bull_uvxy = 89.0
-        self.th_rsi_uvxy_elevated = 82.0
-        self.th_rsi_uvxy_extreme = 93.0
-        self.th_rsi_soxl_bull = 34.0
+        self.bull_tqqq_momentum_days = 0
+        self.use_soxl_spy_rsi_filter = False
+        self.max_position_weight = 1.0
+        self.vol_etp_max_weight = 1.0
+        # Bull: UVXY only on more extreme RSI (more time TQQQ/SOXL).
+        self.th_rsi_qqq_bull_uvxy = 94.0
+        self.th_rsi_spy_bull_uvxy = 93.0
+        # Bear / vol-complex: require hotter UVXY RSI before vol branch fires.
+        self.th_rsi_uvxy_elevated = 86.0
+        self.th_rsi_uvxy_extreme = 96.0
+        self.th_rsi_soxl_bull = 26.0
+        ultra = self._research_preset in ("ultra_max", "ultra_maximize", "moon")
+        if ultra:
+            self.target_ann_vol = 0.82
+            self.target_ann_vol_bull = 0.98
+            self.target_ann_vol_bear = 0.68
+            self.vol_lookback = max(5, self._int_parameter("maximize_vol_lookback", 10))
+            self.th_rsi_qqq_bull_uvxy = 96.0
+            self.th_rsi_spy_bull_uvxy = 95.0
+            self.th_rsi_soxl_bull = 22.0
+            self.Debug(
+                "ULTRA_MAX research_preset: additional vol-target bump + shorter lookback."
+            )
         if self.maximize_include_svxy:
             self.use_svxy_calm = True
 
@@ -1040,12 +1075,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 return "UVXY"
             if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
                 return "SVXY"
-            if (
+            soxl_ok = (
                 self.use_soxl_bull
                 and price_soxl > sma_soxl
                 and rsi_soxl > self.th_rsi_soxl_bull
-                and rsi_soxl > rsi_spy
-            ):
+            )
+            if self.use_soxl_spy_rsi_filter:
+                soxl_ok = soxl_ok and rsi_soxl > rsi_spy
+            if soxl_ok:
                 return self._bull_risk_on_momentum("SOXL")
             return self._bull_risk_on_momentum("TQQQ")
 
