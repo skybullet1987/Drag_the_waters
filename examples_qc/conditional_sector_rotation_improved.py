@@ -22,9 +22,10 @@ from datetime import datetime
 #  10) max_position_weight + vol_etp_max_weight execution caps.
 #  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
 #
-# Maximize / 120x research knobs (QC parameters override preset after profile apply):
-#   max_gross_exposure, disable_bull_uvxy, bull_uvxy_require_both, maximize_disable_vol_target,
-#   th_rsi_qqq_bull_uvxy, th_rsi_spy_bull_uvxy, th_rsi_soxl_bull, target_ann_vol_bull, etc.
+# Optional 120x research bundle (OFF by default — does not change headline ~60x maximize):
+#   research_preset=aggressive_120x  OR  aggressive_120x_research=true
+# Knobs: max_gross_exposure, disable_bull_uvxy, bull_uvxy_require_both, maximize_disable_vol_target,
+#   th_rsi_*, target_ann_vol_bull (QC overrides only when parameter is explicitly set).
 #
 # Regime / signal extensions:
 #   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
@@ -78,6 +79,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "live_safe",
         )
         self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
+        self._preset_force_aggressive_120x = preset in (
+            "aggressive_120x",
+            "120x",
+            "max_120x",
+        )
         if self._preset_force_production and self._preset_force_max_equity:
             self.Debug(
                 "research_preset conflict: production/live_safe wins over max_equity"
@@ -172,11 +178,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_svxy_calm = self._bool_parameter("use_svxy_calm", False)
         self.disable_bull_uvxy = self._bool_parameter("disable_bull_uvxy", False)
         self.bull_uvxy_require_both = self._bool_parameter(
-            "bull_uvxy_require_both", True
+            "bull_uvxy_require_both", False
         )
+        self.aggressive_120x_research = self._bool_parameter(
+            "aggressive_120x_research", False
+        ) or self._preset_force_aggressive_120x
         self.maximize_disable_vol_target = self._bool_parameter(
             "maximize_disable_vol_target", False
         )
+        self._soxl_skip_spy_rsi_filter = False
 
         # ── Volatility targeting ────────────────────────────────────────
         self.use_vol_targeting = self._bool_parameter("use_vol_targeting", True)
@@ -277,6 +287,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._apply_production_safe_profile()
         elif self.maximize_backtest_equity:
             self._apply_maximize_backtest_equity_profile()
+
+        if self.aggressive_120x_research or self._preset_force_aggressive_120x:
+            self._apply_aggressive_120x_research_bundle()
+
+        if self.maximize_backtest_equity or self.production_safe_defaults:
             self._reload_user_overrides_after_profile()
 
         if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
@@ -466,6 +481,29 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_tiered_drawdown = False
         self.use_vol_targeting = True
         self.use_regime_vol_target = True
+        self.target_ann_vol = 0.58
+        self.target_ann_vol_bull = 0.68
+        self.target_ann_vol_bear = 0.48
+        self.min_hold_days = 0
+        self.th_rsi_qqq_bull_uvxy = 90.0
+        self.th_rsi_spy_bull_uvxy = 89.0
+        self.th_rsi_uvxy_elevated = 82.0
+        self.th_rsi_uvxy_extreme = 93.0
+        self.th_rsi_soxl_bull = 34.0
+        if self.maximize_include_svxy:
+            self.use_svxy_calm = True
+        if self.maximize_disable_vol_target:
+            self.use_vol_targeting = False
+
+    def _apply_aggressive_120x_research_bundle(self):
+        """
+        Opt-in only. Hot gross, vol targets, and UVXY/SOXL logic for 120x experiments.
+        Default maximize (~60x) is unchanged when this bundle is not enabled.
+        """
+        self.Debug(
+            "AGGRESSIVE_120X bundle: max_gross=1.35, hotter vol targets, stricter bull UVXY. "
+            "High drawdown risk — not the default maximize profile."
+        )
         self.target_ann_vol = 0.75
         self.target_ann_vol_bull = 0.85
         self.target_ann_vol_bear = 0.55
@@ -479,60 +517,71 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._float_parameter("max_position_weight", self.max_gross_exposure),
             ),
         )
-        self.min_hold_days = 0
         self.th_rsi_qqq_bull_uvxy = 97.0
         self.th_rsi_spy_bull_uvxy = 96.0
-        self.th_rsi_uvxy_elevated = 82.0
-        self.th_rsi_uvxy_extreme = 93.0
         self.th_rsi_soxl_bull = 26.0
         self.bull_uvxy_require_both = True
+        self._soxl_skip_spy_rsi_filter = True
         if self.maximize_include_svxy:
             self.use_svxy_calm = True
         if self.maximize_disable_vol_target:
             self.use_vol_targeting = False
 
+    def _parameter_was_set(self, name):
+        raw = self.GetParameter(name)
+        return raw is not None and str(raw).strip() != ""
+
     def _reload_user_overrides_after_profile(self):
-        """Re-apply QC parameters so project knobs beat maximize preset defaults."""
-        self.max_gross_exposure = max(
-            1.0,
-            min(2.0, self._float_parameter("max_gross_exposure", self.max_gross_exposure)),
-        )
-        self.max_position_weight = max(
-            0.01,
-            min(
-                self.max_gross_exposure,
-                self._float_parameter("max_position_weight", self.max_position_weight),
-            ),
-        )
-        self.target_ann_vol = max(
-            0.01, self._float_parameter("target_ann_vol", self.target_ann_vol)
-        )
-        self.target_ann_vol_bull = max(
-            0.01,
-            self._float_parameter("target_ann_vol_bull", self.target_ann_vol_bull),
-        )
-        self.target_ann_vol_bear = max(
-            0.01,
-            self._float_parameter("target_ann_vol_bear", self.target_ann_vol_bear),
-        )
-        self.th_rsi_qqq_bull_uvxy = self._float_parameter(
-            "th_rsi_qqq_bull_uvxy", self.th_rsi_qqq_bull_uvxy
-        )
-        self.th_rsi_spy_bull_uvxy = self._float_parameter(
-            "th_rsi_spy_bull_uvxy", self.th_rsi_spy_bull_uvxy
-        )
-        self.th_rsi_soxl_bull = self._float_parameter(
-            "th_rsi_soxl_bull", self.th_rsi_soxl_bull
-        )
-        self.disable_bull_uvxy = self._bool_parameter(
-            "disable_bull_uvxy", self.disable_bull_uvxy
-        )
-        self.bull_uvxy_require_both = self._bool_parameter(
-            "bull_uvxy_require_both", self.bull_uvxy_require_both
-        )
-        if self._bool_parameter("maximize_disable_vol_target", False):
-            self.use_vol_targeting = False
-        elif self.GetParameter("use_vol_targeting") is not None:
+        """Apply QC parameters only when explicitly set in the project."""
+        if self._parameter_was_set("max_gross_exposure"):
+            self.max_gross_exposure = max(
+                1.0,
+                min(2.0, self._float_parameter("max_gross_exposure", 1.0)),
+            )
+        if self._parameter_was_set("max_position_weight"):
+            self.max_position_weight = max(
+                0.01,
+                min(
+                    self.max_gross_exposure,
+                    self._float_parameter("max_position_weight", 1.0),
+                ),
+            )
+        if self._parameter_was_set("target_ann_vol"):
+            self.target_ann_vol = max(
+                0.01, self._float_parameter("target_ann_vol", self.target_ann_vol)
+            )
+        if self._parameter_was_set("target_ann_vol_bull"):
+            self.target_ann_vol_bull = max(
+                0.01,
+                self._float_parameter("target_ann_vol_bull", self.target_ann_vol_bull),
+            )
+        if self._parameter_was_set("target_ann_vol_bear"):
+            self.target_ann_vol_bear = max(
+                0.01,
+                self._float_parameter("target_ann_vol_bear", self.target_ann_vol_bear),
+            )
+        if self._parameter_was_set("th_rsi_qqq_bull_uvxy"):
+            self.th_rsi_qqq_bull_uvxy = self._float_parameter(
+                "th_rsi_qqq_bull_uvxy", self.th_rsi_qqq_bull_uvxy
+            )
+        if self._parameter_was_set("th_rsi_spy_bull_uvxy"):
+            self.th_rsi_spy_bull_uvxy = self._float_parameter(
+                "th_rsi_spy_bull_uvxy", self.th_rsi_spy_bull_uvxy
+            )
+        if self._parameter_was_set("th_rsi_soxl_bull"):
+            self.th_rsi_soxl_bull = self._float_parameter(
+                "th_rsi_soxl_bull", self.th_rsi_soxl_bull
+            )
+        if self._parameter_was_set("disable_bull_uvxy"):
+            self.disable_bull_uvxy = self._bool_parameter("disable_bull_uvxy", False)
+        if self._parameter_was_set("bull_uvxy_require_both"):
+            self.bull_uvxy_require_both = self._bool_parameter(
+                "bull_uvxy_require_both", False
+            )
+        if self._parameter_was_set("maximize_disable_vol_target"):
+            if self._bool_parameter("maximize_disable_vol_target", False):
+                self.use_vol_targeting = False
+        if self._parameter_was_set("use_vol_targeting"):
             self.use_vol_targeting = self._bool_parameter(
                 "use_vol_targeting", self.use_vol_targeting
             )
@@ -1129,11 +1178,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                     return "UVXY"
             if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
                 return "SVXY"
-            if (
+            soxl_ok = (
                 self.use_soxl_bull
                 and price_soxl > sma_soxl
                 and rsi_soxl > self.th_rsi_soxl_bull
-            ):
+            )
+            if soxl_ok and not getattr(self, "_soxl_skip_spy_rsi_filter", False):
+                soxl_ok = rsi_soxl > rsi_spy
+            if soxl_ok:
                 return self._bull_risk_on_momentum("SOXL")
             return self._bull_risk_on_momentum("TQQQ")
 
