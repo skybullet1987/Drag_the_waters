@@ -25,7 +25,8 @@ from datetime import datetime
 #
 # ~60x default: headline_qc_default=true → maximize only (unchanged).
 # ~120x research: research_preset=target_120x  OR  target_120x_research=true
-#   (moderate gross 1.22, QQQ vol anchor, VIX-gated bull UVXY, SOXL outperform bias).
+#   v2: maximize vol + TQQQ anchor, gross~1.12, VIX-gated UVXY (low churn).
+#   target_120x_high_churn=true reproduces v1-style (more orders, often worse CAGR).
 # Legacy hot bundle: research_preset=aggressive_120x (high DD risk).
 # QC overrides apply only when the parameter is explicitly set in the project.
 #
@@ -580,19 +581,22 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def _apply_target_120x_research_bundle(self):
         """
-        Tuned ~120x research path: more bull beta than baseline maximize, less blow-up risk
-        than aggressive_120x (1.35 gross + AND UVXY).
+        ~120x research: maximize core + small deltas only (v2 — less churn than v1).
+
+        v1 over-traded (SVXY calm, QQQ vol anchor, SOXL outperform) → ~30x / 1900 orders.
+        v2 keeps maximize vol/anchor, skips SVXY calm, modest gross, VIX-gated bull UVXY.
         """
         self.Debug(
-            "TARGET_120X bundle: max_gross~1.22, QQQ vol anchor, VIX-gated bull UVXY (OR), "
-            "SOXL outperform bias, SVXY calm on. Set research_preset=target_120x."
+            "TARGET_120X v2: maximize vol/anchor + max_gross~1.12, VIX-gated bull UVXY (OR 93/92), "
+            "no SVXY calm / no SOXL outperform (low churn). Optional: target_120x_high_churn=true."
         )
         self.maximize_backtest_equity = True
-        self.target_ann_vol = 0.62
-        self.target_ann_vol_bull = 0.72
-        self.target_ann_vol_bear = 0.50
+        # Same vol targeting as headline ~60x maximize (do not down-shift beta)
+        self.target_ann_vol = 0.58
+        self.target_ann_vol_bull = 0.68
+        self.target_ann_vol_bear = 0.48
         self.max_gross_exposure = max(
-            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.22))
+            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.12))
         )
         self.max_position_weight = max(
             0.01,
@@ -601,39 +605,49 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._float_parameter("max_position_weight", self.max_gross_exposure),
             ),
         )
-        self.vol_lookback = max(5, self._int_parameter("vol_lookback", 12))
+        if not self._parameter_was_set("vol_lookback"):
+            self.vol_lookback = 20
+        # TQQQ anchor = same as ~60x (QQQ anchor caused vol-scaler churn)
         if not self._parameter_was_set("vol_anchor_ticker"):
-            self.vol_anchor_ticker = "QQQ"
-        if not self._parameter_was_set("regime_mode"):
-            self.regime_mode = "spy"
-        if not self._parameter_was_set("risk_off_ticker"):
-            self.risk_off_ticker = "TQQQ"
-        self.th_rsi_qqq_bull_uvxy = 95.0
-        self.th_rsi_spy_bull_uvxy = 94.0
-        self.th_rsi_soxl_bull = 30.0
+            self.vol_anchor_ticker = "TQQQ"
+        self.th_rsi_qqq_bull_uvxy = 93.0
+        self.th_rsi_spy_bull_uvxy = 92.0
+        self.th_rsi_soxl_bull = 32.0
         self.bull_uvxy_require_both = False
         self.disable_bull_uvxy = False
         self._soxl_skip_spy_rsi_filter = False
         self._use_vix_gate = True
-        self._prefer_soxl_on_outperform = True
+        self._prefer_soxl_on_outperform = False
         self.vix_min_bull_uvxy = max(
-            10.0, self._float_parameter("vix_min_bull_uvxy", self.vix_min_bull_uvxy)
+            10.0, self._float_parameter("vix_min_bull_uvxy", 20.0)
         )
-        self.soxl_outperform_days = max(
-            2, self._int_parameter("soxl_outperform_days", self.soxl_outperform_days)
-        )
-        self.soxl_outperform_rsi_bonus = max(
-            0.0,
-            self._float_parameter(
-                "soxl_outperform_rsi_bonus", self.soxl_outperform_rsi_bonus
-            ),
-        )
-        self.use_svxy_calm = True
-        self.maximize_include_svxy = True
+        # Do not force SVXY calm — major order-count inflation in v1 backtest
+        self.use_svxy_calm = self._bool_parameter("target_120x_use_svxy_calm", False)
         if not self._parameter_was_set("margin_safety_pct"):
-            self.margin_safety_pct = 0.97
+            self.margin_safety_pct = 0.98
         if self.maximize_disable_vol_target:
             self.use_vol_targeting = False
+        if self._bool_parameter("target_120x_high_churn", False):
+            self.Debug("TARGET_120X: high_churn overrides enabled (v1-style experiment).")
+            self.vol_lookback = max(5, self._int_parameter("vol_lookback", 12))
+            if not self._parameter_was_set("vol_anchor_ticker"):
+                self.vol_anchor_ticker = "QQQ"
+            if not self._parameter_was_set("regime_mode"):
+                self.regime_mode = "spy"
+            if not self._parameter_was_set("risk_off_ticker"):
+                self.risk_off_ticker = "TQQQ"
+            self.target_ann_vol = 0.62
+            self.target_ann_vol_bull = 0.72
+            self.target_ann_vol_bear = 0.50
+            self.max_gross_exposure = max(
+                1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.22))
+            )
+            self._prefer_soxl_on_outperform = True
+            self.use_svxy_calm = True
+            self.maximize_include_svxy = True
+            self.th_rsi_qqq_bull_uvxy = 95.0
+            self.th_rsi_spy_bull_uvxy = 94.0
+            self.th_rsi_soxl_bull = 30.0
 
     def _parameter_was_set(self, name):
         raw = self.GetParameter(name)
