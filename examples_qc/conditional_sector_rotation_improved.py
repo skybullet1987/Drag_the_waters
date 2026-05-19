@@ -5,12 +5,11 @@ from datetime import datetime
 # endregion
 
 # Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
-# Upload: maximize → main.py only. aggressive → +csr_aggressive_ext.py (see DEPLOY).
-# institutional → main.py + csr_institutional_ext.py (optional). See QUANTCONNECT_DEPLOY.txt.
-# ACTIVE_BASELINE: maximize | maximize_plus | aggressive_120x | ml_overlay | institutional
+# maximize_hold → +csr_hold_ext.py. See QUANTCONNECT_DEPLOY.txt.
+# ACTIVE_BASELINE: maximize | maximize_hold | ml_overlay | institutional
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "maximize"  # maximize | ml_overlay | convex | institutional
+ACTIVE_BASELINE = "maximize"  # maximize | maximize_hold | ml_overlay | institutional
 
 
 
@@ -69,6 +68,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self._preset_force_maximize_plus = preset in (
             "maximize_plus", "plus", "max_plus",
+        )
+        self._preset_force_maximize_hold = preset in (
+            "maximize_hold", "hold", "let_winners_run",
         )
         self._preset_force_aggressive_120x = preset in (
             "aggressive_120x",
@@ -283,14 +285,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_institutional_profile()
             elif _base in ("ml_overlay", "ml_maximize", "ml", "track2"):
                 self._apply_ml_maximize_profile()
-            elif _base in ("convex", "crisis", "convexity", "low_dd_convex"):
-                self._apply_convex_profile()
-            elif _base in ("aggressive_120x", "aggressive", "120x", "max_120x"):
-                from csr_aggressive_ext import apply_aggressive_120x_baseline
-                apply_aggressive_120x_baseline(self)
-            elif _base in ("maximize_plus", "plus", "max_plus"):
-                from csr_aggressive_ext import apply_maximize_plus_baseline
-                apply_maximize_plus_baseline(self)
+            elif _base in ("maximize_hold", "hold", "let_winners_run"):
+                from csr_hold_ext import apply_maximize_hold_profile
+                apply_maximize_hold_profile(self)
             else:
                 self.maximize_backtest_equity = True
                 self._apply_maximize_backtest_equity_profile()
@@ -336,6 +333,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_institutional_profile()
             elif self._preset_force_ml_overlay:
                 self._apply_ml_maximize_profile()
+            elif self._preset_force_maximize_hold:
+                from csr_hold_ext import apply_maximize_hold_profile
+                apply_maximize_hold_profile(self)
             elif self._preset_force_convex:
                 self._apply_convex_profile()
             elif self._preset_force_aggressive_120x:
@@ -499,6 +499,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.convex_preset_active = getattr(self, "convex_preset_active", False)
         self.aggressive_preset_active = getattr(self, "aggressive_preset_active", False)
         self.maximize_plus_active = getattr(self, "maximize_plus_active", False)
+        self.maximize_hold_active = getattr(self, "maximize_hold_active", False)
+        self.hold_winners_enabled = getattr(self, "hold_winners_enabled", False)
+        self._hold_entry_price = getattr(self, "_hold_entry_price", {})
+        self._hold_peak_pv = getattr(self, "_hold_peak_pv", {})
         self._ml_weights = None
         self._ml_last_prob = 0.5
         self._ml_last_train_day = None
@@ -521,20 +525,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
-        if getattr(self, "aggressive_preset_active", False):
-            self.Debug(
-                "ACTIVE_PROFILE=aggressive_120x (hot vol, gross~1.35, "
-                f"max_gross={self.max_gross_exposure:.2f})."
-            )
-        elif getattr(self, "maximize_plus_active", False):
-            self.Debug(
-                "ACTIVE_PROFILE=maximize_plus (gross 1.15, vol 0.65/0.78/0.52, "
-                f"max_gross={self.max_gross_exposure:.2f})."
-            )
-        elif getattr(self, "convex_preset_active", False):
-            self.Debug(
-                "ACTIVE_PROFILE=convex (DEPRECATED — failed experiment)."
-            )
+        if getattr(self, "maximize_hold_active", False):
+            self.Debug(f"ACTIVE_PROFILE=maximize_hold (max_gross={self.max_gross_exposure:.2f}).")
         elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
             self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
         elif self.maximize_backtest_equity:
@@ -847,7 +839,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._last_trade_time = self.Time
             return
 
+        prev_t = self._last_target_ticker
         self.SetHoldings(sym, w, True)
+        if getattr(self, "hold_winners_enabled", False):
+            from csr_hold_ext import after_trade_open
+            after_trade_open(self, t, prev_t)
         self._last_target_ticker = t
         self._last_trade_time = self.Time
         self._last_executed_weight = w
@@ -916,7 +912,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         sym = self.symbols[target_ticker]
+        prev_t = self._last_target_ticker
         self.SetHoldings(sym, w, True)
+        if getattr(self, "hold_winners_enabled", False):
+            from csr_hold_ext import after_trade_open
+            after_trade_open(self, target_ticker, prev_t)
         self._last_target_ticker = target_ticker
         self._last_trade_time = self.Time
         self._last_executed_weight = w
@@ -1374,13 +1374,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return self.risk_off_ticker if self.risk_off_ticker in allowed else "BSV"
 
     def _min_hold_blocks_switch_target(self, proposed_ticker):
-        if self.min_hold_days <= 0 or self._last_trade_time is None:
-            return False
-        if self.use_drawdown_guard and self._drawdown_guard_active:
-            return False
-        if proposed_ticker == self._last_target_ticker:
-            return False
-        return (self.Time - self._last_trade_time).days < self.min_hold_days
+        from csr_hold_ext import min_hold_blocks_switch_target
+        return min_hold_blocks_switch_target(self, proposed_ticker)
 
     def _last_pending_weight_or_default(self):
         w = getattr(self, "_last_executed_weight", None)
