@@ -2,11 +2,6 @@
 from AlgorithmImports import *
 from datetime import datetime
 
-try:
-    from csr_ml_overlay import CSRMLOverlayMixin
-except Exception:
-    CSRMLOverlayMixin = object
-
 # endregion
 
 # =============================================================================
@@ -69,7 +64,7 @@ ACTIVE_BASELINE = "ml_overlay"  # "maximize" | "ml_overlay" | "institutional"
 
 
 
-class ConditionalSectorRotationImproved(CSRMLOverlayMixin, QCAlgorithm):
+class ConditionalSectorRotationImproved(QCAlgorithm):
 
     def Initialize(self):
         self._use_qc_ui_parameters = USE_QC_UI_PARAMETERS
@@ -395,6 +390,9 @@ class ConditionalSectorRotationImproved(CSRMLOverlayMixin, QCAlgorithm):
             self.SetSecurityInitializer(self._equity_slippage_initializer)
 
         self._log_active_research_profile()
+        if getattr(self, "use_ml_overlay", False) and not hasattr(self, "_mlh"):
+            from csr_ml_overlay import wire_ml_overlay
+            wire_ml_overlay(self)
 
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
@@ -562,6 +560,28 @@ class ConditionalSectorRotationImproved(CSRMLOverlayMixin, QCAlgorithm):
                 "ACTIVE_PROFILE=custom (maximize off, headline_qc_default false). "
                 "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
             )
+
+
+    def _apply_ml_maximize_profile(self):
+        from csr_ml_overlay import apply_ml_maximize_profile
+        apply_ml_maximize_profile(self)
+
+    def _ml_maybe_train(self, force=False):
+        h = getattr(self, "_mlh", None)
+        if h is not None:
+            h.maybe_train(force)
+
+    def _ml_apply_signal_filter(self, signal):
+        h = getattr(self, "_mlh", None)
+        if h is not None:
+            return h.apply_signal_filter(signal)
+        return signal
+
+    def _ml_overlay_multiplier(self, ticker):
+        h = getattr(self, "_mlh", None)
+        if h is not None:
+            return h.overlay_multiplier(ticker)
+        return 1.0
 
     def _apply_institutional_profile(self):
         # Lower-DD variant: avoid bear-sleeve 3x (TECS/TECL) churn; do not park in BSV forever.
