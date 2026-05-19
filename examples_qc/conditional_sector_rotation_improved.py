@@ -5,9 +5,9 @@ from datetime import datetime
 # endregion
 
 # Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
-# Upload: maximize → main.py only. ml_overlay → +csr_ml_overlay.py. convex → +csr_convex_ext.py.
+# Upload: maximize → main.py only. aggressive → +csr_aggressive_ext.py (see DEPLOY).
 # institutional → main.py + csr_institutional_ext.py (optional). See QUANTCONNECT_DEPLOY.txt.
-# ACTIVE_BASELINE: maximize | ml_overlay | convex | institutional
+# ACTIVE_BASELINE: maximize | maximize_plus | aggressive_120x | ml_overlay | institutional
 
 USE_QC_UI_PARAMETERS = False
 ACTIVE_BASELINE = "maximize"  # maximize | ml_overlay | convex | institutional
@@ -66,6 +66,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self._preset_force_convex = preset in (
             "convex", "crisis", "convexity", "low_dd_convex",
+        )
+        self._preset_force_maximize_plus = preset in (
+            "maximize_plus", "plus", "max_plus",
         )
         self._preset_force_aggressive_120x = preset in (
             "aggressive_120x",
@@ -282,6 +285,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_ml_maximize_profile()
             elif _base in ("convex", "crisis", "convexity", "low_dd_convex"):
                 self._apply_convex_profile()
+            elif _base in ("aggressive_120x", "aggressive", "120x", "max_120x"):
+                from csr_aggressive_ext import apply_aggressive_120x_baseline
+                apply_aggressive_120x_baseline(self)
+            elif _base in ("maximize_plus", "plus", "max_plus"):
+                from csr_aggressive_ext import apply_maximize_plus_baseline
+                apply_maximize_plus_baseline(self)
             else:
                 self.maximize_backtest_equity = True
                 self._apply_maximize_backtest_equity_profile()
@@ -329,10 +338,19 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_ml_maximize_profile()
             elif self._preset_force_convex:
                 self._apply_convex_profile()
+            elif self._preset_force_aggressive_120x:
+                from csr_aggressive_ext import apply_aggressive_120x_baseline
+                apply_aggressive_120x_baseline(self)
+            elif self._preset_force_maximize_plus:
+                from csr_aggressive_ext import apply_maximize_plus_baseline
+                apply_maximize_plus_baseline(self)
             elif self.maximize_backtest_equity:
                 self._apply_maximize_backtest_equity_profile()
 
-            if self.aggressive_120x_research or self._preset_force_aggressive_120x:
+            if (
+                (self.aggressive_120x_research or self._preset_force_aggressive_120x)
+                and not getattr(self, "aggressive_preset_active", False)
+            ):
                 self._apply_aggressive_120x_research_bundle()
 
             if self.maximize_backtest_equity or self.production_safe_defaults:
@@ -479,6 +497,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._regime_bear_streak = 0
         self._last_regime_score = 0.0
         self.convex_preset_active = getattr(self, "convex_preset_active", False)
+        self.aggressive_preset_active = getattr(self, "aggressive_preset_active", False)
+        self.maximize_plus_active = getattr(self, "maximize_plus_active", False)
         self._ml_weights = None
         self._ml_last_prob = 0.5
         self._ml_last_train_day = None
@@ -501,23 +521,28 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
-        if getattr(self, "convex_preset_active", False):
+        if getattr(self, "aggressive_preset_active", False):
             self.Debug(
-                "ACTIVE_PROFILE=convex (maximize signals, same-bar, DD/gap/VIX, "
-                f"vol~32% bull, max_gross={self.max_gross_exposure:.2f})."
+                "ACTIVE_PROFILE=aggressive_120x (hot vol, gross~1.35, "
+                f"max_gross={self.max_gross_exposure:.2f})."
+            )
+        elif getattr(self, "maximize_plus_active", False):
+            self.Debug(
+                "ACTIVE_PROFILE=maximize_plus (gross 1.15, vol 0.65/0.78/0.52, "
+                f"max_gross={self.max_gross_exposure:.2f})."
+            )
+        elif getattr(self, "convex_preset_active", False):
+            self.Debug(
+                "ACTIVE_PROFILE=convex (DEPRECATED — failed experiment)."
             )
         elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
             self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
         elif self.maximize_backtest_equity:
-            self.Debug(
-                "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
-                f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
-                "For EOD + rails: research_preset=production or production_safe_defaults=true."
-            )
+            self.Debug(f"ACTIVE_PROFILE=maximize (same-bar, max_gross={self.max_gross_exposure:.2f}).")
         elif getattr(self, "_preset_force_institutional", False) or (
             self.use_probabilistic_regime and self.use_bull_leverage_ladder
         ):
-            self.Debug("ACTIVE_PROFILE=institutional (EOD, ~25% vol, ladder).")
+            self.Debug("ACTIVE_PROFILE=institutional.")
         elif self.production_safe_defaults:
             self.Debug(
                 "ACTIVE_PROFILE=production_safe (EOD, rails, bands). "
