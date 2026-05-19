@@ -36,6 +36,10 @@ Set in main.py:
 
 QC rejects Python multiple inheritance on QCAlgorithm; ML uses composition helper.
 
+ML v2 (lighter): ml_veto_prob=0.32, ml_floor_mult=0.78, ml_boost_cap=1.12.
+Your v1 ml_overlay run (~$2.4M, 64% CAGR, 31% DD) underperformed maximize (~$6M)
+because veto@0.42 and floor@0.45 cut bull exposure; re-upload both files after update.
+
 Institutional / low-DD preset (not the ~$6M maximize path)
 --------------------------------------------------------------------------------
 Upload:
@@ -45,6 +49,8 @@ Upload:
 
 Set:
   ACTIVE_BASELINE = "institutional"
+
+Typical: ~$280k end equity, ~17% CAGR, ~43% DD — risk-managed, not max return.
 
 BENCHMARK (separate QC project)
 --------------------------------------------------------------------------------

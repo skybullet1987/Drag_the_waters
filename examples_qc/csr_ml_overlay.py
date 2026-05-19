@@ -22,9 +22,11 @@ class CSRMLOverlayHelper(object):
         a.ml_train_bars = 500
         a.ml_forward_days = 5
         a.ml_retrain_days = 63
-        a.ml_veto_prob = 0.42
-        a.ml_floor_mult = 0.45
-        a.ml_boost_cap = 1.08
+        # v2: lighter touch — v1 veto@0.42/floor@0.45 capped ~$2.4M vs ~$6M maximize
+        a.ml_veto_prob = 0.32
+        a.ml_floor_mult = 0.78
+        a.ml_boost_cap = 1.12
+        a.ml_bear_offensive_prob = 0.38
         a.ml_filter_bear_offensive = True
 
     def maybe_train(self, force=False):
@@ -168,7 +170,8 @@ class CSRMLOverlayHelper(object):
         if signal in a._ml_bull_tickers and p < float(a.ml_veto_prob):
             return a.risk_off_ticker
         if getattr(a, "ml_filter_bear_offensive", True) and signal in a._ml_bear_offensive:
-            if p < 0.50:
+            bear_thr = float(getattr(a, "ml_bear_offensive_prob", 0.38))
+            if p < bear_thr:
                 return a.risk_off_ticker
         return signal
 
