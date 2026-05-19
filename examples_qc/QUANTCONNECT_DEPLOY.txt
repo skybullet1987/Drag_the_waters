@@ -8,7 +8,7 @@ PROFILE SUMMARY (2020-01-01 .. 2026-05-17, $100k — indicative)
 --------------------------------------------------------------------------------
   maximize      ~$6M end equity   ~90% CAGR   ~45% DD   (1 file)
   ml_overlay      ~$4.4M            ~81%        ~39% DD   (2 files)
-  convex          TBD               target DD high-20s / low-30s (2 files)
+  convex          DEPRECATED ~$628k  ~33% CAGR   ~31% DD   (failed — do not use)
   institutional   ~$280k            ~17%        ~43% DD   (2 files)
 
 MAXIMIZE (~60x) — ONE FILE
@@ -27,18 +27,11 @@ ML OVERLAY — TWO FILES
   main.py  +  csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
 
-CONVEX (crash stack + moderate vol) — TWO FILES
+CONVEX — DEPRECATED (failed experiment, do not use)
 --------------------------------------------------------------------------------
-  main.py  +  csr_convex_ext.py
-  ACTIVE_BASELINE = "convex"
-
-  Same RSI / same-bar signals as maximize, plus:
-    drawdown guard + tiered DD, gap cooldown, VIX de-lever,
-    vol target ~32% bull / ~22% bear, 2% rebalance band, max gross 1.0
-
-  Logs: CONVEX preset..., ACTIVE_PROFILE=convex, EXECUTION_MODE=same_bar (convex)
-
-  QC UI alternative: research_preset=convex
+  May 2026: ~$628k end equity, 33% CAGR, 31% DD, 1233 orders.
+  Worse than ml_overlay (~$4.4M, 39% DD) on return and Sharpe.
+  Use ml_overlay for moderated risk; maximize for ceiling.
 
 INSTITUTIONAL — TWO FILES (not max-equity)
 --------------------------------------------------------------------------------

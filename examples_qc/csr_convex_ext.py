@@ -1,4 +1,4 @@
-# QuantConnect: optional second file with main.py for ACTIVE_BASELINE=convex.
+# DEPRECATED May 2026: ~$628k vs ml_overlay ~$4.4M. Use maximize or ml_overlay.
 
 
 def apply_convex_profile(algo):
@@ -7,7 +7,7 @@ def apply_convex_profile(algo):
     Not institutional (no ladder, no bear-sleeve suppress).
     """
     algo.Debug(
-        "CONVEX preset: maximize signals + same-bar; DD/gap/VIX on; vol target ~32% bull."
+        "CONVEX (DEPRECATED): failed vs ml_overlay — do not use for new backtests."
     )
     algo.convex_preset_active = True
     algo.maximize_backtest_equity = True
