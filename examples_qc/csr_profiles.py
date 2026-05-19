@@ -13,6 +13,40 @@ def parameter_was_set(algo, name):
     return raw is not None and str(raw).strip() != ""
 
 
+def apply_institutional_profile(algo):
+    """Lower-DD bundle: production rails + ~25% vol + regime ladder + VIX de-risk."""
+    algo.Debug("INSTITUTIONAL: EOD, vol ~25%, probabilistic regime, TQQQ/QLD/QQQ ladder.")
+    algo.maximize_backtest_equity = False
+    algo.production_safe_defaults = True
+    apply_production_safe_profile(algo)
+    algo.regime_mode = "spy_and_qqq"
+    algo.use_probabilistic_regime = True
+    algo.regime_score_min_bull = 0.55
+    algo.regime_hysteresis_days = 3
+    algo.use_bull_leverage_ladder = True
+    algo.bull_ladder_tqqq_min = 0.65
+    algo.bull_ladder_qld_min = 0.40
+    algo.scale_weight_by_regime_score = True
+    algo.use_rsp_breadth_proxy = True
+    algo.use_vix_delever = True
+    algo.vix_delever_ratio = 1.20
+    algo.vix_delever_mult = 0.55
+    algo.bull_tqqq_momentum_days = 15
+    algo.min_hold_days = 3
+    algo.disable_bull_uvxy = True
+    algo.target_ann_vol = 0.25
+    algo.target_ann_vol_bull = 0.28
+    algo.target_ann_vol_bear = 0.18
+    algo.max_drawdown_pct = 0.28
+    algo.drawdown_release_frac = 0.45
+    algo.tier1_drawdown = 0.10
+    algo.tier1_mult = 0.88
+    algo.tier2_drawdown = 0.18
+    algo.tier2_mult = 0.65
+    algo.max_gross_exposure = 1.0
+    algo.max_position_weight = 1.0
+
+
 def apply_production_safe_profile(algo):
     algo.Debug("PRODUCTION_SAFE: EOD, rails, bands, drawdown guard.")
     algo.maximize_backtest_equity = False
