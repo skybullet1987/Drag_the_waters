@@ -152,9 +152,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.ml_train_bars = max(120, self._int_parameter("ml_train_bars", 500))
         self.ml_forward_days = max(1, self._int_parameter("ml_forward_days", 5))
         self.ml_retrain_days = max(21, self._int_parameter("ml_retrain_days", 63))
-        self.ml_veto_prob = max(0.0, min(1.0, self._float_parameter("ml_veto_prob", 0.42)))
-        self.ml_floor_mult = max(0.2, min(1.0, self._float_parameter("ml_floor_mult", 0.45)))
-        self.ml_boost_cap = max(0.5, min(1.5, self._float_parameter("ml_boost_cap", 1.08)))
+        self.ml_veto_prob = max(0.0, min(1.0, self._float_parameter("ml_veto_prob", 0.32)))
+        self.ml_floor_mult = max(0.2, min(1.0, self._float_parameter("ml_floor_mult", 0.78)))
+        self.ml_boost_cap = max(0.5, min(1.5, self._float_parameter("ml_boost_cap", 1.12)))
+        self.ml_bear_offensive_prob = max(0.0, min(1.0, self._float_parameter("ml_bear_offensive_prob", 0.38)))
         self.ml_filter_bear_offensive = self._bool_parameter("ml_filter_bear_offensive", True)
         self.institutional_suppress_bear_leverage = self._bool_parameter(
             "institutional_suppress_bear_leverage", False
@@ -834,6 +835,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         raw_signal = self._apply_vol_etp_entry_confirmation(raw_signal)
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
+        signal = self._ml_apply_signal_filter(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
             if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
