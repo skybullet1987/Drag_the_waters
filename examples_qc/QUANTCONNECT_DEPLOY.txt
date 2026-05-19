@@ -1,42 +1,51 @@
 ================================================================================
-Conditional Sector Rotation — QuantConnect deployment (~60x baseline)
+Conditional Sector Rotation — QuantConnect deployment
 ================================================================================
 
-RESTORED BASELINE (commit ae73726 logic, May 2026)
+BASELINES (pick one via ACTIVE_BASELINE at top of main.py)
 --------------------------------------------------------------------------------
-The ~60x run (~$6M, ~900 orders) used this single-file algorithm BEFORE later
-120x/LIFT experiments added _safe_set_holdings churn, VIX gates, and csr_profiles
-splits that degraded results to ~$3.2M / ~1700 orders.
+  maximize        — ~60x / ~91% CAGR / ~45% max DD (same-bar, rails off)
+  institutional   — lower-DD research (EOD, ~25% vol, ladder, regime score)
 
-UPLOAD FOR ~60x BASELINE — ONE FILE ONLY
+UPLOAD — ONE FILE ONLY
 --------------------------------------------------------------------------------
   conditional_sector_rotation_improved.py  →  rename to  main.py
 
-Do NOT upload csr_profiles.py for this baseline (main.py has no import).
+Do NOT upload csr_profiles.py for single-file baselines (no import in main).
 
-File size ~50k — under QuantConnect 64k limit.
+File size must stay under QuantConnect 64k limit.
 
-At top of main.py (already set):
+Hardcoded toggles at top of main.py:
   USE_QC_UI_PARAMETERS = False
+  ACTIVE_BASELINE = "institutional"   # or "maximize"
 
-No QuantConnect parameter panel settings required.
+Expected logs:
+  ACTIVE_BASELINE=institutional ... INSTITUTIONAL profile: EOD, rails on ...
+  ACTIVE_BASELINE=maximize ... MAXIMIZE_BACKTEST_EQUITY profile: same-bar ...
 
-Expected log at start:
-  BASELINE_60X_RESTORED: ae73726 logic, hardcoded 2020-2026, $100k, ...
-  MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, ...
-  EXECUTION_MODE=same_bar (maximize baseline)
-
-Expected ballpark (2020-01-01 .. 2026-05-17, $100k):
-  End equity ~ $6M+   |  Orders ~900   |  CAGR ~90%   |  Max DD ~45%
-
-If you still see ~$3M / ~1700 orders:
-  - Old main.py still on QC (with csr_profiles import) — replace entirely
-  - Remove csr_profiles.py from the QC project if present
-  - Delete the algorithm and re-create with only the new main.py
-
-OPTIONAL: csr_profiles.py path
+QuantConnect parameter panel (optional)
 --------------------------------------------------------------------------------
-Only for future experiments. Not used by the restored baseline.
+Set USE_QC_UI_PARAMETERS = True and use research_preset:
+
+  research_preset=institutional   — same as ACTIVE_BASELINE=institutional
+  research_preset=production      — EOD + rails, no ladder/regime score
+  research_preset=maximize          — headline equity maximization
+  research_preset=realistic         — adds default slippage 0.001/share
+
+Key institutional parameters (override in QC panel when USE_QC_UI_PARAMETERS=True):
+  regime_mode=spy_and_qqq
+  regime_score_min_bull=0.55
+  regime_hysteresis_days=3
+  bull_ladder_tqqq_min=0.65
+  bull_ladder_qld_min=0.40
+  target_ann_vol=0.25
+  target_ann_vol_bull=0.28
+  target_ann_vol_bear=0.18
+  max_drawdown_pct=0.28
+  bull_tqqq_momentum_days=15
+  use_vix_delever=true
+  vix_delever_ratio=1.20
+  vix_delever_mult=0.55
 
 BENCHMARK (separate QC project)
 --------------------------------------------------------------------------------

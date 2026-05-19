@@ -33,6 +33,7 @@ from datetime import datetime
 #
 # Research presets (parameter research_preset):
 #   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
+#   institutional / inst / low_dd — lower-DD bundle (EOD, ladder, regime score).
 #   max_equity / maximize — same as maximize_backtest_equity=true.
 #   realistic / realistic_backtest — default slippage only (does not force production).
 #
@@ -47,11 +48,19 @@ from datetime import datetime
 #
 # Educational / research only. Leveraged and inverse ETFs can gap and decay.
 #
-# QuantConnect upload (~60x baseline): this file ONLY as main.py (~50k, under 64k).
-# QC parameter panel is ignored. Do not use csr_profiles.py for this baseline.
+# QuantConnect upload: this file ONLY as main.py (~55k, under 64k).
+#
+# Hardcoded (USE_QC_UI_PARAMETERS=False):
+#   ACTIVE_BASELINE = "institutional"  # or "maximize"
+# QC panel (USE_QC_UI_PARAMETERS=True):
+#   research_preset = institutional | production | maximize | realistic
+# Institutional knobs: regime_score_min_bull, bull_ladder_*, target_ann_vol*,
+#   max_drawdown_pct, bull_tqqq_momentum_days, vix_delever_*
 # =============================================================================
 
 USE_QC_UI_PARAMETERS = False
+ACTIVE_BASELINE = "institutional"  # "maximize" | "institutional"
+
 
 
 class ConditionalSectorRotationImproved(QCAlgorithm):
@@ -65,8 +74,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.SetEndDate(2026, 5, 17)
             self.SetCash(cash)
             self.Debug(
-                "BASELINE_60X_RESTORED: ae73726 logic, hardcoded 2020-2026, $100k, "
-                "maximize profile, QC parameters ignored"
+                "HARDCODED_BASELINE: 2020-2026 $100k ACTIVE_BASELINE="
+                f"{globals().get('ACTIVE_BASELINE', 'maximize')!r}"
             )
         else:
             sy = self._int_parameter("start_year", 2020)
@@ -98,6 +107,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "live_safe",
         )
         self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
+        self._preset_force_institutional = preset in (
+            "institutional", "inst", "low_dd", "lowdd",
+        )
         self._preset_force_aggressive_120x = preset in (
             "aggressive_120x",
             "120x",
@@ -168,6 +180,22 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.bull_tqqq_momentum_days = max(
             0, self._int_parameter("bull_tqqq_momentum_days", 0)
         )
+
+        self.use_probabilistic_regime = self._bool_parameter("use_probabilistic_regime", False)
+        self.regime_score_min_bull = max(0.0, min(1.0, self._float_parameter("regime_score_min_bull", 0.55)))
+        self.regime_hysteresis_days = max(0, self._int_parameter("regime_hysteresis_days", 0))
+        self.use_bull_leverage_ladder = self._bool_parameter("use_bull_leverage_ladder", False)
+        self.bull_ladder_tqqq_min = max(0.0, min(1.0, self._float_parameter("bull_ladder_tqqq_min", 0.65)))
+        self.bull_ladder_qld_min = max(0.0, min(1.0, self._float_parameter("bull_ladder_qld_min", 0.40)))
+        if self.bull_ladder_qld_min > self.bull_ladder_tqqq_min:
+            self.bull_ladder_qld_min = self.bull_ladder_tqqq_min
+        self.scale_weight_by_regime_score = self._bool_parameter("scale_weight_by_regime_score", False)
+        self.use_rsp_breadth_proxy = self._bool_parameter("use_rsp_breadth_proxy", False)
+        self.rsp_breadth_sma_period = max(5, self._int_parameter("rsp_breadth_sma_period", 20))
+        self.use_vix_delever = self._bool_parameter("use_vix_delever", False)
+        self.vix_delever_ratio = max(1.0, self._float_parameter("vix_delever_ratio", 1.20))
+        self.vix_delever_mult = max(0.05, min(1.0, self._float_parameter("vix_delever_mult", 0.55)))
+        self.vix_sma_period = max(5, self._int_parameter("vix_sma_period", 20))
 
         # ── RSI thresholds ────────────────────────────────────────────
         self.th_rsi_qqq_bull_uvxy = self._float_parameter("th_rsi_qqq_bull_uvxy", 81.0)
@@ -271,10 +299,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.trade_start = datetime(2020, 1, 1)
             self.trade_end = None
             self.production_safe_defaults = False
-            self.maximize_backtest_equity = True
+            self.maximize_backtest_equity = False
             self.aggressive_120x_research = False
             self.maximize_include_svxy = False
-            self._apply_maximize_backtest_equity_profile()
+            _base = str(globals().get("ACTIVE_BASELINE", "maximize")).strip().lower()
+            if _base in ("institutional", "inst", "low_dd", "lowdd"):
+                self._apply_institutional_profile()
+            else:
+                self.maximize_backtest_equity = True
+                self._apply_maximize_backtest_equity_profile()
             self.disable_bull_uvxy = True
         else:
             tsy = self._int_parameter("trade_start_year", sy)
@@ -313,6 +346,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
             if self.production_safe_defaults:
                 self._apply_production_safe_profile()
+            elif self._preset_force_institutional:
+                self._apply_institutional_profile()
             elif self.maximize_backtest_equity:
                 self._apply_maximize_backtest_equity_profile()
 
@@ -363,15 +398,30 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.benchmark_ticker = _bs if _bs else "TQQQ"
         if self.benchmark_ticker not in self.tickers:
             self.tickers.append(self.benchmark_ticker)
+        if self.use_bull_leverage_ladder and "QLD" not in self.tickers:
+            self.tickers.append("QLD")
+        if self.use_rsp_breadth_proxy and "RSP" not in self.tickers:
+            self.tickers.append("RSP")
 
         self.symbols = {}
         self.indicators = {}
+        self._vix_index_symbol = None
         for ticker in self.tickers:
             sym = self.AddEquity(ticker, Resolution.Daily).Symbol
             self.symbols[ticker] = sym
             self.indicators[self._rsi_key(ticker)] = self.RSI(
                 sym, self.rsi_period, MovingAverageType.Wilders, Resolution.Daily
             )
+
+        if self.use_vix_delever:
+            try:
+                vix_sym = self.AddIndex("VIX", Resolution.Daily).Symbol
+                self._vix_index_symbol = vix_sym
+                self.symbols["VIX"] = vix_sym
+                self.indicators["VIX_SMA"] = self.SMA(vix_sym, self.vix_sma_period, Resolution.Daily)
+            except Exception as ex:
+                self.use_vix_delever = False
+                self.Debug(f"VIX unavailable; use_vix_delever off: {ex}")
 
         self._sym_to_ticker = {self.symbols[k]: k for k in self.symbols.keys()}
 
@@ -389,6 +439,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.indicators["QQQ_SMA_REGIME"] = self.SMA(
                 self.symbols["QQQ"], self.regime_qqq_sma_period, Resolution.Daily
             )
+        if self.use_rsp_breadth_proxy and "RSP" in self.symbols:
+            self.indicators["RSP_SMA_BREADTH"] = self.SMA(
+                self.symbols["RSP"], self.rsp_breadth_sma_period, Resolution.Daily
+            )
 
         self.SetBenchmark(self.symbols[self.benchmark_ticker])
         self.Debug(f"Benchmark={self.benchmark_ticker} (set benchmark_ticker parameter to override)")
@@ -400,6 +454,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.tqqq_sma_period + 60,
             self.soxl_sma_period + 60,
             self.regime_qqq_sma_period + 60 if self.regime_mode in ("spy_and_qqq", "qqq") else 0,
+            self.rsp_breadth_sma_period + 60 if self.use_rsp_breadth_proxy else 0,
+            self.vix_sma_period + 60 if self.use_vix_delever else 0,
             self.rsi_period + 60,
             self.vol_lookback + 10,
         )
@@ -433,6 +489,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         self._vol_etp_confirm_name = None
         self._vol_etp_confirm_count = 0
+        self._regime_bull_live = False
+        self._regime_bull_streak = 0
+        self._regime_bear_streak = 0
+        self._last_regime_score = 0.0
 
     def _equity_slippage_initializer(self, security):
         if security.Type != SecurityType.Equity:
@@ -456,6 +516,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
                 "For EOD + rails: research_preset=production or production_safe_defaults=true."
             )
+        elif getattr(self, "_preset_force_institutional", False) or (
+            self.use_probabilistic_regime and self.use_bull_leverage_ladder
+        ):
+            self.Debug("ACTIVE_PROFILE=institutional (EOD, ~25% vol, ladder).")
         elif self.production_safe_defaults:
             self.Debug(
                 "ACTIVE_PROFILE=production_safe (EOD, rails, bands). "
@@ -466,6 +530,38 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 "ACTIVE_PROFILE=custom (maximize off, headline_qc_default false). "
                 "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
             )
+
+    def _apply_institutional_profile(self):
+        self.Debug("INSTITUTIONAL: EOD, rails, vol~25%, regime score, TQQQ/QLD/QQQ ladder.")
+        self.maximize_backtest_equity = False
+        self.production_safe_defaults = True
+        self._apply_production_safe_profile()
+        self.regime_mode = "spy_and_qqq"
+        self.use_probabilistic_regime = True
+        self.regime_score_min_bull = 0.55
+        self.regime_hysteresis_days = 3
+        self.use_bull_leverage_ladder = True
+        self.bull_ladder_tqqq_min = 0.65
+        self.bull_ladder_qld_min = 0.40
+        self.scale_weight_by_regime_score = True
+        self.use_rsp_breadth_proxy = True
+        self.use_vix_delever = True
+        self.vix_delever_ratio = 1.20
+        self.vix_delever_mult = 0.55
+        self.bull_tqqq_momentum_days = 15
+        self.min_hold_days = 3
+        self.disable_bull_uvxy = True
+        self.target_ann_vol = 0.25
+        self.target_ann_vol_bull = 0.28
+        self.target_ann_vol_bear = 0.18
+        self.max_drawdown_pct = 0.28
+        self.drawdown_release_frac = 0.45
+        self.tier1_drawdown = 0.10
+        self.tier1_mult = 0.88
+        self.tier2_drawdown = 0.18
+        self.tier2_mult = 0.65
+        self.max_gross_exposure = 1.0
+        self.max_position_weight = 1.0
 
     def _apply_production_safe_profile(self):
         self.Debug(
@@ -689,6 +785,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         self._update_drawdown_guard()
+        self._refresh_regime_state()
         gap_fired = self._mark_eod_gap_cooldown()
         if gap_fired:
             self._cooldown_remaining = self.gap_cooldown_days
@@ -712,6 +809,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             base_weight *= self._tiered_drawdown_multiplier()
             if self.use_vol_targeting:
                 base_weight *= self._vol_target_multiplier()
+            base_weight *= self._institutional_risk_multipliers()
 
         base_weight = max(0.0, min(self._gross_cap(), float(base_weight)))
 
@@ -796,6 +894,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         self._update_drawdown_guard()
+        self._refresh_regime_state()
         gap_fired = self._mark_eod_gap_cooldown()
         if gap_fired:
             self._cooldown_remaining = self.gap_cooldown_days
@@ -817,6 +916,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             w *= self._tiered_drawdown_multiplier()
             if self.use_vol_targeting:
                 w *= self._vol_target_multiplier()
+            w *= self._institutional_risk_multipliers()
         w = max(0.0, min(self._gross_cap(), float(w)))
 
         if self._min_hold_blocks_switch_target(target_ticker):
@@ -895,8 +995,118 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return True
         return (c1 / c0) - 1.0 > 0.0
 
+    def _clamp01(self, x):
+        return max(0.0, min(1.0, float(x)))
+
+    def _trend_score(self, price, sma, scale=0.05):
+        if price <= 0 or sma <= 0:
+            return 0.0
+        if price <= sma:
+            return self._clamp01((price / sma) - 0.92) * 0.35
+        return self._clamp01(0.55 + ((price / sma) - 1.0) / scale)
+
+    def _regime_score(self):
+        price_spy = self.Securities[self.symbols["SPY"]].Price
+        sma_spy = self.indicators["SPY_SMA200"].Current.Value
+        trend_s = self._trend_score(price_spy, sma_spy, 0.05)
+        breadth_s = 0.5
+        if self.use_rsp_breadth_proxy and "RSP" in self.symbols:
+            p_rsp = self.Securities[self.symbols["RSP"]].Price
+            key = "RSP_SMA_BREADTH"
+            if p_rsp > 0 and price_spy > 0 and key in self.indicators and self.indicators[key].IsReady:
+                ratio = p_rsp / price_spy
+                sma_r = self.indicators[key].Current.Value
+                if sma_r > 0:
+                    breadth_s = self._clamp01(0.45 + (ratio / sma_r - 1.0) * 5.0)
+        vol_s = 0.5
+        hist = self.History(self.symbols["SPY"], self.vol_lookback + 1, Resolution.Daily)
+        if hist is not None and not getattr(hist, "empty", True):
+            try:
+                closes = hist["close"].dropna()
+                rets = closes.pct_change().dropna()
+                if len(rets) >= max(5, self.vol_lookback - 1):
+                    rv = float(rets.iloc[-self.vol_lookback :].std()) * (252.0 ** 0.5)
+                    vol_s = self._clamp01(1.0 - (rv / 0.35))
+            except Exception:
+                pass
+        qqq_s = 0.5
+        if self.regime_mode in ("spy_and_qqq", "qqq"):
+            p_qqq = self.Securities[self.symbols["QQQ"]].Price
+            key = "QQQ_SMA_REGIME"
+            if key in self.indicators and self.indicators[key].IsReady:
+                qqq_s = self._trend_score(p_qqq, self.indicators[key].Current.Value, 0.04)
+        elif price_spy > 0 and sma_spy > 0:
+            qqq_s = trend_s
+        self._last_regime_score = self._clamp01(
+            0.35 * trend_s + 0.25 * qqq_s + 0.20 * breadth_s + 0.20 * vol_s
+        )
+        return self._last_regime_score
+
+    def _raw_bull_regime(self):
+        if self.use_probabilistic_regime:
+            return self._regime_score() >= self.regime_score_min_bull
+        return self._is_bull_regime()
+
+    def _update_regime_hysteresis(self, raw_bull):
+        n = int(self.regime_hysteresis_days)
+        if n <= 0:
+            self._regime_bull_live = bool(raw_bull)
+            return
+        if raw_bull:
+            self._regime_bull_streak += 1
+            self._regime_bear_streak = 0
+            if self._regime_bull_streak >= n:
+                self._regime_bull_live = True
+        else:
+            self._regime_bear_streak += 1
+            self._regime_bull_streak = 0
+            if self._regime_bear_streak >= n:
+                self._regime_bull_live = False
+
+    def _refresh_regime_state(self):
+        if self.use_probabilistic_regime:
+            self._regime_score()
+        self._update_regime_hysteresis(self._raw_bull_regime())
+
+    def _effective_is_bull_regime(self):
+        if self.regime_hysteresis_days > 0:
+            return self._regime_bull_live
+        return self._raw_bull_regime()
+
+    def _bull_leverage_ticker(self):
+        if not self.use_bull_leverage_ladder:
+            return "TQQQ"
+        s = self._last_regime_score if self.use_probabilistic_regime else (
+            1.0 if self._is_bull_regime() else 0.0
+        )
+        if s >= self.bull_ladder_tqqq_min:
+            return "TQQQ"
+        if s >= self.bull_ladder_qld_min:
+            return "QLD"
+        return "QQQ"
+
+    def _vix_stress_multiplier(self):
+        if not self.use_vix_delever or "VIX" not in self.symbols:
+            return 1.0
+        key = "VIX_SMA"
+        if key not in self.indicators or not self.indicators[key].IsReady:
+            return 1.0
+        vix = self.Securities[self.symbols["VIX"]].Price
+        sma = self.indicators[key].Current.Value
+        if vix <= 0 or sma <= 0:
+            return 1.0
+        if vix > sma * self.vix_delever_ratio:
+            return float(self.vix_delever_mult)
+        return 1.0
+
+    def _institutional_risk_multipliers(self):
+        m = self._vix_stress_multiplier()
+        if self.scale_weight_by_regime_score and self._regime_bull_live:
+            m *= max(0.35, self._last_regime_score)
+        return m
+
     def _bull_risk_on_momentum(self, ticker):
-        if ticker not in ("TQQQ", "SOXL"):
+        if ticker not in ("TQQQ", "SOXL", "QLD", "QQQ"):
             return ticker
         if self.bull_tqqq_momentum_days <= 0:
             return ticker
@@ -925,7 +1135,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return spy_bull
 
     def _vol_etp_standby_ticker(self):
-        return "TQQQ" if self._is_bull_regime() else self.risk_off_ticker
+        if self._effective_is_bull_regime():
+            return self._bull_leverage_ticker()
+        return self.risk_off_ticker
 
     def _apply_vol_etp_entry_confirmation(self, signal):
         vset = self._vol_etp_names()
@@ -1103,7 +1315,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if self.use_regime_vol_target:
             return (
                 self.target_ann_vol_bull
-                if self._is_bull_regime()
+                if self._effective_is_bull_regime()
                 else self.target_ann_vol_bear
             )
         return self.target_ann_vol
@@ -1254,7 +1466,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         sma_tqqq = self.indicators["TQQQ_SMA20"].Current.Value
         sma_soxl = self.indicators["SOXL_SMA20"].Current.Value
 
-        if self._is_bull_regime():
+        if self._effective_is_bull_regime():
             if not self.disable_bull_uvxy:
                 qqq_hot = rsi_qqq > self.th_rsi_qqq_bull_uvxy
                 spy_hot = rsi_spy > self.th_rsi_spy_bull_uvxy
@@ -1275,7 +1487,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 soxl_ok = rsi_soxl > rsi_spy
             if soxl_ok:
                 return self._bull_risk_on_momentum("SOXL")
-            return self._bull_risk_on_momentum("TQQQ")
+            return self._bull_risk_on_momentum(self._bull_leverage_ticker())
 
         if rsi_tqqq < self.th_rsi_tqqq_bear_tecl:
             return "TECL"
