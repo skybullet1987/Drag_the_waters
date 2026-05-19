@@ -4,49 +4,41 @@ Conditional Sector Rotation — QuantConnect deployment
 
 FILE SIZE: every .py file must be under 63,000 bytes.
 
-PROFILE SUMMARY (2020-01-01 .. 2026-05-17, $100k — indicative)
+BENCHMARKS (2020-01-01 .. 2026-05-17, $100k — your runs)
 --------------------------------------------------------------------------------
-  maximize      ~$6M end equity   ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay      ~$4.4M            ~81%        ~39% DD   (2 files)
-  convex          TBD               target DD high-20s / low-30s (2 files)
-  institutional   ~$280k            ~17%        ~43% DD   (2 files)
+  maximize          ~$6.0M   ~90% CAGR   ~45% DD   (1 file)
+  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files)
+  aggressive_120x     TBD      beat $6M?   higher DD (2 files)
+  maximize_plus       TBD      step up     (2 files)
+  convex              FAILED ~$628k — do not use
+  institutional       ~$280k   not max-equity
 
-MAXIMIZE (~60x) — ONE FILE
+MAXIMIZE — ONE FILE
 --------------------------------------------------------------------------------
   conditional_sector_rotation_improved.py  →  main.py
-
-  USE_QC_UI_PARAMETERS = False
   ACTIVE_BASELINE = "maximize"
 
-  Do NOT upload csr_ml_overlay.py, csr_convex_ext.py, csr_institutional_ext.py.
+AGGRESSIVE (test beating ~$6M) — TWO FILES
+--------------------------------------------------------------------------------
+  main.py  +  csr_aggressive_ext.py
 
-  Logs: ACTIVE_BASELINE='maximize', MAXIMIZE_BACKTEST_EQUITY, EXECUTION_MODE=same_bar (maximize)
+  Step 1 (moderate):
+    ACTIVE_BASELINE = "maximize_plus"
+    → maximize signals, gross 1.15, vol 0.65 / 0.78 / 0.52
+
+  Step 2 (full hot):
+    ACTIVE_BASELINE = "aggressive_120x"
+    → maximize + bundle: vol 0.75/0.85/0.55, gross ~1.35, tighter SOXL/UVXY RSI
+
+  Logs: MAXIMIZE_PLUS or AGGRESSIVE_120X baseline..., EXECUTION_MODE=same_bar (...)
+
+  QC UI: research_preset=aggressive_120x or maximize_plus
 
 ML OVERLAY — TWO FILES
 --------------------------------------------------------------------------------
-  main.py  +  csr_ml_overlay.py
+  main.py + csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
 
-CONVEX (crash stack + moderate vol) — TWO FILES
---------------------------------------------------------------------------------
-  main.py  +  csr_convex_ext.py
-  ACTIVE_BASELINE = "convex"
-
-  Same RSI / same-bar signals as maximize, plus:
-    drawdown guard + tiered DD, gap cooldown, VIX de-lever,
-    vol target ~32% bull / ~22% bear, 2% rebalance band, max gross 1.0
-
-  Logs: CONVEX preset..., ACTIVE_PROFILE=convex, EXECUTION_MODE=same_bar (convex)
-
-  QC UI alternative: research_preset=convex
-
-INSTITUTIONAL — TWO FILES (not max-equity)
---------------------------------------------------------------------------------
-  main.py  +  csr_institutional_ext.py
-  ACTIVE_BASELINE = "institutional"
-
-BENCHMARK (separate project)
---------------------------------------------------------------------------------
-  benchmark_tqqq_buy_hold.py
+Do NOT upload csr_profiles.py for these baselines.
 
 ================================================================================
