@@ -2,48 +2,52 @@
 Conditional Sector Rotation — QuantConnect deployment
 ================================================================================
 
-BASELINES (ACTIVE_BASELINE at top of main.py, or research_preset if USE_QC_UI_PARAMETERS=True)
+FILE SIZE: every .py file must be under 63,000 bytes (QuantConnect hard limit).
+
+DEFAULT (~60x maximize, ~$6M from $100k, 2020–2026)
 --------------------------------------------------------------------------------
-  maximize        — ~$6M / ~60x (same-bar, rails off, vol 0.58/0.68/0.48)
-  ml_overlay      — maximize + numpy logistic overlay (Track 2)
-  institutional   — lower-DD EOD bundle (not for max equity)
+Upload ONE file only:
 
-UPLOAD — TWO FILES for ml_overlay (both required)
---------------------------------------------------------------------------------
-  conditional_sector_rotation_improved.py  →  main.py
-  csr_ml_overlay.py                        →  same QC project (no rename)
+  conditional_sector_rotation_improved.py  →  rename to  main.py
 
-Single-file upload (maximize / institutional only):
-  conditional_sector_rotation_improved.py  →  main.py
-  Do NOT include csr_ml_overlay.py unless using ml_overlay.
-
-Hardcoded toggles:
+At top of file (already set):
   USE_QC_UI_PARAMETERS = False
-  ACTIVE_BASELINE = "ml_overlay"   # or "maximize" | "institutional"
+  ACTIVE_BASELINE = "maximize"
 
-QC parameter panel (USE_QC_UI_PARAMETERS = True):
-  research_preset = ml_overlay | maximize | institutional | production | realistic
+Do NOT upload csr_profiles.py, csr_ml_overlay.py, or csr_institutional_ext.py.
 
-ML overlay parameters (ml_overlay preset):
-  ml_train_bars=500          history length for fit
-  ml_forward_days=5          label: forward TQQQ return > 0
-  ml_retrain_days=63         refit cadence (~quarterly)
-  ml_veto_prob=0.42           below → bull sleeve becomes risk_off (BSV)
-  ml_floor_mult=0.45         min weight scaler in bull when prob marginal
-  ml_boost_cap=1.08          max weight boost when prob high
-  ml_filter_bear_offensive=true  block TECL/TECS/etc when prob < 0.5
+Expected logs:
+  HARDCODED_BASELINE: ... ACTIVE_BASELINE='maximize'
+  MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, hot vol targets
+  EXECUTION_MODE=same_bar (maximize baseline)
 
-ML features (6 + intercept):
-  SPY vs 200d SMA, QQQ 20d ret, TQQQ 20d ret, TQQQ-SOXL spread, SPY vol, VIX vs SMA
+Expected ballpark (2020-01-01 .. 2026-05-17, $100k):
+  End equity ~ $6M+   |  Orders ~900   |  CAGR ~90%   |  Max DD ~45%
 
-Expected logs (ml_overlay):
-  ML_OVERLAY: maximize + logistic filter ...
-  ML_TRAIN weights=7 prob=0.xxx
-  EXECUTION_MODE=same_bar
+ML overlay (Track 2 — experimental)
+--------------------------------------------------------------------------------
+Upload TWO files (both under 63k):
 
-Troubleshooting ~$3M / ~1700 orders:
-  Remove csr_profiles import, use fresh main.py only, ACTIVE_BASELINE=maximize
+  conditional_sector_rotation_improved.py  →  main.py
+  csr_ml_overlay.py                        →  same name in QC project
 
-BENCHMARK (separate project): benchmark_tqqq_buy_hold.py
+Set in main.py:
+  ACTIVE_BASELINE = "ml_overlay"
+
+QC rejects Python multiple inheritance on QCAlgorithm; ML uses composition helper.
+
+Institutional / low-DD preset (not the ~$6M maximize path)
+--------------------------------------------------------------------------------
+Upload:
+
+  main.py  (from conditional_sector_rotation_improved.py)
+  csr_institutional_ext.py  (optional second file)
+
+Set:
+  ACTIVE_BASELINE = "institutional"
+
+BENCHMARK (separate QC project)
+--------------------------------------------------------------------------------
+  benchmark_tqqq_buy_hold.py
 
 ================================================================================

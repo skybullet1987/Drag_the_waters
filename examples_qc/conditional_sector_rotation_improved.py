@@ -4,63 +4,13 @@ from datetime import datetime
 
 # endregion
 
-# =============================================================================
-# Conditional sector rotation — improved research template (QuantConnect / IB)
-#
-# Core:
-#   1) Optional EOD decision + next-session open execution (Schedule).
-#   2) Volatility targeting vs anchor ETF realized vol.
-#   3) Vol-ETP rails (consecutive UVXY/SVXY cap) + gap cooldown on large daily loss.
-#   4) Tiered drawdown scaling + hard drawdown guard.
-#   5) Optional trade_start_* / trade_end_* for walk-forward and OOS windows.
-#
-# Rebalancing / risk hygiene:
-#   6) Rebalance bands, max daily weight change, max_days_without_rebalance.
-#   7) Vol-ETP entry confirmation (N EOD bars) before UVXY/SVXY.
-#   8) Regime-based vol target (bull vs bear).
-#   9) Optional per-name UVXY / SVXY consecutive-day rails (state machine).
-#  10) max_position_weight + vol_etp_max_weight execution caps.
-#  11) max_gross_exposure (1.0–2.0): margin-style notional cap for vol targeting + SetHoldings.
-#
-# Optional 120x research bundle (OFF by default — does not change headline ~60x maximize):
-#   research_preset=aggressive_120x  OR  aggressive_120x_research=true
-# Knobs: max_gross_exposure, disable_bull_uvxy, bull_uvxy_require_both, maximize_disable_vol_target,
-#   th_rsi_*, target_ann_vol_bull (QC overrides only when parameter is explicitly set).
-#
-# Regime / signal extensions:
-#   regime_mode: spy | spy_and_qqq | qqq (QQQ vs regime_qqq_sma_period SMA).
-#   bull_tqqq_momentum_days: require positive TQQQ N-day return before SOXL/TQQQ.
-#
-# Research presets (parameter research_preset):
-#   production / live_safe — EOD, rails, bands, drawdown on (not maximize).
-#   institutional / inst / low_dd — lower-DD bundle (EOD, ladder, regime score).
-#   max_equity / maximize — same as maximize_backtest_equity=true.
-#   realistic / realistic_backtest — default slippage only (does not force production).
-#
-# headline_qc_default (default TRUE): when true and not in production preset, the
-# aggressive maximize bundle is used even if the QC project still has
-# maximize_backtest_equity=false saved. Set headline_qc_default=false to honor that flag.
-#
-# maximize_backtest_equity is honored when headline_qc_default=false.
-#
-# Benchmark defaults to TQQQ; unknown tickers are appended to the universe.
-# Baseline: benchmark_tqqq_buy_hold.py (benchmark defaults QQQ for 100% TQQQ book).
-#
-# Educational / research only. Leveraged and inverse ETFs can gap and decay.
-#
-# QuantConnect upload: this file ONLY as main.py (~55k, under 64k).
-#
-# Hardcoded (USE_QC_UI_PARAMETERS=False):
-#   ACTIVE_BASELINE = maximize | ml_overlay | institutional
-#   ml_overlay = maximize + logistic regime model (numpy, retrains on schedule)
-# QC panel (USE_QC_UI_PARAMETERS=True):
-#   research_preset = institutional | production | maximize | realistic
-# Institutional knobs: regime_score_min_bull, bull_ladder_*, target_ann_vol*,
-#   max_drawdown_pct, bull_tqqq_momentum_days, vix_delever_*
-# =============================================================================
+# Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
+# Upload: maximize → this file only as main.py. ml_overlay → main.py + csr_ml_overlay.py.
+# institutional → main.py + csr_institutional_ext.py (optional). See QUANTCONNECT_DEPLOY.txt.
+# ACTIVE_BASELINE (hardcoded): maximize | ml_overlay | institutional
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "ml_overlay"  # "maximize" | "ml_overlay" | "institutional"
+ACTIVE_BASELINE = "maximize"  # "maximize" | "ml_overlay" | "institutional"
 
 
 
@@ -584,47 +534,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return 1.0
 
     def _apply_institutional_profile(self):
-        # Lower-DD variant: avoid bear-sleeve 3x (TECS/TECL) churn; do not park in BSV forever.
-        self.Debug(
-            "INSTITUTIONAL v2: EOD, vol~25%, ladder, no bear 3x, soft DD, easier guard release."
-        )
-        self.maximize_backtest_equity = False
-        self.production_safe_defaults = True
-        self._apply_production_safe_profile()
-        self.regime_mode = "spy_and_qqq"
-        self.use_probabilistic_regime = True
-        self.regime_score_min_bull = 0.50
-        self.regime_hysteresis_days = 1
-        self.use_bull_leverage_ladder = True
-        self.bull_ladder_tqqq_min = 0.60
-        self.bull_ladder_qld_min = 0.38
-        self.scale_weight_by_regime_score = False
-        self.use_rsp_breadth_proxy = True
-        self.use_vix_delever = True
-        self.vix_delever_ratio = 1.25
-        self.vix_delever_mult = 0.65
-        self.bull_tqqq_momentum_days = 5
-        self.min_hold_days = 2
-        self.disable_bull_uvxy = True
-        self.institutional_suppress_bear_leverage = True
-        self.institutional_soft_drawdown = True
-        self.target_ann_vol = 0.25
-        self.target_ann_vol_bull = 0.30
-        self.target_ann_vol_bear = 0.18
-        self.max_drawdown_pct = 0.32
-        self.drawdown_release_frac = 0.75
-        self.tier1_drawdown = 0.12
-        self.tier1_mult = 0.90
-        self.tier2_drawdown = 0.22
-        self.tier2_mult = 0.70
-        self.max_gross_exposure = 1.0
-        self.max_position_weight = 1.0
+        from csr_institutional_ext import apply_institutional_profile
+        apply_institutional_profile(self)
 
     def _apply_production_safe_profile(self):
-        self.Debug(
-            "PRODUCTION_SAFE profile: EOD execution, rebalance bands, vol-ETP rails, "
-            "drawdown guard — baseline for live-style IB research."
-        )
+        self.Debug("PRODUCTION_SAFE: EOD, rails, bands, drawdown guard.")
         self.maximize_backtest_equity = False
         self.use_eod_next_bar_execution = True
         self.use_rebalance_bands = True
@@ -643,14 +557,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.use_regime_vol_target = True
 
     def _apply_maximize_backtest_equity_profile(self):
-        """
-        In-sample equity maximization bundle. Expect deeper drawdowns, gap risk,
-        and huge divergence vs live fills. Do not deploy this profile to IB.
-        """
         self.Debug(
-            "MAXIMIZE_BACKTEST_EQUITY profile: same-bar, rails off, hot vol targets, "
-            "looser bull UVXY — NOT for live. This is the default QC profile unless "
-            "maximize_backtest_equity=false or research_preset=production."
+            "MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, hot vol targets (not for live)."
         )
         self.use_eod_next_bar_execution = False
         self.use_rebalance_bands = False
@@ -684,10 +592,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         Opt-in only. Hot gross, vol targets, and UVXY/SOXL logic for 120x experiments.
         Default maximize (~60x) is unchanged when this bundle is not enabled.
         """
-        self.Debug(
-            "AGGRESSIVE_120X bundle: max_gross=1.35, hotter vol targets, stricter bull UVXY. "
-            "High drawdown risk — not the default maximize profile."
-        )
+        self.Debug("AGGRESSIVE_120X: hotter vol, max_gross~1.35 (opt-in research).")
         self.target_ann_vol = 0.75
         self.target_ann_vol_bull = 0.85
         self.target_ann_vol_bear = 0.55
