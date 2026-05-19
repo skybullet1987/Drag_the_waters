@@ -5,12 +5,12 @@ from datetime import datetime
 # endregion
 
 # Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
-# Upload: maximize → this file only as main.py. ml_overlay → main.py + csr_ml_overlay.py.
+# Upload: maximize → main.py only. ml_overlay → +csr_ml_overlay.py. convex → +csr_convex_ext.py.
 # institutional → main.py + csr_institutional_ext.py (optional). See QUANTCONNECT_DEPLOY.txt.
-# ACTIVE_BASELINE (hardcoded): maximize | ml_overlay | institutional
+# ACTIVE_BASELINE: maximize | ml_overlay | convex | institutional
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "maximize"  # "maximize" | "ml_overlay" | "institutional"
+ACTIVE_BASELINE = "maximize"  # maximize | ml_overlay | convex | institutional
 
 
 
@@ -60,6 +60,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._preset_force_max_equity = preset in ("max_equity", "maximize", "is_max")
         self._preset_force_institutional = preset in (
             "institutional", "inst", "low_dd", "lowdd",
+        )
+        self._preset_force_ml_overlay = preset in (
+            "ml_overlay", "ml_maximize", "ml", "track2",
+        )
+        self._preset_force_convex = preset in (
+            "convex", "crisis", "convexity", "low_dd_convex",
         )
         self._preset_force_aggressive_120x = preset in (
             "aggressive_120x",
@@ -274,6 +280,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_institutional_profile()
             elif _base in ("ml_overlay", "ml_maximize", "ml", "track2"):
                 self._apply_ml_maximize_profile()
+            elif _base in ("convex", "crisis", "convexity", "low_dd_convex"):
+                self._apply_convex_profile()
             else:
                 self.maximize_backtest_equity = True
                 self._apply_maximize_backtest_equity_profile()
@@ -319,6 +327,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_institutional_profile()
             elif self._preset_force_ml_overlay:
                 self._apply_ml_maximize_profile()
+            elif self._preset_force_convex:
+                self._apply_convex_profile()
             elif self.maximize_backtest_equity:
                 self._apply_maximize_backtest_equity_profile()
 
@@ -329,7 +339,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._reload_user_overrides_after_profile()
 
         if not self.use_eod_next_bar_execution:
-            self.Debug("EXECUTION_MODE=same_bar (maximize baseline)")
+            _bm = str(globals().get("ACTIVE_BASELINE", "maximize")).strip().lower()
+            self.Debug(f"EXECUTION_MODE=same_bar ({_bm})")
 
         if preset in ("realistic", "realistic_backtest") and self._equity_slippage_dollars <= 0.0:
             self._equity_slippage_dollars = 0.001
@@ -467,6 +478,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._regime_bull_streak = 0
         self._regime_bear_streak = 0
         self._last_regime_score = 0.0
+        self.convex_preset_active = getattr(self, "convex_preset_active", False)
         self._ml_weights = None
         self._ml_last_prob = 0.5
         self._ml_last_train_day = None
@@ -489,7 +501,14 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             f"headline_qc_default={raw_head!r} maximize_backtest_equity={raw_max!r} "
             f"production_safe_defaults={raw_prod!r} research_preset={self._research_preset!r}"
         )
-        if self.maximize_backtest_equity:
+        if getattr(self, "convex_preset_active", False):
+            self.Debug(
+                "ACTIVE_PROFILE=convex (maximize signals, same-bar, DD/gap/VIX, "
+                f"vol~32% bull, max_gross={self.max_gross_exposure:.2f})."
+            )
+        elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
+            self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
+        elif self.maximize_backtest_equity:
             self.Debug(
                 "ACTIVE_PROFILE=maximize_backtest_equity (aggressive in-sample; same-bar, "
                 f"rails mostly off, max_gross={self.max_gross_exposure:.2f}). "
@@ -499,8 +518,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.use_probabilistic_regime and self.use_bull_leverage_ladder
         ):
             self.Debug("ACTIVE_PROFILE=institutional (EOD, ~25% vol, ladder).")
-        elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
-            self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
         elif self.production_safe_defaults:
             self.Debug(
                 "ACTIVE_PROFILE=production_safe (EOD, rails, bands). "
@@ -537,6 +554,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _apply_institutional_profile(self):
         from csr_institutional_ext import apply_institutional_profile
         apply_institutional_profile(self)
+
+    def _apply_convex_profile(self):
+        from csr_convex_ext import apply_convex_profile
+        apply_convex_profile(self)
 
     def _apply_production_safe_profile(self):
         self.Debug("PRODUCTION_SAFE: EOD, rails, bands, drawdown guard.")

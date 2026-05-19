@@ -2,57 +2,50 @@
 Conditional Sector Rotation — QuantConnect deployment
 ================================================================================
 
-FILE SIZE: every .py file must be under 63,000 bytes (QuantConnect hard limit).
+FILE SIZE: every .py file must be under 63,000 bytes.
 
-DEFAULT (~60x maximize, ~$6M from $100k, 2020–2026)
+PROFILE SUMMARY (2020-01-01 .. 2026-05-17, $100k — indicative)
 --------------------------------------------------------------------------------
-Upload ONE file only:
+  maximize      ~$6M end equity   ~90% CAGR   ~45% DD   (1 file)
+  ml_overlay      ~$4.4M            ~81%        ~39% DD   (2 files)
+  convex          TBD               target DD high-20s / low-30s (2 files)
+  institutional   ~$280k            ~17%        ~43% DD   (2 files)
 
-  conditional_sector_rotation_improved.py  →  rename to  main.py
+MAXIMIZE (~60x) — ONE FILE
+--------------------------------------------------------------------------------
+  conditional_sector_rotation_improved.py  →  main.py
 
-At top of file (already set):
   USE_QC_UI_PARAMETERS = False
   ACTIVE_BASELINE = "maximize"
 
-Do NOT upload csr_profiles.py, csr_ml_overlay.py, or csr_institutional_ext.py.
+  Do NOT upload csr_ml_overlay.py, csr_convex_ext.py, csr_institutional_ext.py.
 
-Expected logs:
-  HARDCODED_BASELINE: ... ACTIVE_BASELINE='maximize'
-  MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, hot vol targets
-  EXECUTION_MODE=same_bar (maximize baseline)
+  Logs: ACTIVE_BASELINE='maximize', MAXIMIZE_BACKTEST_EQUITY, EXECUTION_MODE=same_bar (maximize)
 
-Expected ballpark (2020-01-01 .. 2026-05-17, $100k):
-  End equity ~ $6M+   |  Orders ~900   |  CAGR ~90%   |  Max DD ~45%
-
-ML overlay (Track 2 — experimental)
+ML OVERLAY — TWO FILES
 --------------------------------------------------------------------------------
-Upload TWO files (both under 63k):
-
-  conditional_sector_rotation_improved.py  →  main.py
-  csr_ml_overlay.py                        →  same name in QC project
-
-Set in main.py:
+  main.py  +  csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
 
-QC rejects Python multiple inheritance on QCAlgorithm; ML uses composition helper.
-
-ML v2 (lighter): ml_veto_prob=0.32, ml_floor_mult=0.78, ml_boost_cap=1.12.
-Your v1 ml_overlay run (~$2.4M, 64% CAGR, 31% DD) underperformed maximize (~$6M)
-because veto@0.42 and floor@0.45 cut bull exposure; re-upload both files after update.
-
-Institutional / low-DD preset (not the ~$6M maximize path)
+CONVEX (crash stack + moderate vol) — TWO FILES
 --------------------------------------------------------------------------------
-Upload:
+  main.py  +  csr_convex_ext.py
+  ACTIVE_BASELINE = "convex"
 
-  main.py  (from conditional_sector_rotation_improved.py)
-  csr_institutional_ext.py  (optional second file)
+  Same RSI / same-bar signals as maximize, plus:
+    drawdown guard + tiered DD, gap cooldown, VIX de-lever,
+    vol target ~32% bull / ~22% bear, 2% rebalance band, max gross 1.0
 
-Set:
+  Logs: CONVEX preset..., ACTIVE_PROFILE=convex, EXECUTION_MODE=same_bar (convex)
+
+  QC UI alternative: research_preset=convex
+
+INSTITUTIONAL — TWO FILES (not max-equity)
+--------------------------------------------------------------------------------
+  main.py  +  csr_institutional_ext.py
   ACTIVE_BASELINE = "institutional"
 
-Typical: ~$280k end equity, ~17% CAGR, ~43% DD — risk-managed, not max return.
-
-BENCHMARK (separate QC project)
+BENCHMARK (separate project)
 --------------------------------------------------------------------------------
   benchmark_tqqq_buy_hold.py
 
