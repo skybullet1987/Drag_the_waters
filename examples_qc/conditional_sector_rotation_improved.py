@@ -623,6 +623,53 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _set_holdings_buying_power_clamped(self, sym, weight, liquidate_existing=True):
+        """
+        Scale weight to available margin before SetHoldings.
+        No min-rebalance band — preserves ~60x baseline order count.
+        """
+        w = max(0.0, min(self._gross_cap(), float(weight)))
+        if w <= 1e-9:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            return 0.0
+
+        pv = float(self.Portfolio.TotalPortfolioValue)
+        w_exec = w
+        if pv > 0:
+            try:
+                bp = float(self.Portfolio.GetBuyingPower(sym, OrderDirection.Buy))
+                if bp > 0:
+                    w_exec = min(w_exec, 0.995 * bp / pv)
+            except Exception:
+                pass
+
+        for _ in range(12):
+            try:
+                qty = int(self.CalculateOrderQuantity(sym, w_exec))
+            except Exception:
+                qty = 0
+            if qty != 0:
+                break
+            w_exec *= 0.98
+            if w_exec < 0.05:
+                w_exec = 0.0
+                break
+
+        if w_exec <= 1e-9:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            return 0.0
+
+        if w_exec < w * 0.99:
+            self.Debug(
+                f"{self.Time:%Y-%m-%d} MARGIN_CLAMP {sym.Value} "
+                f"requested={w:.3f} exec={w_exec:.3f}"
+            )
+
+        self.SetHoldings(sym, w_exec, liquidate_existing)
+        return float(w_exec)
+
     # ── QC callbacks ─────────────────────────────────────────────────────
 
     def OnData(self, data):
