@@ -2,6 +2,11 @@
 from AlgorithmImports import *
 from datetime import datetime
 
+try:
+    from csr_ml_overlay import CSRMLOverlayMixin
+except Exception:
+    CSRMLOverlayMixin = object
+
 # endregion
 
 # =============================================================================
@@ -51,7 +56,8 @@ from datetime import datetime
 # QuantConnect upload: this file ONLY as main.py (~55k, under 64k).
 #
 # Hardcoded (USE_QC_UI_PARAMETERS=False):
-#   ACTIVE_BASELINE = "maximize" | "institutional" (institutional = opt-in lower DD)
+#   ACTIVE_BASELINE = maximize | ml_overlay | institutional
+#   ml_overlay = maximize + logistic regime model (numpy, retrains on schedule)
 # QC panel (USE_QC_UI_PARAMETERS=True):
 #   research_preset = institutional | production | maximize | realistic
 # Institutional knobs: regime_score_min_bull, bull_ladder_*, target_ann_vol*,
@@ -59,11 +65,11 @@ from datetime import datetime
 # =============================================================================
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "maximize"  # "maximize" | "institutional"
+ACTIVE_BASELINE = "ml_overlay"  # "maximize" | "ml_overlay" | "institutional"
 
 
 
-class ConditionalSectorRotationImproved(QCAlgorithm):
+class ConditionalSectorRotationImproved(CSRMLOverlayMixin, QCAlgorithm):
 
     def Initialize(self):
         self._use_qc_ui_parameters = USE_QC_UI_PARAMETERS
@@ -196,6 +202,15 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.vix_delever_ratio = max(1.0, self._float_parameter("vix_delever_ratio", 1.20))
         self.vix_delever_mult = max(0.05, min(1.0, self._float_parameter("vix_delever_mult", 0.55)))
         self.vix_sma_period = max(5, self._int_parameter("vix_sma_period", 20))
+
+        self.use_ml_overlay = self._bool_parameter("use_ml_overlay", False)
+        self.ml_train_bars = max(120, self._int_parameter("ml_train_bars", 500))
+        self.ml_forward_days = max(1, self._int_parameter("ml_forward_days", 5))
+        self.ml_retrain_days = max(21, self._int_parameter("ml_retrain_days", 63))
+        self.ml_veto_prob = max(0.0, min(1.0, self._float_parameter("ml_veto_prob", 0.42)))
+        self.ml_floor_mult = max(0.2, min(1.0, self._float_parameter("ml_floor_mult", 0.45)))
+        self.ml_boost_cap = max(0.5, min(1.5, self._float_parameter("ml_boost_cap", 1.08)))
+        self.ml_filter_bear_offensive = self._bool_parameter("ml_filter_bear_offensive", True)
         self.institutional_suppress_bear_leverage = self._bool_parameter(
             "institutional_suppress_bear_leverage", False
         )
@@ -311,6 +326,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             _base = str(globals().get("ACTIVE_BASELINE", "maximize")).strip().lower()
             if _base in ("institutional", "inst", "low_dd", "lowdd"):
                 self._apply_institutional_profile()
+            elif _base in ("ml_overlay", "ml_maximize", "ml", "track2"):
+                self._apply_ml_maximize_profile()
             else:
                 self.maximize_backtest_equity = True
                 self._apply_maximize_backtest_equity_profile()
@@ -354,6 +371,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_production_safe_profile()
             elif self._preset_force_institutional:
                 self._apply_institutional_profile()
+            elif self._preset_force_ml_overlay:
+                self._apply_ml_maximize_profile()
             elif self.maximize_backtest_equity:
                 self._apply_maximize_backtest_equity_profile()
 
@@ -419,7 +438,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 sym, self.rsi_period, MovingAverageType.Wilders, Resolution.Daily
             )
 
-        if self.use_vix_delever:
+        if self.use_vix_delever or getattr(self, "use_ml_overlay", False):
             try:
                 vix_sym = self.AddIndex("VIX", Resolution.Daily).Symbol
                 self._vix_index_symbol = vix_sym
@@ -499,6 +518,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._regime_bull_streak = 0
         self._regime_bear_streak = 0
         self._last_regime_score = 0.0
+        self._ml_weights = None
+        self._ml_last_prob = 0.5
+        self._ml_last_train_day = None
+        self._ml_bull_tickers = frozenset({"TQQQ", "SOXL", "QLD", "QQQ"})
+        self._ml_bear_offensive = frozenset({"TECL", "SPXL", "TECS", "SOXS", "SQQQ", "UVXY"})
 
     def _equity_slippage_initializer(self, security):
         if security.Type != SecurityType.Equity:
@@ -526,6 +550,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.use_probabilistic_regime and self.use_bull_leverage_ladder
         ):
             self.Debug("ACTIVE_PROFILE=institutional (EOD, ~25% vol, ladder).")
+        elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
+            self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
         elif self.production_safe_defaults:
             self.Debug(
                 "ACTIVE_PROFILE=production_safe (EOD, rails, bands). "
@@ -731,52 +757,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
-    def _set_holdings_buying_power_clamped(self, sym, weight, liquidate_existing=True):
-        """
-        Scale weight to available margin before SetHoldings.
-        No min-rebalance band — preserves ~60x baseline order count.
-        """
-        w = max(0.0, min(self._gross_cap(), float(weight)))
-        if w <= 1e-9:
-            if liquidate_existing:
-                self.Liquidate(sym)
-            return 0.0
-
-        pv = float(self.Portfolio.TotalPortfolioValue)
-        w_exec = w
-        if pv > 0:
-            try:
-                bp = float(self.Portfolio.GetBuyingPower(sym, OrderDirection.Buy))
-                if bp > 0:
-                    w_exec = min(w_exec, 0.995 * bp / pv)
-            except Exception:
-                pass
-
-        for _ in range(12):
-            try:
-                qty = int(self.CalculateOrderQuantity(sym, w_exec))
-            except Exception:
-                qty = 0
-            if qty != 0:
-                break
-            w_exec *= 0.98
-            if w_exec < 0.05:
-                w_exec = 0.0
-                break
-
-        if w_exec <= 1e-9:
-            if liquidate_existing:
-                self.Liquidate(sym)
-            return 0.0
-
-        if w_exec < w * 0.99:
-            self.Debug(
-                f"{self.Time:%Y-%m-%d} MARGIN_CLAMP {sym.Value} "
-                f"requested={w:.3f} exec={w_exec:.3f}"
-            )
-
-        self.SetHoldings(sym, w_exec, liquidate_existing)
-        return float(w_exec)
 
     # ── QC callbacks ─────────────────────────────────────────────────────
 
@@ -796,6 +776,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         self._update_drawdown_guard()
+        self._ml_maybe_train()
         self._refresh_regime_state()
         gap_fired = self._mark_eod_gap_cooldown()
         if gap_fired:
@@ -810,6 +791,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         raw_signal = self._apply_vol_etp_entry_confirmation(raw_signal)
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
+        signal = self._ml_apply_signal_filter(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
             if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
@@ -825,6 +807,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             if self.use_vol_targeting:
                 base_weight *= self._vol_target_multiplier()
             base_weight *= self._institutional_risk_multipliers()
+        ml_m = self._ml_overlay_multiplier(target_ticker)
+        if ml_m <= 0.0:
+            target_ticker, base_weight = self.risk_off_ticker, 1.0
+        else:
+            base_weight *= ml_m
 
         base_weight = max(0.0, min(self._gross_cap(), float(base_weight)))
 
@@ -909,6 +896,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         self._update_drawdown_guard()
+        self._ml_maybe_train()
         self._refresh_regime_state()
         gap_fired = self._mark_eod_gap_cooldown()
         if gap_fired:
@@ -936,6 +924,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             if self.use_vol_targeting:
                 w *= self._vol_target_multiplier()
             w *= self._institutional_risk_multipliers()
+        ml_m = self._ml_overlay_multiplier(target_ticker)
+        if ml_m <= 0.0:
+            target_ticker, w = self.risk_off_ticker, 1.0
+        else:
+            w *= ml_m
         w = max(0.0, min(self._gross_cap(), float(w)))
 
         if self._min_hold_blocks_switch_target(target_ticker):
@@ -1533,6 +1526,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return "TECL"
 
         return self._get_max_rsi_ticker(self._defensive_rsi_candidates())
+
+
 
     def OnEndOfAlgorithm(self):
         self.Debug("Algorithm finished.")

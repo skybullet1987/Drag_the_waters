@@ -2,53 +2,48 @@
 Conditional Sector Rotation — QuantConnect deployment
 ================================================================================
 
-BASELINES (pick one via ACTIVE_BASELINE at top of main.py)
+BASELINES (ACTIVE_BASELINE at top of main.py, or research_preset if USE_QC_UI_PARAMETERS=True)
 --------------------------------------------------------------------------------
-  maximize        — ~60x / ~91% CAGR / ~45% max DD (same-bar, rails off)
-  institutional   — lower-DD research (EOD, ~25% vol, ladder, regime score)
+  maximize        — ~$6M / ~60x (same-bar, rails off, vol 0.58/0.68/0.48)
+  ml_overlay      — maximize + numpy logistic overlay (Track 2)
+  institutional   — lower-DD EOD bundle (not for max equity)
 
-UPLOAD — ONE FILE ONLY
+UPLOAD — TWO FILES for ml_overlay (both required)
 --------------------------------------------------------------------------------
-  conditional_sector_rotation_improved.py  →  rename to  main.py
+  conditional_sector_rotation_improved.py  →  main.py
+  csr_ml_overlay.py                        →  same QC project (no rename)
 
-Do NOT upload csr_profiles.py for single-file baselines (no import in main).
+Single-file upload (maximize / institutional only):
+  conditional_sector_rotation_improved.py  →  main.py
+  Do NOT include csr_ml_overlay.py unless using ml_overlay.
 
-File size must stay under QuantConnect 64k limit.
-
-Hardcoded toggles at top of main.py:
+Hardcoded toggles:
   USE_QC_UI_PARAMETERS = False
-  ACTIVE_BASELINE = "institutional"   # or "maximize"
+  ACTIVE_BASELINE = "ml_overlay"   # or "maximize" | "institutional"
 
-Expected logs:
-  ACTIVE_BASELINE=institutional ... INSTITUTIONAL profile: EOD, rails on ...
-  ACTIVE_BASELINE=maximize ... MAXIMIZE_BACKTEST_EQUITY profile: same-bar ...
+QC parameter panel (USE_QC_UI_PARAMETERS = True):
+  research_preset = ml_overlay | maximize | institutional | production | realistic
 
-QuantConnect parameter panel (optional)
---------------------------------------------------------------------------------
-Set USE_QC_UI_PARAMETERS = True and use research_preset:
+ML overlay parameters (ml_overlay preset):
+  ml_train_bars=500          history length for fit
+  ml_forward_days=5          label: forward TQQQ return > 0
+  ml_retrain_days=63         refit cadence (~quarterly)
+  ml_veto_prob=0.42           below → bull sleeve becomes risk_off (BSV)
+  ml_floor_mult=0.45         min weight scaler in bull when prob marginal
+  ml_boost_cap=1.08          max weight boost when prob high
+  ml_filter_bear_offensive=true  block TECL/TECS/etc when prob < 0.5
 
-  research_preset=institutional   — same as ACTIVE_BASELINE=institutional
-  research_preset=production      — EOD + rails, no ladder/regime score
-  research_preset=maximize          — headline equity maximization
-  research_preset=realistic         — adds default slippage 0.001/share
+ML features (6 + intercept):
+  SPY vs 200d SMA, QQQ 20d ret, TQQQ 20d ret, TQQQ-SOXL spread, SPY vol, VIX vs SMA
 
-Key institutional parameters (override in QC panel when USE_QC_UI_PARAMETERS=True):
-  regime_mode=spy_and_qqq
-  regime_score_min_bull=0.55
-  regime_hysteresis_days=3
-  bull_ladder_tqqq_min=0.65
-  bull_ladder_qld_min=0.40
-  target_ann_vol=0.25
-  target_ann_vol_bull=0.28
-  target_ann_vol_bear=0.18
-  max_drawdown_pct=0.28
-  bull_tqqq_momentum_days=15
-  use_vix_delever=true
-  vix_delever_ratio=1.20
-  vix_delever_mult=0.55
+Expected logs (ml_overlay):
+  ML_OVERLAY: maximize + logistic filter ...
+  ML_TRAIN weights=7 prob=0.xxx
+  EXECUTION_MODE=same_bar
 
-BENCHMARK (separate QC project)
---------------------------------------------------------------------------------
-  benchmark_tqqq_buy_hold.py
+Troubleshooting ~$3M / ~1700 orders:
+  Remove csr_profiles import, use fresh main.py only, ACTIVE_BASELINE=maximize
+
+BENCHMARK (separate project): benchmark_tqqq_buy_hold.py
 
 ================================================================================
