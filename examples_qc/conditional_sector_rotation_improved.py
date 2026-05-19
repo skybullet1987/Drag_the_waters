@@ -51,7 +51,7 @@ from datetime import datetime
 # QuantConnect upload: this file ONLY as main.py (~55k, under 64k).
 #
 # Hardcoded (USE_QC_UI_PARAMETERS=False):
-#   ACTIVE_BASELINE = "institutional"  # or "maximize"
+#   ACTIVE_BASELINE = "maximize" | "institutional" (institutional = opt-in lower DD)
 # QC panel (USE_QC_UI_PARAMETERS=True):
 #   research_preset = institutional | production | maximize | realistic
 # Institutional knobs: regime_score_min_bull, bull_ladder_*, target_ann_vol*,
@@ -59,7 +59,7 @@ from datetime import datetime
 # =============================================================================
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "institutional"  # "maximize" | "institutional"
+ACTIVE_BASELINE = "maximize"  # "maximize" | "institutional"
 
 
 
@@ -196,6 +196,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self.vix_delever_ratio = max(1.0, self._float_parameter("vix_delever_ratio", 1.20))
         self.vix_delever_mult = max(0.05, min(1.0, self._float_parameter("vix_delever_mult", 0.55)))
         self.vix_sma_period = max(5, self._int_parameter("vix_sma_period", 20))
+        self.institutional_suppress_bear_leverage = self._bool_parameter(
+            "institutional_suppress_bear_leverage", False
+        )
+        self.institutional_soft_drawdown = self._bool_parameter(
+            "institutional_soft_drawdown", False
+        )
 
         # ── RSI thresholds ────────────────────────────────────────────
         self.th_rsi_qqq_bull_uvxy = self._float_parameter("th_rsi_qqq_bull_uvxy", 81.0)
@@ -532,34 +538,39 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             )
 
     def _apply_institutional_profile(self):
-        self.Debug("INSTITUTIONAL: EOD, rails, vol~25%, regime score, TQQQ/QLD/QQQ ladder.")
+        # Lower-DD variant: avoid bear-sleeve 3x (TECS/TECL) churn; do not park in BSV forever.
+        self.Debug(
+            "INSTITUTIONAL v2: EOD, vol~25%, ladder, no bear 3x, soft DD, easier guard release."
+        )
         self.maximize_backtest_equity = False
         self.production_safe_defaults = True
         self._apply_production_safe_profile()
         self.regime_mode = "spy_and_qqq"
         self.use_probabilistic_regime = True
-        self.regime_score_min_bull = 0.55
-        self.regime_hysteresis_days = 3
+        self.regime_score_min_bull = 0.50
+        self.regime_hysteresis_days = 1
         self.use_bull_leverage_ladder = True
-        self.bull_ladder_tqqq_min = 0.65
-        self.bull_ladder_qld_min = 0.40
-        self.scale_weight_by_regime_score = True
+        self.bull_ladder_tqqq_min = 0.60
+        self.bull_ladder_qld_min = 0.38
+        self.scale_weight_by_regime_score = False
         self.use_rsp_breadth_proxy = True
         self.use_vix_delever = True
-        self.vix_delever_ratio = 1.20
-        self.vix_delever_mult = 0.55
-        self.bull_tqqq_momentum_days = 15
-        self.min_hold_days = 3
+        self.vix_delever_ratio = 1.25
+        self.vix_delever_mult = 0.65
+        self.bull_tqqq_momentum_days = 5
+        self.min_hold_days = 2
         self.disable_bull_uvxy = True
+        self.institutional_suppress_bear_leverage = True
+        self.institutional_soft_drawdown = True
         self.target_ann_vol = 0.25
-        self.target_ann_vol_bull = 0.28
+        self.target_ann_vol_bull = 0.30
         self.target_ann_vol_bear = 0.18
-        self.max_drawdown_pct = 0.28
-        self.drawdown_release_frac = 0.45
-        self.tier1_drawdown = 0.10
-        self.tier1_mult = 0.88
-        self.tier2_drawdown = 0.18
-        self.tier2_mult = 0.65
+        self.max_drawdown_pct = 0.32
+        self.drawdown_release_frac = 0.75
+        self.tier1_drawdown = 0.12
+        self.tier1_mult = 0.90
+        self.tier2_drawdown = 0.22
+        self.tier2_mult = 0.70
         self.max_gross_exposure = 1.0
         self.max_position_weight = 1.0
 
@@ -801,8 +812,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         signal = self._apply_gap_cooldown_filter(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
-            target_ticker = self.risk_off_ticker
-            base_weight = 1.0
+            if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
+                target_ticker = self._bull_leverage_ticker()
+                base_weight = 0.55
+            else:
+                target_ticker = self.risk_off_ticker
+                base_weight = 1.0
         else:
             target_ticker = signal
             base_weight = 1.0
@@ -908,8 +923,12 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         signal = self._apply_gap_cooldown_filter(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
-            target_ticker = self.risk_off_ticker
-            w = 1.0
+            if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
+                target_ticker = self._bull_leverage_ticker()
+                w = 0.55
+            else:
+                target_ticker = self.risk_off_ticker
+                w = 1.0
         else:
             target_ticker = signal
             w = 1.0
@@ -1488,6 +1507,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             if soxl_ok:
                 return self._bull_risk_on_momentum("SOXL")
             return self._bull_risk_on_momentum(self._bull_leverage_ticker())
+
+        if getattr(self, "institutional_suppress_bear_leverage", False):
+            return self.risk_off_ticker
 
         if rsi_tqqq < self.th_rsi_tqqq_bear_tecl:
             return "TECL"
