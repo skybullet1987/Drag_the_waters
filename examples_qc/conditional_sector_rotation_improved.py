@@ -320,6 +320,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
             if self.maximize_backtest_equity or self.production_safe_defaults:
                 self._reload_user_overrides_after_profile()
+            self._apply_experiment_overrides()
 
         if not self.use_eod_next_bar_execution:
             self.Debug("EXECUTION_MODE=same_bar (maximize baseline)")
@@ -774,10 +775,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self._last_trade_time = self.Time
             return
 
-        self.SetHoldings(sym, w, True)
+        w_exec = self._set_holdings_buying_power_clamped(sym, w, True)
         self._last_target_ticker = t
         self._last_trade_time = self.Time
-        self._last_executed_weight = w
+        self._last_executed_weight = w_exec
 
     # ── Same-bar fallback (original style) ────────────────────────────────
 
@@ -830,13 +831,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         sym = self.symbols[target_ticker]
-        self.SetHoldings(sym, w, True)
+        w_exec = self._set_holdings_buying_power_clamped(sym, w, True)
         self._last_target_ticker = target_ticker
         self._last_trade_time = self.Time
-        self._last_executed_weight = w
+        self._last_executed_weight = w_exec
 
         self.Debug(
-            f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w:.3f} raw={raw_signal}"
+            f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w_exec:.3f} raw={raw_signal}"
         )
 
         if self._cooldown_remaining > 0:
