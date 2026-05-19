@@ -52,6 +52,8 @@ from datetime import datetime
 # =============================================================================
 
 USE_QC_UI_PARAMETERS = False
+# baseline | b1_no_bull_uvxy (failed: ~3.4M/1900 ord) | b2_dual_regime | b3_gross110 | b4_momentum_pick
+EXPERIMENT = "b4_momentum_pick"
 
 
 class ConditionalSectorRotationImproved(QCAlgorithm):
@@ -66,7 +68,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.SetCash(cash)
             self.Debug(
                 "BASELINE_60X_RESTORED: ae73726 logic, hardcoded 2020-2026, $100k, "
-                "maximize profile, QC parameters ignored"
+                f"maximize profile, experiment={EXPERIMENT!r}, QC parameters ignored"
             )
         else:
             sy = self._int_parameter("start_year", 2020)
@@ -275,6 +277,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             self.aggressive_120x_research = False
             self.maximize_include_svxy = False
             self._apply_maximize_backtest_equity_profile()
+            self._apply_experiment_overrides()
         else:
             tsy = self._int_parameter("trade_start_year", sy)
             tsm = self._int_parameter("trade_start_month", sm)
@@ -466,6 +469,27 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 "ACTIVE_PROFILE=custom (maximize off, headline_qc_default false). "
                 "Tune use_eod_next_bar_execution, rails, and slippage explicitly."
             )
+
+    def _apply_experiment_overrides(self):
+        exp = str(EXPERIMENT or "baseline").strip().lower()
+        if exp in ("baseline", "", "none", "a0"):
+            return
+        if exp in ("b1", "b1_no_bull_uvxy", "no_bull_uvxy"):
+            self.disable_bull_uvxy = True
+            self.Debug(
+                "EXPERIMENT=b1_no_bull_uvxy: skip UVXY when SPY>200 (stay TQQQ/SOXL in bull)"
+            )
+            return
+        if exp in ("b2", "b2_dual_regime", "spy_and_qqq", "dual_regime"):
+            self.regime_mode = "spy_and_qqq"
+            self.Debug("EXPERIMENT=b2_dual_regime: bull requires SPY>200 AND QQQ>regime SMA")
+            return
+        if exp in ("b3", "b3_gross110", "gross110"):
+            self.max_gross_exposure = 1.10
+            self.max_position_weight = 1.10
+            self.Debug("EXPERIMENT=b3_gross110: max_gross_exposure=1.10")
+            return
+        self.Debug(f"EXPERIMENT unknown {exp!r} — using baseline maximize only")
 
     def _apply_production_safe_profile(self):
         self.Debug(
@@ -1266,6 +1290,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                     return "UVXY"
             if self.use_svxy_calm and rsi_uvxy < self.th_rsi_uvxy_calm:
                 return "SVXY"
+            if getattr(self, "_bull_pick_by_momentum", False):
+                leg = self._pick_bull_3x_by_momentum(
+                    price_tqqq, sma_tqqq, price_soxl, sma_soxl
+                )
+                return self._bull_risk_on_momentum(leg)
             soxl_ok = (
                 self.use_soxl_bull
                 and price_soxl > sma_soxl
