@@ -4,43 +4,17 @@ from AlgorithmImports import *
 # endregion
 
 # QuantConnect: upload with main.py when ACTIVE_BASELINE=ml_overlay
-# v3 aggressive: size up when confident — no hard BSV veto (v2 veto crushed equity).
+# Default = v2 defensive (~$4.4M / ~39% DD). Optional: ml_overlay_aggressive (experimental).
 
 
 class CSRMLOverlayHelper(object):
-    """ML overlay via composition (QCAlgorithm cannot use Python mixins)."""
-
     def __init__(self, algo):
         self.a = algo
 
     def apply_ml_maximize_profile(self):
-        """Default ml_overlay: aggressive v3 (beat-maximize attempt)."""
-        self.apply_ml_aggressive_profile()
-
-    def apply_ml_aggressive_profile(self):
-        a = self.a
-        a.Debug(
-            "ML_OVERLAY v3 AGGRESSIVE: size-only (no BSV veto), floor=0.93 boost=1.18, gross~1.08."
-        )
-        a.ml_overlay_mode = "aggressive"
-        a.maximize_backtest_equity = True
-        a._apply_maximize_backtest_equity_profile()
-        a.disable_bull_uvxy = True
-        a.use_ml_overlay = True
-        a.ml_train_bars = 500
-        a.ml_forward_days = 5
-        a.ml_retrain_days = 42
-        a.ml_l2 = 0.015
-        a.ml_veto_prob = 0.12
-        a.ml_floor_mult = 0.93
-        a.ml_boost_cap = 1.18
-        a.ml_bear_offensive_prob = 0.28
-        a.ml_filter_bear_offensive = True
-        a.max_gross_exposure = max(float(a.max_gross_exposure), 1.08)
-        a.max_position_weight = max(float(a.max_position_weight), 1.08)
+        self.apply_ml_defensive_profile()
 
     def apply_ml_defensive_profile(self):
-        """Prior v2 (lighter veto) — ~$4.4M / ~39% DD reference."""
         a = self.a
         a.Debug("ML_OVERLAY v2 defensive: veto@0.32, floor@0.78, boost@1.12.")
         a.ml_overlay_mode = "defensive"
@@ -58,6 +32,26 @@ class CSRMLOverlayHelper(object):
         a.ml_bear_offensive_prob = 0.38
         a.ml_filter_bear_offensive = True
 
+    def apply_ml_aggressive_profile(self):
+        a = self.a
+        a.Debug(
+            "ML_OVERLAY aggressive (experimental): no BSV veto, floor=0.93 boost=1.12."
+        )
+        a.ml_overlay_mode = "aggressive"
+        a.maximize_backtest_equity = True
+        a._apply_maximize_backtest_equity_profile()
+        a.disable_bull_uvxy = True
+        a.use_ml_overlay = True
+        a.ml_train_bars = 500
+        a.ml_forward_days = 5
+        a.ml_retrain_days = 63
+        a.ml_l2 = 0.01
+        a.ml_veto_prob = 0.32
+        a.ml_floor_mult = 0.93
+        a.ml_boost_cap = 1.12
+        a.ml_bear_offensive_prob = 0.32
+        a.ml_filter_bear_offensive = True
+
     def maybe_train(self, force=False):
         a = self.a
         if not getattr(a, "use_ml_overlay", False) or a.IsWarmingUp:
@@ -70,17 +64,21 @@ class CSRMLOverlayHelper(object):
         if w is not None:
             a._ml_weights = w
             a._ml_last_train_day = d
-            a.Debug("ML_TRAIN prob=%.3f mode=%s" % (
-                a._ml_last_prob,
-                getattr(a, "ml_overlay_mode", "aggressive"),
-            ))
+            a._ml_prob_date = None
+            a.Debug(
+                "ML_TRAIN prob=%.3f mode=%s nfeat=%d"
+                % (a._ml_last_prob, getattr(a, "ml_overlay_mode", "?"), len(w))
+            )
 
     def hist_closes(self, ticker, n):
         a = self.a
         sym = a.symbols.get(ticker)
         if sym is None:
             return None
-        hist = a.History(sym, n + 2, Resolution.Daily)
+        try:
+            hist = a.History(sym, n + 2, Resolution.Daily)
+        except Exception:
+            return None
         if hist is None or getattr(hist, "empty", True):
             return None
         try:
@@ -101,15 +99,24 @@ class CSRMLOverlayHelper(object):
         o, p = c[-(d + 1)], c[-1]
         return (p / o - 1.0) if o > 0 and p > 0 else 0.0
 
-    @staticmethod
-    def spy_dd(spy, i, lb=200):
-        if spy is None or i < lb:
-            return 0.0
-        win = spy[i - lb : i + 1]
-        peak = max(win)
-        if peak <= 0:
-            return 0.0
-        return max(0.0, 1.0 - spy[i] / peak)
+    def _panel(self, n):
+        a = self.a
+        spy = self.hist_closes("SPY", n)
+        tqqq = self.hist_closes("TQQQ", n)
+        if not spy or not tqqq:
+            return None
+        qqq = self.hist_closes("QQQ", n) or spy
+        soxl = self.hist_closes("SOXL", n) or tqqq
+        vix = self.hist_closes("VIX", n) if "VIX" in a.symbols else None
+        m = min(len(spy), len(qqq), len(tqqq), len(soxl))
+        if m < 230:
+            return None
+        spy, qqq, tqqq, soxl = spy[-m:], qqq[-m:], tqqq[-m:], soxl[-m:]
+        if vix is not None and len(vix) >= m:
+            vix = vix[-m:]
+        else:
+            vix = None
+        return spy, qqq, tqqq, soxl, vix
 
     def build_xy(self, spy, qqq, tqqq, soxl, vix, i, fwd):
         if i < 220 or i + fwd >= len(tqqq):
@@ -126,11 +133,7 @@ class CSRMLOverlayHelper(object):
             vs = sum(vix[i - 19 : i + 1]) / 20.0
             if vs > 0:
                 vz = vix[i] / vs - 1.0
-        mode = getattr(self.a, "ml_overlay_mode", "aggressive")
-        if mode == "aggressive":
-            y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0.02 else 0.0
-        else:
-            y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0 else 0.0
+        y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0 else 0.0
         x = [
             1.0,
             spy_tr,
@@ -139,7 +142,6 @@ class CSRMLOverlayHelper(object):
             self.nret(tqqq[: i + 1], 20) - self.nret(soxl[: i + 1], 20),
             rv,
             vz,
-            self.spy_dd(spy, i),
         ]
         return x, y
 
@@ -148,13 +150,10 @@ class CSRMLOverlayHelper(object):
 
         a = self.a
         n = int(a.ml_train_bars) + 260
-        spy = self.hist_closes("SPY", n)
-        qqq = self.hist_closes("QQQ", n)
-        tqqq = self.hist_closes("TQQQ", n)
-        soxl = self.hist_closes("SOXL", n)
-        vix = self.hist_closes("VIX", n) if "VIX" in a.symbols else None
-        if not spy or not tqqq or len(tqqq) < 280:
+        panel = self._panel(n)
+        if panel is None:
             return None
+        spy, qqq, tqqq, soxl, vix = panel
         fwd = int(a.ml_forward_days)
         rows, ys = [], []
         for i in range(len(tqqq)):
@@ -167,13 +166,18 @@ class CSRMLOverlayHelper(object):
         X = np.asarray(rows, dtype=float)
         y = np.asarray(ys, dtype=float)
         w = np.zeros(X.shape[1])
-        lr = 0.10 / max(1, len(y))
-        lam = float(getattr(a, "ml_l2", 0.015))
-        for _ in range(120):
+        lr = 0.12 / max(1, len(y))
+        lam = float(getattr(a, "ml_l2", 0.01))
+        for _ in range(100):
             z = np.clip(X.dot(w), -18.0, 18.0)
             p = 1.0 / (1.0 + np.exp(-z))
             w -= lr * (X.T.dot(p - y) / len(y) + lam * w)
-        a._ml_last_prob = float(1.0 / (1.0 + np.exp(-float(X[-1].dot(w)))))
+        i = len(tqqq) - 1
+        xy = self.build_xy(spy, qqq, tqqq, soxl, vix, i, fwd)
+        if xy:
+            a._ml_last_prob = float(
+                1.0 / (1.0 + np.exp(-float(np.dot(w, xy[0]))))
+            )
         return [float(v) for v in w]
 
     def bull_probability(self):
@@ -182,18 +186,26 @@ class CSRMLOverlayHelper(object):
         a = self.a
         if not getattr(a, "use_ml_overlay", False) or not a._ml_weights:
             return getattr(a, "_ml_last_prob", 0.5)
-        spy = self.hist_closes("SPY", 230)
-        qqq = self.hist_closes("QQQ", 30)
-        tqqq = self.hist_closes("TQQQ", 30)
-        soxl = self.hist_closes("SOXL", 30)
-        vix = self.hist_closes("VIX", 30) if "VIX" in a.symbols else None
-        if not spy or not tqqq:
+        d = a.Time.date()
+        if getattr(a, "_ml_prob_date", None) == d:
             return a._ml_last_prob
-        xy = self.build_xy(spy, qqq, tqqq, soxl, vix, len(tqqq) - 1, int(a.ml_forward_days))
+        panel = self._panel(280)
+        if panel is None:
+            return a._ml_last_prob
+        spy, qqq, tqqq, soxl, vix = panel
+        i = len(tqqq) - 1
+        xy = self.build_xy(spy, qqq, tqqq, soxl, vix, i, int(a.ml_forward_days))
         if xy is None:
             return a._ml_last_prob
-        z = float(np.clip(np.dot(a._ml_weights, xy[0]), -18.0, 18.0))
+        w = a._ml_weights
+        x = xy[0]
+        if len(w) != len(x):
+            a.Debug("ML_DIM_MISMATCH len(w)=%d len(x)=%d — retrain" % (len(w), len(x)))
+            a._ml_weights = None
+            return a._ml_last_prob
+        z = float(np.clip(np.dot(w, x), -18.0, 18.0))
         a._ml_last_prob = float(1.0 / (1.0 + np.exp(-z)))
+        a._ml_prob_date = d
         return a._ml_last_prob
 
     def overlay_multiplier(self, ticker):
@@ -203,9 +215,8 @@ class CSRMLOverlayHelper(object):
         p = self.bull_probability()
         if ticker not in a._ml_bull_tickers:
             return 1.0
-        lo = float(a.ml_floor_mult)
-        hi = float(a.ml_boost_cap)
-        mode = getattr(a, "ml_overlay_mode", "aggressive")
+        lo, hi = float(a.ml_floor_mult), float(a.ml_boost_cap)
+        mode = getattr(a, "ml_overlay_mode", "defensive")
         if mode == "aggressive":
             veto = float(a.ml_veto_prob)
             span = max(1e-6, 1.0 - veto)
@@ -215,24 +226,23 @@ class CSRMLOverlayHelper(object):
             return 0.0
         span = max(1e-6, 1.0 - float(a.ml_veto_prob))
         s = (p - float(a.ml_veto_prob)) / span
-        return min(hi, max(lo, lo + (1.0 - lo) * s))
+        return min(hi, max(lo, lo + (hi - lo) * s))
 
     def apply_signal_filter(self, signal):
         a = self.a
         if not getattr(a, "use_ml_overlay", False) or signal is None:
             return signal
-        mode = getattr(a, "ml_overlay_mode", "aggressive")
+        mode = getattr(a, "ml_overlay_mode", "defensive")
         p = self.bull_probability()
         if mode == "aggressive":
             if getattr(a, "ml_filter_bear_offensive", True) and signal in a._ml_bear_offensive:
-                if p < float(getattr(a, "ml_bear_offensive_prob", 0.28)):
+                if p < float(getattr(a, "ml_bear_offensive_prob", 0.32)):
                     return a.risk_off_ticker
             return signal
         if signal in a._ml_bull_tickers and p < float(a.ml_veto_prob):
             return a.risk_off_ticker
         if getattr(a, "ml_filter_bear_offensive", True) and signal in a._ml_bear_offensive:
-            bear_thr = float(getattr(a, "ml_bear_offensive_prob", 0.38))
-            if p < bear_thr:
+            if p < float(getattr(a, "ml_bear_offensive_prob", 0.38)):
                 return a.risk_off_ticker
         return signal
 
@@ -249,3 +259,8 @@ def apply_ml_maximize_profile(algo):
 def apply_ml_defensive_profile(algo):
     wire_ml_overlay(algo)
     algo._mlh.apply_ml_defensive_profile()
+
+
+def apply_ml_aggressive_profile(algo):
+    wire_ml_overlay(algo)
+    algo._mlh.apply_ml_aggressive_profile()

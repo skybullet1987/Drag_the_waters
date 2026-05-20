@@ -7,31 +7,27 @@ FILE SIZE: every .py file must be under 63,000 bytes.
 WHAT TO USE (2020-2026, $100k)
 --------------------------------------------------------------------------------
   maximize          ~$6M     ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay          v3 AGGRESSIVE — attempt to match/beat maximize (2 files)
-  ml_overlay v2       use ml_defensive preset — ~$4.4M / ~39% DD (reference)
+  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files)  ← DEFAULT
 
-DEPRECATED: maximize_hold, convex, institutional, maximize_plus, aggressive_120x
+DEPRECATED / FAILED
+--------------------------------------------------------------------------------
+  ml_overlay aggressive v3 (~$4.0M, ~48% DD, runtime noise) — use ml_overlay_aggressive only to re-test
+  maximize_hold, convex, institutional, maximize_plus, aggressive_120x
 
 MAXIMIZE — ONE FILE
 --------------------------------------------------------------------------------
   conditional_sector_rotation_improved.py  →  main.py
   ACTIVE_BASELINE = "maximize"
 
-ML OVERLAY v3 AGGRESSIVE — TWO FILES (default ml_overlay)
+ML OVERLAY v2 (DEFAULT) — TWO FILES
 --------------------------------------------------------------------------------
   main.py + csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
 
-  v3 changes vs v2 (~$4.4M):
-    - No hard BSV veto on bull sleeves (TQQQ/SOXL/QLD/QQQ) — size 0.93–1.18x only
-    - Slight gross cap 1.08; retrain every 42d; L2 reg; +SPY drawdown feature
-    - Label: TQQQ 5d return > 2% (not just >0)
+  Logs: ML_OVERLAY v2 defensive..., ML_TRAIN prob=... mode=defensive
 
-  Logs: ML_OVERLAY v3 AGGRESSIVE..., ML_TRAIN prob=... mode=aggressive
-
-  Prior defensive v2 (QC parameter panel): ml_overlay_mode=defensive
-  Or call apply_ml_defensive_profile from csr_ml_overlay in custom entry.
-
-BENCHMARK: benchmark_tqqq_buy_hold.py (separate project)
+ML OVERLAY AGGRESSIVE (optional experiment) — TWO FILES
+--------------------------------------------------------------------------------
+  ACTIVE_BASELINE = "ml_overlay_aggressive"
 
 ================================================================================
