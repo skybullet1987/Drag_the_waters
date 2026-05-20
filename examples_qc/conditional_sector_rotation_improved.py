@@ -528,7 +528,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if getattr(self, "maximize_hold_active", False):
             self.Debug(f"ACTIVE_PROFILE=maximize_hold (max_gross={self.max_gross_exposure:.2f}).")
         elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
-            self.Debug("ACTIVE_PROFILE=ml_overlay (maximize + logistic overlay).")
+            self.Debug("ACTIVE_PROFILE=ml_overlay (%s)." % getattr(self, "ml_overlay_mode", "aggressive"))
         elif self.maximize_backtest_equity:
             self.Debug(f"ACTIVE_PROFILE=maximize (same-bar, max_gross={self.max_gross_exposure:.2f}).")
         elif getattr(self, "_preset_force_institutional", False) or (

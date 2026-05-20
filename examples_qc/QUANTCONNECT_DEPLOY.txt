@@ -7,28 +7,31 @@ FILE SIZE: every .py file must be under 63,000 bytes.
 WHAT TO USE (2020-2026, $100k)
 --------------------------------------------------------------------------------
   maximize          ~$6M     ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files: + csr_ml_overlay.py)
-  maximize_hold       TEST     Parrot-style hold winners (2 files: + csr_hold_ext.py)
+  ml_overlay          v3 AGGRESSIVE — attempt to match/beat maximize (2 files)
+  ml_overlay v2       use ml_defensive preset — ~$4.4M / ~39% DD (reference)
 
-DEPRECATED: convex, institutional, maximize_plus, aggressive_120x
+DEPRECATED: maximize_hold, convex, institutional, maximize_plus, aggressive_120x
 
 MAXIMIZE — ONE FILE
 --------------------------------------------------------------------------------
   conditional_sector_rotation_improved.py  →  main.py
   ACTIVE_BASELINE = "maximize"
 
-MAXIMIZE_HOLD — TWO FILES (experiment: fewer trades, let winners run)
---------------------------------------------------------------------------------
-  main.py  +  csr_hold_ext.py
-  ACTIVE_BASELINE = "maximize_hold"
-
-  Same signals as maximize (same-bar). While in TQQQ/SOXL/QLD/TECL/SPXL:
-    - Hold until +15% gain OR 8% portfolio trail from peak OR trend break (SMA20)
-  Logs: MAXIMIZE_HOLD..., ACTIVE_PROFILE=maximize_hold
-
-ML OVERLAY — TWO FILES
+ML OVERLAY v3 AGGRESSIVE — TWO FILES (default ml_overlay)
 --------------------------------------------------------------------------------
   main.py + csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
+
+  v3 changes vs v2 (~$4.4M):
+    - No hard BSV veto on bull sleeves (TQQQ/SOXL/QLD/QQQ) — size 0.93–1.18x only
+    - Slight gross cap 1.08; retrain every 42d; L2 reg; +SPY drawdown feature
+    - Label: TQQQ 5d return > 2% (not just >0)
+
+  Logs: ML_OVERLAY v3 AGGRESSIVE..., ML_TRAIN prob=... mode=aggressive
+
+  Prior defensive v2 (QC parameter panel): ml_overlay_mode=defensive
+  Or call apply_ml_defensive_profile from csr_ml_overlay in custom entry.
+
+BENCHMARK: benchmark_tqqq_buy_hold.py (separate project)
 
 ================================================================================
