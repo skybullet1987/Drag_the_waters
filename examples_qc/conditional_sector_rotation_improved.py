@@ -283,6 +283,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             _base = str(globals().get("ACTIVE_BASELINE", "maximize")).strip().lower()
             if _base in ("institutional", "inst", "low_dd", "lowdd"):
                 self._apply_institutional_profile()
+            elif _base in ("ml_overlay_aggressive", "ml_aggressive"):
+                from csr_ml_overlay import apply_ml_aggressive_profile
+                apply_ml_aggressive_profile(self)
             elif _base in ("ml_overlay", "ml_maximize", "ml", "track2"):
                 self._apply_ml_maximize_profile()
             elif _base in ("maximize_hold", "hold", "let_winners_run"):
