@@ -1,4 +1,5 @@
-# QuantConnect: upload with main.py when ACTIVE_BASELINE=maximize_hold
+# DEPRECATED May 2026: ~$327k / 66% DD vs maximize ~$6M. Blocks exits before +15% gain.
+# Do not use. Kept for reference only.
 
 _HOLD_TICKERS = frozenset({"TQQQ", "SOXL", "QLD", "TECL", "SPXL"})
 
@@ -12,8 +13,7 @@ def apply_maximize_hold_profile(algo):
     algo._hold_entry_price = {}
     algo._hold_peak_pv = {}
     algo.Debug(
-        "MAXIMIZE_HOLD: maximize + hold winners (trail=%.0f%%, min_gain=%.0f%%)."
-        % (algo.hold_trail_pct * 100, algo.hold_min_gain * 100)
+        "MAXIMIZE_HOLD (DEPRECATED): failed experiment — use maximize or ml_overlay."
     )
     algo.maximize_backtest_equity = True
     algo._apply_maximize_backtest_equity_profile()
