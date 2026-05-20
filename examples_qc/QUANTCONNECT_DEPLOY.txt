@@ -4,41 +4,31 @@ Conditional Sector Rotation — QuantConnect deployment
 
 FILE SIZE: every .py file must be under 63,000 bytes.
 
-BENCHMARKS (2020-01-01 .. 2026-05-17, $100k — your runs)
+WHAT TO USE (2020-2026, $100k)
 --------------------------------------------------------------------------------
-  maximize          ~$6.0M   ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files)
-  aggressive_120x     TBD      beat $6M?   higher DD (2 files)
-  maximize_plus       TBD      step up     (2 files)
-  convex              FAILED ~$628k — do not use
-  institutional       ~$280k   not max-equity
+  maximize          ~$6M     ~90% CAGR   ~45% DD   (1 file)
+  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files: + csr_ml_overlay.py)
+  maximize_hold       TEST     Parrot-style hold winners (2 files: + csr_hold_ext.py)
+
+DEPRECATED: convex, institutional, maximize_plus, aggressive_120x
 
 MAXIMIZE — ONE FILE
 --------------------------------------------------------------------------------
   conditional_sector_rotation_improved.py  →  main.py
   ACTIVE_BASELINE = "maximize"
 
-AGGRESSIVE (test beating ~$6M) — TWO FILES
+MAXIMIZE_HOLD — TWO FILES (experiment: fewer trades, let winners run)
 --------------------------------------------------------------------------------
-  main.py  +  csr_aggressive_ext.py
+  main.py  +  csr_hold_ext.py
+  ACTIVE_BASELINE = "maximize_hold"
 
-  Step 1 (moderate):
-    ACTIVE_BASELINE = "maximize_plus"
-    → maximize signals, gross 1.15, vol 0.65 / 0.78 / 0.52
-
-  Step 2 (full hot):
-    ACTIVE_BASELINE = "aggressive_120x"
-    → maximize + bundle: vol 0.75/0.85/0.55, gross ~1.35, tighter SOXL/UVXY RSI
-
-  Logs: MAXIMIZE_PLUS or AGGRESSIVE_120X baseline..., EXECUTION_MODE=same_bar (...)
-
-  QC UI: research_preset=aggressive_120x or maximize_plus
+  Same signals as maximize (same-bar). While in TQQQ/SOXL/QLD/TECL/SPXL:
+    - Hold until +15% gain OR 8% portfolio trail from peak OR trend break (SMA20)
+  Logs: MAXIMIZE_HOLD..., ACTIVE_PROFILE=maximize_hold
 
 ML OVERLAY — TWO FILES
 --------------------------------------------------------------------------------
   main.py + csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
-
-Do NOT upload csr_profiles.py for these baselines.
 
 ================================================================================
