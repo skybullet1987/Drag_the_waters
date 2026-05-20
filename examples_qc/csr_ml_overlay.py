@@ -3,7 +3,8 @@ from AlgorithmImports import *
 
 # endregion
 
-# QuantConnect: upload with main.py. No multiple inheritance — use CSRMLOverlayHelper + wire_ml_overlay().
+# QuantConnect: upload with main.py when ACTIVE_BASELINE=ml_overlay
+# v3 aggressive: size up when confident — no hard BSV veto (v2 veto crushed equity).
 
 
 class CSRMLOverlayHelper(object):
@@ -13,8 +14,36 @@ class CSRMLOverlayHelper(object):
         self.a = algo
 
     def apply_ml_maximize_profile(self):
+        """Default ml_overlay: aggressive v3 (beat-maximize attempt)."""
+        self.apply_ml_aggressive_profile()
+
+    def apply_ml_aggressive_profile(self):
         a = self.a
-        a.Debug("ML_OVERLAY: maximize + logistic filter (numpy, periodic retrain).")
+        a.Debug(
+            "ML_OVERLAY v3 AGGRESSIVE: size-only (no BSV veto), floor=0.93 boost=1.18, gross~1.08."
+        )
+        a.ml_overlay_mode = "aggressive"
+        a.maximize_backtest_equity = True
+        a._apply_maximize_backtest_equity_profile()
+        a.disable_bull_uvxy = True
+        a.use_ml_overlay = True
+        a.ml_train_bars = 500
+        a.ml_forward_days = 5
+        a.ml_retrain_days = 42
+        a.ml_l2 = 0.015
+        a.ml_veto_prob = 0.12
+        a.ml_floor_mult = 0.93
+        a.ml_boost_cap = 1.18
+        a.ml_bear_offensive_prob = 0.28
+        a.ml_filter_bear_offensive = True
+        a.max_gross_exposure = max(float(a.max_gross_exposure), 1.08)
+        a.max_position_weight = max(float(a.max_position_weight), 1.08)
+
+    def apply_ml_defensive_profile(self):
+        """Prior v2 (lighter veto) — ~$4.4M / ~39% DD reference."""
+        a = self.a
+        a.Debug("ML_OVERLAY v2 defensive: veto@0.32, floor@0.78, boost@1.12.")
+        a.ml_overlay_mode = "defensive"
         a.maximize_backtest_equity = True
         a._apply_maximize_backtest_equity_profile()
         a.disable_bull_uvxy = True
@@ -22,7 +51,7 @@ class CSRMLOverlayHelper(object):
         a.ml_train_bars = 500
         a.ml_forward_days = 5
         a.ml_retrain_days = 63
-        # v2: lighter touch — v1 veto@0.42/floor@0.45 capped ~$2.4M vs ~$6M maximize
+        a.ml_l2 = 0.01
         a.ml_veto_prob = 0.32
         a.ml_floor_mult = 0.78
         a.ml_boost_cap = 1.12
@@ -41,7 +70,10 @@ class CSRMLOverlayHelper(object):
         if w is not None:
             a._ml_weights = w
             a._ml_last_train_day = d
-            a.Debug("ML_TRAIN prob=%.3f" % a._ml_last_prob)
+            a.Debug("ML_TRAIN prob=%.3f mode=%s" % (
+                a._ml_last_prob,
+                getattr(a, "ml_overlay_mode", "aggressive"),
+            ))
 
     def hist_closes(self, ticker, n):
         a = self.a
@@ -69,6 +101,16 @@ class CSRMLOverlayHelper(object):
         o, p = c[-(d + 1)], c[-1]
         return (p / o - 1.0) if o > 0 and p > 0 else 0.0
 
+    @staticmethod
+    def spy_dd(spy, i, lb=200):
+        if spy is None or i < lb:
+            return 0.0
+        win = spy[i - lb : i + 1]
+        peak = max(win)
+        if peak <= 0:
+            return 0.0
+        return max(0.0, 1.0 - spy[i] / peak)
+
     def build_xy(self, spy, qqq, tqqq, soxl, vix, i, fwd):
         if i < 220 or i + fwd >= len(tqqq):
             return None
@@ -84,7 +126,11 @@ class CSRMLOverlayHelper(object):
             vs = sum(vix[i - 19 : i + 1]) / 20.0
             if vs > 0:
                 vz = vix[i] / vs - 1.0
-        y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0 else 0.0
+        mode = getattr(self.a, "ml_overlay_mode", "aggressive")
+        if mode == "aggressive":
+            y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0.02 else 0.0
+        else:
+            y = 1.0 if (tqqq[i + fwd] / st - 1.0) > 0 else 0.0
         x = [
             1.0,
             spy_tr,
@@ -93,6 +139,7 @@ class CSRMLOverlayHelper(object):
             self.nret(tqqq[: i + 1], 20) - self.nret(soxl[: i + 1], 20),
             rv,
             vz,
+            self.spy_dd(spy, i),
         ]
         return x, y
 
@@ -120,11 +167,12 @@ class CSRMLOverlayHelper(object):
         X = np.asarray(rows, dtype=float)
         y = np.asarray(ys, dtype=float)
         w = np.zeros(X.shape[1])
-        lr = 0.12 / max(1, len(y))
-        for _ in range(100):
+        lr = 0.10 / max(1, len(y))
+        lam = float(getattr(a, "ml_l2", 0.015))
+        for _ in range(120):
             z = np.clip(X.dot(w), -18.0, 18.0)
             p = 1.0 / (1.0 + np.exp(-z))
-            w -= lr * (X.T.dot(p - y) / len(y))
+            w -= lr * (X.T.dot(p - y) / len(y) + lam * w)
         a._ml_last_prob = float(1.0 / (1.0 + np.exp(-float(X[-1].dot(w)))))
         return [float(v) for v in w]
 
@@ -155,18 +203,31 @@ class CSRMLOverlayHelper(object):
         p = self.bull_probability()
         if ticker not in a._ml_bull_tickers:
             return 1.0
+        lo = float(a.ml_floor_mult)
+        hi = float(a.ml_boost_cap)
+        mode = getattr(a, "ml_overlay_mode", "aggressive")
+        if mode == "aggressive":
+            veto = float(a.ml_veto_prob)
+            span = max(1e-6, 1.0 - veto)
+            s = max(0.0, min(1.0, (p - veto) / span))
+            return min(hi, max(lo, lo + (hi - lo) * s))
         if p < float(a.ml_veto_prob):
             return 0.0
         span = max(1e-6, 1.0 - float(a.ml_veto_prob))
         s = (p - float(a.ml_veto_prob)) / span
-        lo, hi = float(a.ml_floor_mult), float(a.ml_boost_cap)
         return min(hi, max(lo, lo + (1.0 - lo) * s))
 
     def apply_signal_filter(self, signal):
         a = self.a
         if not getattr(a, "use_ml_overlay", False) or signal is None:
             return signal
+        mode = getattr(a, "ml_overlay_mode", "aggressive")
         p = self.bull_probability()
+        if mode == "aggressive":
+            if getattr(a, "ml_filter_bear_offensive", True) and signal in a._ml_bear_offensive:
+                if p < float(getattr(a, "ml_bear_offensive_prob", 0.28)):
+                    return a.risk_off_ticker
+            return signal
         if signal in a._ml_bull_tickers and p < float(a.ml_veto_prob):
             return a.risk_off_ticker
         if getattr(a, "ml_filter_bear_offensive", True) and signal in a._ml_bear_offensive:
@@ -177,11 +238,14 @@ class CSRMLOverlayHelper(object):
 
 
 def wire_ml_overlay(algo):
-    """Attach ML helper; call from Initialize when use_ml_overlay is True."""
     algo._mlh = CSRMLOverlayHelper(algo)
 
 
 def apply_ml_maximize_profile(algo):
-    """Entry for ACTIVE_BASELINE=ml_overlay (no mixin on QCAlgorithm)."""
     wire_ml_overlay(algo)
     algo._mlh.apply_ml_maximize_profile()
+
+
+def apply_ml_defensive_profile(algo):
+    wire_ml_overlay(algo)
+    algo._mlh.apply_ml_defensive_profile()
