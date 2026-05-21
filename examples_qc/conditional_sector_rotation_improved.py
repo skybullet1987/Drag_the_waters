@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
 # maximize_hold → +csr_hold_ext.py. See QUANTCONNECT_DEPLOY.txt.
-# ACTIVE_BASELINE: maximize | maximize_hold | ml_overlay | institutional
+# ACTIVE_BASELINE: maximize | ml_overlay | ml_overlay_diversified | institutional
 
 USE_QC_UI_PARAMETERS = False
 ACTIVE_BASELINE = "maximize"  # maximize | maximize_hold | ml_overlay | institutional
@@ -62,6 +62,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self._preset_force_ml_overlay = preset in (
             "ml_overlay", "ml_maximize", "ml", "track2",
+        )
+        self._preset_force_ml_div = preset in (
+            "ml_overlay_diversified", "ml_div", "ml_diversified",
         )
         self._preset_force_convex = preset in (
             "convex", "crisis", "convexity", "low_dd_convex",
@@ -288,6 +291,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 apply_ml_aggressive_profile(self)
             elif _base in ("ml_overlay", "ml_maximize", "ml", "track2"):
                 self._apply_ml_maximize_profile()
+            elif _base in ("ml_overlay_diversified", "ml_div", "ml_diversified"):
+                from csr_defensive_sleeve_ext import apply_ml_defensive_diversified_profile
+                apply_ml_defensive_diversified_profile(self)
             elif _base in ("maximize_hold", "hold", "let_winners_run"):
                 from csr_hold_ext import apply_maximize_hold_profile
                 apply_maximize_hold_profile(self)
@@ -334,6 +340,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self._apply_production_safe_profile()
             elif self._preset_force_institutional:
                 self._apply_institutional_profile()
+            elif self._preset_force_ml_div:
+                from csr_defensive_sleeve_ext import apply_ml_defensive_diversified_profile
+                apply_ml_defensive_diversified_profile(self)
             elif self._preset_force_ml_overlay:
                 self._apply_ml_maximize_profile()
             elif self._preset_force_maximize_hold:
@@ -376,6 +385,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if getattr(self, "use_ml_overlay", False) and not hasattr(self, "_mlh"):
             from csr_ml_overlay import wire_ml_overlay
             wire_ml_overlay(self)
+        if getattr(self, "use_defensive_sleeve", False) and not hasattr(self, "_dsh"):
+            from csr_defensive_sleeve_ext import wire_defensive_sleeve
+            wire_defensive_sleeve(self)
 
         # ── Universe ────────────────────────────────────────────────────
         self.tickers = [
@@ -383,6 +395,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             "TECL", "SPXL", "SQQQ", "TECS", "BSV",
             "SOXL", "SOXS", "SVXY", "FAS",
         ]
+        for _dt in getattr(self, "_defensive_sleeve_extra", ()):
+            if _dt not in self.tickers:
+                self.tickers.append(_dt)
         if self.include_defensive_etfs:
             self.tickers.extend(["TLT", "GLD"])
         if self.include_leveraged_defensives:
@@ -451,8 +466,6 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             )
 
         self.SetBenchmark(self.symbols[self.benchmark_ticker])
-        self.Debug(f"Benchmark={self.benchmark_ticker} (set benchmark_ticker parameter to override)")
-
         warm = max(
             260,
             self.spy_sma_period + 60,
@@ -530,6 +543,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         if getattr(self, "maximize_hold_active", False):
             self.Debug(f"ACTIVE_PROFILE=maximize_hold (max_gross={self.max_gross_exposure:.2f}).")
+        elif getattr(self, "use_defensive_sleeve", False) and getattr(self, "use_ml_overlay", False):
+            self.Debug("ACTIVE_PROFILE=ml_overlay_diversified (defensive sleeve).")
         elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
             self.Debug("ACTIVE_PROFILE=ml_overlay (%s)." % getattr(self, "ml_overlay_mode", "aggressive"))
         elif self.maximize_backtest_equity:
@@ -571,6 +586,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return h.overlay_multiplier(ticker)
         return 1.0
 
+    def _ds_apply(self, signal):
+        h = getattr(self, "_dsh", None)
+        return h.apply_signal(signal) if h else signal
+
     def _apply_institutional_profile(self):
         from csr_institutional_ext import apply_institutional_profile
         apply_institutional_profile(self)
@@ -580,83 +599,16 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         apply_convex_profile(self)
 
     def _apply_production_safe_profile(self):
-        self.Debug("PRODUCTION_SAFE: EOD, rails, bands, drawdown guard.")
-        self.maximize_backtest_equity = False
-        self.use_eod_next_bar_execution = True
-        self.use_rebalance_bands = True
-        self.min_weight_change_to_trade = max(self.min_weight_change_to_trade, 0.02)
-        if self.max_daily_weight_change <= 0.0:
-            self.max_daily_weight_change = 0.15
-        if self.max_days_without_rebalance <= 0:
-            self.max_days_without_rebalance = 5
-        self.vol_etp_confirm_days = max(self.vol_etp_confirm_days, 1)
-        if self.max_consecutive_vol_etp_days <= 0:
-            self.max_consecutive_vol_etp_days = 5
-        self.gap_cooldown_days = max(self.gap_cooldown_days, 3)
-        self.use_drawdown_guard = True
-        self.use_tiered_drawdown = True
-        self.use_vol_targeting = True
-        self.use_regime_vol_target = True
+        from csr_profiles import apply_production_safe_profile
+        apply_production_safe_profile(self)
 
     def _apply_maximize_backtest_equity_profile(self):
-        self.Debug(
-            "MAXIMIZE_BACKTEST_EQUITY: same-bar, rails off, hot vol targets (not for live)."
-        )
-        self.use_eod_next_bar_execution = False
-        self.use_rebalance_bands = False
-        self.min_weight_change_to_trade = 0.0
-        self.max_daily_weight_change = 0.0
-        self.max_days_without_rebalance = 0
-        self.vol_etp_confirm_days = 0
-        self.max_consecutive_vol_etp_days = 0
-        self.gap_cooldown_days = 0
-        self.use_drawdown_guard = False
-        self._drawdown_guard_active = False
-        self.use_tiered_drawdown = False
-        self.use_vol_targeting = True
-        self.use_regime_vol_target = True
-        self.target_ann_vol = 0.58
-        self.target_ann_vol_bull = 0.68
-        self.target_ann_vol_bear = 0.48
-        self.min_hold_days = 0
-        self.th_rsi_qqq_bull_uvxy = 90.0
-        self.th_rsi_spy_bull_uvxy = 89.0
-        self.th_rsi_uvxy_elevated = 82.0
-        self.th_rsi_uvxy_extreme = 93.0
-        self.th_rsi_soxl_bull = 34.0
-        if self.maximize_include_svxy:
-            self.use_svxy_calm = True
-        if self.maximize_disable_vol_target:
-            self.use_vol_targeting = False
+        from csr_profiles import apply_maximize_backtest_equity_profile
+        apply_maximize_backtest_equity_profile(self)
 
     def _apply_aggressive_120x_research_bundle(self):
-        """
-        Opt-in only. Hot gross, vol targets, and UVXY/SOXL logic for 120x experiments.
-        Default maximize (~60x) is unchanged when this bundle is not enabled.
-        """
-        self.Debug("AGGRESSIVE_120X: hotter vol, max_gross~1.35 (opt-in research).")
-        self.target_ann_vol = 0.75
-        self.target_ann_vol_bull = 0.85
-        self.target_ann_vol_bear = 0.55
-        self.max_gross_exposure = max(
-            1.0, min(2.0, self._float_parameter("max_gross_exposure", 1.35))
-        )
-        self.max_position_weight = max(
-            0.01,
-            min(
-                self.max_gross_exposure,
-                self._float_parameter("max_position_weight", self.max_gross_exposure),
-            ),
-        )
-        self.th_rsi_qqq_bull_uvxy = 97.0
-        self.th_rsi_spy_bull_uvxy = 96.0
-        self.th_rsi_soxl_bull = 26.0
-        self.bull_uvxy_require_both = True
-        self._soxl_skip_spy_rsi_filter = True
-        if self.maximize_include_svxy:
-            self.use_svxy_calm = True
-        if self.maximize_disable_vol_target:
-            self.use_vol_targeting = False
+        from csr_profiles import apply_aggressive_120x_research_bundle
+        apply_aggressive_120x_research_bundle(self)
 
     def _parameter_was_set(self, name):
         if not getattr(self, "_use_qc_ui_parameters", True):
@@ -665,61 +617,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         return raw is not None and str(raw).strip() != ""
 
     def _reload_user_overrides_after_profile(self):
-        """Apply QC parameters only when explicitly set in the project."""
-        if not getattr(self, "_use_qc_ui_parameters", True):
-            return
-        if self._parameter_was_set("max_gross_exposure"):
-            self.max_gross_exposure = max(
-                1.0,
-                min(2.0, self._float_parameter("max_gross_exposure", 1.0)),
-            )
-        if self._parameter_was_set("max_position_weight"):
-            self.max_position_weight = max(
-                0.01,
-                min(
-                    self.max_gross_exposure,
-                    self._float_parameter("max_position_weight", 1.0),
-                ),
-            )
-        if self._parameter_was_set("target_ann_vol"):
-            self.target_ann_vol = max(
-                0.01, self._float_parameter("target_ann_vol", self.target_ann_vol)
-            )
-        if self._parameter_was_set("target_ann_vol_bull"):
-            self.target_ann_vol_bull = max(
-                0.01,
-                self._float_parameter("target_ann_vol_bull", self.target_ann_vol_bull),
-            )
-        if self._parameter_was_set("target_ann_vol_bear"):
-            self.target_ann_vol_bear = max(
-                0.01,
-                self._float_parameter("target_ann_vol_bear", self.target_ann_vol_bear),
-            )
-        if self._parameter_was_set("th_rsi_qqq_bull_uvxy"):
-            self.th_rsi_qqq_bull_uvxy = self._float_parameter(
-                "th_rsi_qqq_bull_uvxy", self.th_rsi_qqq_bull_uvxy
-            )
-        if self._parameter_was_set("th_rsi_spy_bull_uvxy"):
-            self.th_rsi_spy_bull_uvxy = self._float_parameter(
-                "th_rsi_spy_bull_uvxy", self.th_rsi_spy_bull_uvxy
-            )
-        if self._parameter_was_set("th_rsi_soxl_bull"):
-            self.th_rsi_soxl_bull = self._float_parameter(
-                "th_rsi_soxl_bull", self.th_rsi_soxl_bull
-            )
-        if self._parameter_was_set("disable_bull_uvxy"):
-            self.disable_bull_uvxy = self._bool_parameter("disable_bull_uvxy", False)
-        if self._parameter_was_set("bull_uvxy_require_both"):
-            self.bull_uvxy_require_both = self._bool_parameter(
-                "bull_uvxy_require_both", False
-            )
-        if self._parameter_was_set("maximize_disable_vol_target"):
-            if self._bool_parameter("maximize_disable_vol_target", False):
-                self.use_vol_targeting = False
-        if self._parameter_was_set("use_vol_targeting"):
-            self.use_vol_targeting = self._bool_parameter(
-                "use_vol_targeting", self.use_vol_targeting
-            )
+        from csr_profiles import reload_user_overrides_after_profile
+        reload_user_overrides_after_profile(self)
 
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
@@ -759,6 +658,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
         signal = self._ml_apply_signal_filter(signal)
+        signal = self._ds_apply(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
             if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
@@ -779,6 +679,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             target_ticker, base_weight = self.risk_off_ticker, 1.0
         else:
             base_weight *= ml_m
+        target_ticker = self._ds_apply(target_ticker)
 
         base_weight = max(0.0, min(self._gross_cap(), float(base_weight)))
 
@@ -881,6 +782,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         signal = self._apply_vol_etp_rails(raw_signal)
         signal = self._apply_gap_cooldown_filter(signal)
         signal = self._ml_apply_signal_filter(signal)
+        signal = self._ds_apply(signal)
 
         if self.use_drawdown_guard and self._drawdown_guard_active:
             if getattr(self, "institutional_soft_drawdown", False) and self._effective_is_bull_regime():
@@ -901,6 +803,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             target_ticker, w = self.risk_off_ticker, 1.0
         else:
             w *= ml_m
+        target_ticker = self._ds_apply(target_ticker)
         w = max(0.0, min(self._gross_cap(), float(w)))
 
         if self._min_hold_blocks_switch_target(target_ticker):
