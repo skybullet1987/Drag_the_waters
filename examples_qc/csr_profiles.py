@@ -225,3 +225,29 @@ def reload_user_overrides_after_profile(algo):
         raw = algo.GetParameter("vol_anchor_ticker")
         if raw is not None and str(raw).strip() != "":
             algo.vol_anchor_ticker = str(raw).strip().upper()
+
+
+def apply_aggressive_120x_research_bundle(algo):
+    algo.Debug("AGGRESSIVE_120X: hotter vol, max_gross~1.35 (opt-in research).")
+    algo.target_ann_vol = 0.75
+    algo.target_ann_vol_bull = 0.85
+    algo.target_ann_vol_bear = 0.55
+    algo.max_gross_exposure = max(
+        1.0, min(2.0, algo._float_parameter("max_gross_exposure", 1.35))
+    )
+    algo.max_position_weight = max(
+        0.01,
+        min(
+            algo.max_gross_exposure,
+            algo._float_parameter("max_position_weight", algo.max_gross_exposure),
+        ),
+    )
+    algo.th_rsi_qqq_bull_uvxy = 97.0
+    algo.th_rsi_spy_bull_uvxy = 96.0
+    algo.th_rsi_soxl_bull = 26.0
+    algo.bull_uvxy_require_both = True
+    algo._soxl_skip_spy_rsi_filter = True
+    if algo.maximize_include_svxy:
+        algo.use_svxy_calm = True
+    if algo.maximize_disable_vol_target:
+        algo.use_vol_targeting = False

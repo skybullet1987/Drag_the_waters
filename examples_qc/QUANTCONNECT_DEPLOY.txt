@@ -6,8 +6,9 @@ FILE SIZE: every .py file must be under 63,000 bytes.
 
 WHAT TO USE (2020-2026, $100k)
 --------------------------------------------------------------------------------
-  maximize          ~$6M     ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay          ~$4.4M   ~81%        ~39% DD   (2 files)  ← DEFAULT
+  maximize                ~$6M     ~90% CAGR   ~45% DD   (1 file)
+  ml_overlay                ~$4.4M   ~81%        ~39% DD   (2 files)
+  ml_overlay_diversified    NEW      bear/flat sleeve ETFs + ml_overlay v2 (3 files)
 
 DEPRECATED / FAILED
 --------------------------------------------------------------------------------
@@ -19,12 +20,21 @@ MAXIMIZE — ONE FILE
   conditional_sector_rotation_improved.py  →  main.py
   ACTIVE_BASELINE = "maximize"
 
-ML OVERLAY v2 (DEFAULT) — TWO FILES
+ML OVERLAY v2 — TWO FILES
 --------------------------------------------------------------------------------
   main.py + csr_ml_overlay.py
   ACTIVE_BASELINE = "ml_overlay"
 
   Logs: ML_OVERLAY v2 defensive..., ML_TRAIN prob=... mode=defensive
+
+ML OVERLAY DIVERSIFIED (lower-DD research) — THREE FILES
+--------------------------------------------------------------------------------
+  main.py + csr_ml_overlay.py + csr_defensive_sleeve_ext.py
+  ACTIVE_BASELINE = "ml_overlay_diversified"
+
+  Bear/flat sleeve: DBMF, TLT, GLD, DBC, XLV (scored pick; BSV fallback).
+  Flat band: regime score 0.36–0.52 suppresses TECL/SPXL → sleeve.
+  Logs: ML_OVERLAY_DIV..., ML_OVERLAY v2 defensive...
 
 ML OVERLAY AGGRESSIVE (optional experiment) — TWO FILES
 --------------------------------------------------------------------------------
