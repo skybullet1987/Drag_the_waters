@@ -1,0 +1,58 @@
+================================================================================
+CSR — Interactive Brokers paper / live (QuantConnect)
+================================================================================
+
+DO NOT deploy maximize or ml_overlay (same-bar) to IB real money.
+Use ib_paper: EOD plan -> next open, rebalance bands, vol-ETP confirm, DD guard.
+
+FILES (2)
+--------------------------------------------------------------------------------
+  conditional_sector_rotation_improved.py  ->  main.py
+  csr_ml_overlay.py
+
+In main.py set:
+  USE_QC_UI_PARAMETERS = False
+  ACTIVE_BASELINE = "ib_paper"
+
+QC cloud alternative (parameter panel):
+  research_preset=ib_paper
+  headline_qc_default=false
+  production_safe_defaults=true
+  use_ml_overlay=true
+
+QUANTCONNECT LIVE / PAPER NODE
+--------------------------------------------------------------------------------
+  1. Brokerage: Interactive Brokers
+  2. Deploy both files above
+  3. Warm-up: SetStartDate at least 260 trading days before live start
+     (e.g. start algorithm 2016-01-01 if trading live in 2026)
+  4. Cash: match paper account size
+  5. Confirm margin / permissions on: TQQQ SOXL UVXY TECL SPXL BSV etc.
+
+EXPECTED LOGS
+--------------------------------------------------------------------------------
+  IB_PAPER: ml_overlay v2 + production_safe ...
+  ACTIVE_PROFILE=ib_paper ...
+  EXECUTION_MODE should NOT print same_bar
+  ML_TRAIN prob=... mode=defensive
+
+OPTIONAL BACKTEST (reconcile paper rules on history)
+--------------------------------------------------------------------------------
+  Same ACTIVE_BASELINE=ib_paper
+  SetStartDate 2016-01-01 (or trade_start_year=2016)
+  constant_slippage_per_share=0.001
+  Expect LOWER return than 10y maximize; similar SHAPE to paper (EOD, fewer fills)
+
+PAPER TEST CHECKLIST (stop rules, not calendar)
+--------------------------------------------------------------------------------
+  [ ] 30+ round-trips without recurring order errors
+  [ ] One volatile / pullback period observed
+  [ ] Margin OK on 3x and vol ETPs
+  [ ] Drawdown behavior acceptable (not 50% maximize DD — typically milder)
+  [ ] Compare order timing to EOD backtest on same dates
+
+RISK
+--------------------------------------------------------------------------------
+  Leveraged ETFs. Peak DD can still be large. Start small live fraction only after paper.
+
+================================================================================

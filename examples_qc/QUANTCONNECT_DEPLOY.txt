@@ -4,40 +4,31 @@ Conditional Sector Rotation — QuantConnect deployment
 
 FILE SIZE: every .py file must be under 63,000 bytes.
 
-WHAT TO USE (2020-2026, $100k)
+IB PAPER / LIVE (recommended for IBKR) — TWO FILES
 --------------------------------------------------------------------------------
-  maximize                ~$6M     ~90% CAGR   ~45% DD   (1 file)
-  ml_overlay                ~$4.4M   ~81%        ~39% DD   (2 files)
-  ml_overlay_diversified    NEW      bear/flat sleeve ETFs + ml_overlay v2 (3 files)
+  See IB_PAPER_DEPLOY.txt
+
+  main.py + csr_ml_overlay.py
+  ACTIVE_BASELINE = "ib_paper"
+
+  EOD next-bar + ML v2 defensive + rails/DD guard (NOT same-bar maximize).
+
+RESEARCH BACKTESTS (2016+ or 2020-2026, $100k)
+--------------------------------------------------------------------------------
+  maximize                ~346x (10y)   ~75% CAGR   ~50% DD   (1 file) same-bar
+  ml_overlay              ~170x (10y)   ~64% CAGR   ~48% DD   (2 files)
+  ml_overlay_diversified  failed vs ml on 2020-26 (3 files) — experimental
 
 DEPRECATED / FAILED
 --------------------------------------------------------------------------------
-  ml_overlay aggressive v3 (~$4.0M, ~48% DD, runtime noise) — use ml_overlay_aggressive only to re-test
-  maximize_hold, convex, institutional, maximize_plus, aggressive_120x
+  ml_overlay aggressive, maximize_hold, convex, institutional, maximize_plus
 
 MAXIMIZE — ONE FILE
 --------------------------------------------------------------------------------
-  conditional_sector_rotation_improved.py  →  main.py
-  ACTIVE_BASELINE = "maximize"
+  ACTIVE_BASELINE = "maximize"   (backtest only — not for live)
 
 ML OVERLAY v2 — TWO FILES
 --------------------------------------------------------------------------------
-  main.py + csr_ml_overlay.py
-  ACTIVE_BASELINE = "ml_overlay"
-
-  Logs: ML_OVERLAY v2 defensive..., ML_TRAIN prob=... mode=defensive
-
-ML OVERLAY DIVERSIFIED (lower-DD research) — THREE FILES
---------------------------------------------------------------------------------
-  main.py + csr_ml_overlay.py + csr_defensive_sleeve_ext.py
-  ACTIVE_BASELINE = "ml_overlay_diversified"
-
-  Bear/flat sleeve: DBMF, TLT, GLD, DBC, XLV (scored pick; BSV fallback).
-  Flat band: regime score 0.36–0.52 suppresses TECL/SPXL → sleeve.
-  Logs: ML_OVERLAY_DIV..., ML_OVERLAY v2 defensive...
-
-ML OVERLAY AGGRESSIVE (optional experiment) — TWO FILES
---------------------------------------------------------------------------------
-  ACTIVE_BASELINE = "ml_overlay_aggressive"
+  ACTIVE_BASELINE = "ml_overlay"   (backtest; same-bar unless production_safe)
 
 ================================================================================

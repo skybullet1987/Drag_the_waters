@@ -6,10 +6,10 @@ from datetime import datetime
 
 # Conditional sector rotation (QC/IB). Each .py file must stay under 63,000 bytes.
 # maximize_hold → +csr_hold_ext.py. See QUANTCONNECT_DEPLOY.txt.
-# ACTIVE_BASELINE: maximize | ml_overlay | ml_overlay_diversified | institutional
+# ACTIVE_BASELINE: maximize | ml_overlay | ib_paper | ml_overlay_diversified
 
 USE_QC_UI_PARAMETERS = False
-ACTIVE_BASELINE = "maximize"  # maximize | maximize_hold | ml_overlay | institutional
+ACTIVE_BASELINE = "ib_paper"  # ib_paper=IB; maximize | ml_overlay = research
 
 
 
@@ -65,6 +65,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         self._preset_force_ml_div = preset in (
             "ml_overlay_diversified", "ml_div", "ml_diversified",
+        )
+        self._preset_force_ib_paper = preset in (
+            "ib_paper", "ibkr_paper", "paper", "live_paper",
         )
         self._preset_force_convex = preset in (
             "convex", "crisis", "convexity", "low_dd_convex",
@@ -294,6 +297,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             elif _base in ("ml_overlay_diversified", "ml_div", "ml_diversified"):
                 from csr_defensive_sleeve_ext import apply_ml_defensive_diversified_profile
                 apply_ml_defensive_diversified_profile(self)
+            elif _base in ("ib_paper", "ibkr_paper", "paper", "live_paper"):
+                from csr_ib_paper_ext import apply_ib_paper_profile
+                apply_ib_paper_profile(self)
             elif _base in ("maximize_hold", "hold", "let_winners_run"):
                 from csr_hold_ext import apply_maximize_hold_profile
                 apply_maximize_hold_profile(self)
@@ -336,7 +342,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 "maximize_include_svxy", False
             )
 
-            if self.production_safe_defaults:
+            if self._preset_force_ib_paper:
+                from csr_ib_paper_ext import apply_ib_paper_profile
+                apply_ib_paper_profile(self)
+            elif self.production_safe_defaults:
                 self._apply_production_safe_profile()
             elif self._preset_force_institutional:
                 self._apply_institutional_profile()
@@ -365,7 +374,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             ):
                 self._apply_aggressive_120x_research_bundle()
 
-            if self.maximize_backtest_equity or self.production_safe_defaults:
+            if (
+                self.maximize_backtest_equity
+                or self.production_safe_defaults
+                or getattr(self, "ib_paper_active", False)
+            ):
                 self._reload_user_overrides_after_profile()
 
         if not self.use_eod_next_bar_execution:
@@ -543,6 +556,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         )
         if getattr(self, "maximize_hold_active", False):
             self.Debug(f"ACTIVE_PROFILE=maximize_hold (max_gross={self.max_gross_exposure:.2f}).")
+        elif getattr(self, "ib_paper_active", False):
+            self.Debug("ACTIVE_PROFILE=ib_paper (ML v2 + EOD production_safe).")
         elif getattr(self, "use_defensive_sleeve", False) and getattr(self, "use_ml_overlay", False):
             self.Debug("ACTIVE_PROFILE=ml_overlay_diversified (defensive sleeve).")
         elif getattr(self, "use_ml_overlay", False) and self.maximize_backtest_equity:
