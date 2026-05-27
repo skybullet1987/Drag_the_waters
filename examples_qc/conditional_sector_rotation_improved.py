@@ -514,6 +514,7 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
 
         self._pending_ticker = None
         self._pending_weight = 0.0
+        self._defer_buy = None
 
         self._consec_uvxy_days = 0
         self._consec_svxy_days = 0
@@ -638,6 +639,44 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _set_holdings_buying_power_clamped(self, sym, weight, liquidate_existing=True):
+        w = max(0.0, min(self._gross_cap(), float(weight)))
+        if w <= 1e-9:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            return 0.0
+        pv = float(self.Portfolio.TotalPortfolioValue)
+        ms = max(0.50, min(1.0, float(getattr(self, "margin_safety_pct", 0.98))))
+        w_exec = min(w, ms)
+        if pv > 0:
+            try:
+                bp = float(self.Portfolio.GetBuyingPower(sym, OrderDirection.Buy))
+                if bp > 0:
+                    w_exec = min(w_exec, 0.995 * bp / pv)
+            except Exception:
+                pass
+        for _ in range(12):
+            try:
+                qty = int(self.CalculateOrderQuantity(sym, w_exec))
+            except Exception:
+                qty = 0
+            if qty != 0:
+                break
+            w_exec *= 0.98
+            if w_exec < 0.05:
+                w_exec = 0.0
+                break
+        if w_exec <= 1e-9:
+            if liquidate_existing:
+                self.Liquidate(sym)
+            return 0.0
+        if w_exec < w * 0.99:
+            self.Debug(
+                f"{self.Time:%Y-%m-%d} MARGIN_CLAMP {sym.Value} "
+                f"requested={w:.3f} exec={w_exec:.3f}"
+            )
+        self.SetHoldings(sym, w_exec, liquidate_existing)
+        return float(w_exec)
 
     # ── QC callbacks ─────────────────────────────────────────────────────
 
@@ -759,13 +798,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         prev_t = self._last_target_ticker
-        self.SetHoldings(sym, w, True)
+        w_exec = self._set_holdings_buying_power_clamped(sym, w, True)
         if getattr(self, "hold_winners_enabled", False):
             from csr_hold_ext import after_trade_open
             after_trade_open(self, t, prev_t)
         self._last_target_ticker = t
         self._last_trade_time = self.Time
-        self._last_executed_weight = w
+        self._last_executed_weight = w_exec
 
     # ── Same-bar fallback (original style) ────────────────────────────────
 
@@ -832,19 +871,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         ) < 1e-9:
             return
 
-        sym = self.symbols[target_ticker]
-        prev_t = self._last_target_ticker
-        self.SetHoldings(sym, w, True)
-        if getattr(self, "hold_winners_enabled", False):
-            from csr_hold_ext import after_trade_open
-            after_trade_open(self, target_ticker, prev_t)
-        self._last_target_ticker = target_ticker
-        self._last_trade_time = self.Time
-        self._last_executed_weight = w
-
-        self.Debug(
-            f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w:.3f} raw={raw_signal}"
-        )
+        from csr_live_margin_ext import run_samebar_trade
+        run_samebar_trade(self, target_ticker, w, raw_signal)
 
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
