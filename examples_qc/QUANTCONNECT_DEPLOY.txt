@@ -31,4 +31,12 @@ ML OVERLAY v2 — TWO FILES
 --------------------------------------------------------------------------------
   ACTIVE_BASELINE = "ml_overlay"   (backtest; same-bar unless production_safe)
 
+MAXIMIZE PAPER / LIVE — add third file
+--------------------------------------------------------------------------------
+  csr_live_margin_ext.py  (+ main.py; + csr_ml_overlay.py if ml_overlay)
+
+  Fixes IB "Insufficient buying power" on rotations (e.g. TQQQ->SOXL):
+  liquidate first, buy when flat; clamp size to buying power (margin_safety 0.95).
+  Logs: ROTATE_DEFER, ROTATE_BUY, MARGIN_CLAMP
+
 ================================================================================
