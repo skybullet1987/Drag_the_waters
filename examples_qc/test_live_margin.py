@@ -58,6 +58,19 @@ def test_margin_safe_rotation_live_only():
     assert _rot(_A()) is True
 
 
+def test_queue_live_signal_overwrites():
+    import datetime
+    import csr_live_margin_ext as ext
+
+    class _A(object):
+        Time = SimpleNamespace(date=datetime.date(2026, 5, 28))
+
+    a = _A()
+    ext.queue_live_signal(a, "SOXL", 1.0, "SOXL")
+    ext.queue_live_signal(a, "TQQQ", 0.95, "TQQQ")
+    assert a._live_day_signal[0] == "TQQQ"
+
+
 def test_deferred_buy_when_flat():
     import csr_live_margin_ext as ext
     a = _Algo()

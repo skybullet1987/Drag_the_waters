@@ -35,7 +35,8 @@ MAXIMIZE PAPER / LIVE — add third file (does NOT change backtests)
 --------------------------------------------------------------------------------
   csr_live_margin_ext.py  (+ main.py; + csr_ml_overlay.py if ml_overlay)
 
-  ROTATE_DEFER / ROTATE_BUY: LiveMode only. Backtest uses same-bar + MARGIN_CLAMP
-  (no defer) to avoid insufficient buying power on large accounts without killing CAGR.
+  ROTATE_DEFER / ROTATE_BUY: LiveMode only. Backtest uses same-bar + MARGIN_CLAMP.
+  Live paper: OnData only queues signal; one order AfterMarketClose (avoids cancel churn).
+  Log: LIVE_PAPER coalesce..., LIVE_EOD_FLUSH
 
 ================================================================================

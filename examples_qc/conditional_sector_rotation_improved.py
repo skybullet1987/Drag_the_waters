@@ -505,6 +505,9 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
                 self.TimeRules.BeforeMarketOpen(spy, 5),
                 self._before_market_open_execute,
             )
+        elif self.LiveMode:
+            from csr_live_margin_ext import wire_live_paper_schedule
+            wire_live_paper_schedule(self)
 
         # ── State ───────────────────────────────────────────────────────
         self._last_target_ticker = None
@@ -515,6 +518,8 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         self._pending_ticker = None
         self._pending_weight = 0.0
         self._defer_buy = None
+        self._live_day_signal = None
+        self._live_day_flushed_date = None
 
         self._consec_uvxy_days = 0
         self._consec_svxy_days = 0
@@ -691,6 +696,10 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def OnData(self, data):
         if not self.use_eod_next_bar_execution:
             self._run_intraday_pipeline()
+
+    def _live_flush_eod_trade(self):
+        from csr_live_margin_ext import flush_live_eod_trade
+        flush_live_eod_trade(self)
 
     # ── Scheduled: EOD plan → BMO execute ───────────────────────────────
 
@@ -877,6 +886,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         if target_ticker == self._last_target_ticker and abs(
             w - getattr(self, "_last_executed_weight", 0.0)
         ) < 1e-9:
+            return
+
+        if self.LiveMode:
+            from csr_live_margin_ext import queue_live_signal
+            queue_live_signal(self, target_ticker, w, raw_signal)
             return
 
         sym = self.symbols[target_ticker]
