@@ -1,4 +1,5 @@
-# QuantConnect: optional with main.py — paper/live margin-safe rotation.
+# QuantConnect: optional with main.py — paper/live ONLY (not backtest).
+# Backtests should use SetHoldings directly; defer+clamp kills maximize same-bar edge.
 
 
 def _any_invested(algo):
@@ -13,6 +14,8 @@ def run_samebar_trade(algo, target_ticker, weight, raw_signal):
     Paper/live: on ticker change, liquidate first; buy next pipeline tick when flat.
     Returns True if this call fully handled trading (caller should return).
     """
+    if float(getattr(algo, "margin_safety_pct", 1.0)) > 0.95:
+        algo.margin_safety_pct = 0.95
     defer = getattr(algo, "_defer_buy", None)
     if defer is not None:
         t, w, _raw = defer

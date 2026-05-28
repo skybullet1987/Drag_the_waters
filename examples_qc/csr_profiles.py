@@ -92,7 +92,7 @@ def apply_maximize_backtest_equity_profile(algo):
     algo.min_hold_days = 0
     algo.max_gross_exposure = 1.0
     algo.max_position_weight = 1.0
-    algo.margin_safety_pct = 0.95
+    algo.margin_safety_pct = 1.0
     # Skip tiny vol-scaler weight tweaks (0.0 caused ~2k orders / ~32x vs ~900 / ~60x).
     algo.min_rebalance_weight_delta = 0.03
     algo._bull_sleeve_mode = False

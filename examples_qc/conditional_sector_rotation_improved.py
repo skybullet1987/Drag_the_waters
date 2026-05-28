@@ -639,6 +639,13 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
     def _gross_cap(self):
         return max(1.0, min(2.0, float(getattr(self, "max_gross_exposure", 1.0))))
 
+    def _use_margin_safe_trades(self):
+        """Defer rotation + buying-power clamp: live/paper only (not research backtests)."""
+        forced = getattr(self, "force_margin_safe_trades", None)
+        if forced is not None:
+            return bool(forced)
+        return bool(getattr(self, "LiveMode", False))
+
     def _set_holdings_buying_power_clamped(self, sym, weight, liquidate_existing=True):
         w = max(0.0, min(self._gross_cap(), float(weight)))
         if w <= 1e-9:
@@ -798,7 +805,11 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
             return
 
         prev_t = self._last_target_ticker
-        w_exec = self._set_holdings_buying_power_clamped(sym, w, True)
+        if self._use_margin_safe_trades():
+            w_exec = self._set_holdings_buying_power_clamped(sym, w, True)
+        else:
+            self.SetHoldings(sym, w, True)
+            w_exec = w
         if getattr(self, "hold_winners_enabled", False):
             from csr_hold_ext import after_trade_open
             after_trade_open(self, t, prev_t)
@@ -871,8 +882,22 @@ class ConditionalSectorRotationImproved(QCAlgorithm):
         ) < 1e-9:
             return
 
-        from csr_live_margin_ext import run_samebar_trade
-        run_samebar_trade(self, target_ticker, w, raw_signal)
+        sym = self.symbols[target_ticker]
+        prev_t = self._last_target_ticker
+        if self._use_margin_safe_trades():
+            from csr_live_margin_ext import run_samebar_trade
+            run_samebar_trade(self, target_ticker, w, raw_signal)
+        else:
+            self.SetHoldings(sym, w, True)
+            if getattr(self, "hold_winners_enabled", False):
+                from csr_hold_ext import after_trade_open
+                after_trade_open(self, target_ticker, prev_t)
+            self._last_target_ticker = target_ticker
+            self._last_trade_time = self.Time
+            self._last_executed_weight = w
+            self.Debug(
+                f"{self.Time:%Y-%m-%d} samebar target={target_ticker} w={w:.3f} raw={raw_signal}"
+            )
 
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
