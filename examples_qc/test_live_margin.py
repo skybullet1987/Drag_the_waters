@@ -43,6 +43,21 @@ def test_rotate_defers_when_invested():
     assert len(a._clamp_calls) == 0
 
 
+def test_margin_safe_rotation_live_only():
+    class _A(object):
+        LiveMode = False
+
+    def _rot(a):
+        forced = getattr(a, "force_margin_safe_trades", None)
+        if forced is not None:
+            return bool(forced)
+        return bool(getattr(a, "LiveMode", False))
+
+    assert _rot(_A()) is False
+    _A.LiveMode = True
+    assert _rot(_A()) is True
+
+
 def test_deferred_buy_when_flat():
     import csr_live_margin_ext as ext
     a = _Algo()

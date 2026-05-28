@@ -35,7 +35,7 @@ MAXIMIZE PAPER / LIVE — add third file (does NOT change backtests)
 --------------------------------------------------------------------------------
   csr_live_margin_ext.py  (+ main.py; + csr_ml_overlay.py if ml_overlay)
 
-  Active only when LiveMode (QC paper/live node). Backtest maximize unchanged.
-  Fixes IB insufficient buying power on rotation. Logs: ROTATE_DEFER, ROTATE_BUY
+  ROTATE_DEFER / ROTATE_BUY: LiveMode only. Backtest uses same-bar + MARGIN_CLAMP
+  (no defer) to avoid insufficient buying power on large accounts without killing CAGR.
 
 ================================================================================
